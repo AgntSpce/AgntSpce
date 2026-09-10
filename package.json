@@ -117,6 +117,22 @@
       ],
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AgntSpce",
+      "runAfterFinish": true,
+      "license": "LICENSE",
+      "displayLanguageSelector": false,
+      "installerLanguages": [
+        "en_US"
+      ],
+      "deleteAppDataOnUninstall": false
+    },
     "linux": {
       "target": [
         "AppImage"

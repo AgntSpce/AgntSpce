@@ -80,7 +80,14 @@ function getInstalledSearchDir(): string {
 // The bundle is built from the upstream `semble` pip package but we expose
 // it as `agntspce-search` (FastMCP name and import). The pip package is
 // copied to `agntspce_search` at install time so the import below works.
-const MCP_BOOTSTRAP = 'import asyncio; from agntspce_search.mcp import serve; asyncio.run(serve())'
+// Fallback to `semble` keeps old installs working until the copy exists.
+const MCP_BOOTSTRAP =
+  'import asyncio\n' +
+  'try:\n' +
+  ' from agntspce_search.mcp import serve\n' +
+  'except ImportError:\n' +
+  '  from semble.mcp import serve\n' +
+  'asyncio.run(serve())'
 
 function getInstalledBinaryPath(): string {
   const searchDir = getInstalledSearchDir()
@@ -281,6 +288,22 @@ function patchMcpServerName(searchDir: string): void {
       console.warn(`[agntspce] Failed to patch installer (${pkg}):`, e)
     }
   }
+
+  // Delete stale bytecode so the patched source is recompiled on next
+  // launch. A copied __pycache__/mcp.pyc still embeds FastMCP("semble")
+  // and would otherwise keep announcing as `semble` on a different PC.
+  for (const pkg of ['semble', 'agntspce_search']) {
+    try {
+      const cacheDir = path.join(sitePkgs, pkg, '__pycache__')
+      if (fs.existsSync(cacheDir)) {
+        for (const entry of fs.readdirSync(cacheDir)) {
+          if (entry.startsWith('mcp.') && entry.endsWith('.pyc')) {
+            try { fs.rmSync(path.join(cacheDir, entry)) } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
 }
 
 function installSearch(): string | null {
@@ -440,9 +463,16 @@ function injectOpenCodeConfig(): InjectResult {
 
     if (!config.mcp) config.mcp = {}
 
+    // Remove any legacy `semble` entry so only `agntspce-search` shows.
+    let removedSemble = false
+    if (config.mcp['semble']) {
+      delete config.mcp['semble']
+      removedSemble = true
+    }
+
     const existing = JSON.stringify(config.mcp[mcpKey])
     const newValue = JSON.stringify(entryValue)
-    if (existing === newValue) return { agent: 'opencode', action: 'unchanged' }
+    if (existing === newValue && !removedSemble) return { agent: 'opencode', action: 'unchanged' }
 
     config.mcp[mcpKey] = entryValue
     if (!writeWithBackup(configPath, JSON.stringify(config, null, 2) + '\n')) {
@@ -468,9 +498,17 @@ function injectOpenCodeConfigTextFallback(configPath: string, command: string[])
   const mcpSectionRegex = /"mcp"\s*:/;
   const hasMcp = mcpSectionRegex.test(raw)
 
+  // Strip any legacy `semble` entry so only `agntspce-search` shows.
+  raw = raw.replace(/,\s*"semble"\s*:\s*\{[^}]*}/g, '').replace(/"semble"\s*:\s*\{[^}]*},\s*/g, '')
+
   let newRaw: string
   if (hasMcp) {
     if (raw.includes('"agntspce-search"')) {
+      // agntspce-search already present (and semble stripped above) — persist cleanup if changed
+      try {
+        const orig = fs.readFileSync(configPath, 'utf-8')
+        if (orig !== raw && writeWithBackup(configPath, raw)) return { agent: 'opencode', action: 'updated' }
+      } catch {}
       return { agent: 'opencode', action: 'unchanged' }
     }
     newRaw = raw.replace(/"mcp"\s*:\s*\{/, `"mcp": {\n    ${entryText},`)
