@@ -10,6 +10,20 @@ interface DeletedWs {
   deletedAt: string
 }
 
+// A prompt the user submitted to a session, stored with its
+// agntspce-prompter before/after compression. Mirrors the backend
+// PromptCompressEvent (electron/services/promptHistory.ts).
+export interface PromptCompressEvent {
+  sessionId: string
+  source: 'typed' | 'agent-start'
+  originalPrompt: string
+  compressedPrompt: string
+  originalTokens: number
+  compressedTokens: number
+  reduction: number
+  timestamp: number
+}
+
 interface Props {
   workspaces: WorkspaceInfo[]
   sessions: Record<string, SessionState>
@@ -24,14 +38,16 @@ interface Props {
   filterStats?: FilterStats
   searchEvents?: CommandEvent[]
   commandHistory?: CommandEvent[]
+  promptHistory?: PromptCompressEvent[]
   getOrchestratorStats?: () => Promise<OrchestratorStats>
 }
 
-type DashboardTab = 'workspaces' | 'tokens' | 'orchestration'
+type DashboardTab = 'workspaces' | 'tokens' | 'prompts' | 'orchestration'
 
 const TAB_ORDER: { id: DashboardTab; label: string }[] = [
   { id: 'workspaces', label: 'Workspaces' },
   { id: 'tokens', label: 'Tokens' },
+  { id: 'prompts', label: 'Prompts' },
   { id: 'orchestration', label: 'Orchestration' },
 ]
 
@@ -74,11 +90,13 @@ export default function Dashboard(props: Props) {
   const filterStats = props.filterStats || { totalOriginalBytes: 0, totalFilteredBytes: 0, totalOriginalTokens: 0, totalFilteredTokens: 0, eventsProcessed: 0 }
   const searchEvents = props.searchEvents || []
   const commandHistory = props.commandHistory || []
+  const promptHistory = props.promptHistory || []
   const getOrchestratorStats = props.getOrchestratorStats
   const totalSessions = Object.keys(sessions).length
   const activeCount = getActiveCount(sessions)
   const [showDeleted, setShowDeleted] = useState(false)
   const [tab, setTab] = useState<DashboardTab>('workspaces')
+  const [selectedPromptSession, setSelectedPromptSession] = useState<string | null>(null)
 
   const totalOriginal = filterStats.totalOriginalTokens
   const totalFiltered = filterStats.totalFilteredTokens
@@ -312,6 +330,129 @@ export default function Dashboard(props: Props) {
                 </div>
               </div>
             )}
+          </>
+        )}
+
+        {tab === 'prompts' && (
+          <>
+            {(() => {
+              const bySession = new Map<string, PromptCompressEvent[]>()
+              for (const e of [...promptHistory].sort((a, b) => b.timestamp - a.timestamp)) {
+                const list = bySession.get(e.sessionId) || []
+                list.push(e)
+                bySession.set(e.sessionId, list)
+              }
+              const groups = [...bySession.entries()].map(([sid, events]) => {
+                const sorted = [...events].sort((a, b) => b.timestamp - a.timestamp)
+                const orig = sorted.reduce((s, e) => s + e.originalTokens, 0)
+                const filt = sorted.reduce((s, e) => s + e.compressedTokens, 0)
+                const saved = orig - filt
+                return {
+                  sid,
+                  events: sorted,
+                  count: sorted.length,
+                  orig,
+                  filt,
+                  saved,
+                  pct: orig > 0 ? Math.round((saved / orig) * 100) : 0,
+                  latest: sorted.length > 0 ? sorted[0].timestamp : 0,
+                }
+              }).sort((a, b) => b.latest - a.latest)
+              if (groups.length === 0) {
+                return (
+                  <div className="dashboard-chart">
+                    <div className="dashboard-chart-header">
+                      <span className="dashboard-chart-label">Compressed Prompts</span>
+                      <span className="dashboard-chart-legend">before &rarr; after per session</span>
+                    </div>
+                    <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+                      No prompts recorded yet. Type a prompt into any agent terminal and press Enter —
+                      or start an agent with a prompt — and each before/after compression will appear here, newest first.
+                    </p>
+                  </div>
+                )
+              }
+              const active = groups.find(g => g.sid === selectedPromptSession) || groups[0]
+              return (
+                <div className="dashboard-chart">
+                  <div className="dashboard-chart-header">
+                    <span className="dashboard-chart-label">Compressed Prompts</span>
+                    <span className="dashboard-chart-legend">before &rarr; after per session, newest first</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                    {/* Session list */}
+                    <div style={{ minWidth: 220, maxWidth: 280, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {groups.map(g => {
+                        const meta = sessions[g.sid]
+                        const label = meta ? `${meta.type} · ${meta.branch}` : `session ${g.sid.slice(0, 12)}…`
+                        const isActive = g.sid === active.sid
+                        const ts = new Date(g.latest).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                        return (
+                          <button
+                            key={g.sid}
+                            onClick={() => setSelectedPromptSession(g.sid)}
+                            style={{
+                              textAlign: 'left',
+                              padding: '8px 10px',
+                              borderRadius: 6,
+                              cursor: 'pointer',
+                              background: isActive ? 'rgba(34,197,94,0.12)' : 'transparent',
+                              border: isActive ? '1px solid #22C55E' : '1px solid var(--border, #2e2e2e)',
+                              color: 'inherit',
+                            }}
+                          >
+                            <div style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+                            <div style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'monospace' }}>{g.sid.slice(0, 12)} · {ts}</div>
+                            <div style={{ fontSize: 11, color: g.pct > 0 ? '#22C55E' : 'var(--text-dim)' }}>
+                              {g.count} prompt{g.count !== 1 ? 's' : ''} · {g.saved.toLocaleString()} tokens saved ({g.pct}%)
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {/* Before/after detail, latest to oldest */}
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 560, overflowY: 'auto' }}>
+                      {active.events.map((e, i) => {
+                        const ts = new Date(e.timestamp).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                        const preview = (text: string) => {
+                          if (!text) return '(empty)'
+                          return text.length > 3000 ? `${text.slice(0, 3000)}\n…[${(text.length - 3000).toLocaleString()} more chars]…` : text
+                        }
+                        return (
+                          <div key={`${e.timestamp}-${i}`} style={{ border: '1px solid var(--border, #2e2e2e)', borderRadius: 6, padding: 8 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+                              <span style={{ fontSize: 11, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
+                                {e.source === 'agent-start' ? 'agent start prompt' : 'typed prompt'}
+                              </span>
+                              <span style={{ color: 'var(--text-dim)', whiteSpace: 'nowrap', fontSize: 11 }}>{ts}</span>
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                              {e.originalTokens.toLocaleString()} &rarr; {e.compressedTokens.toLocaleString()} tokens
+                              <span style={{ color: e.reduction > 0 ? '#22C55E' : 'var(--text-dim)', marginLeft: 6 }}>
+                                ({e.reduction}% saved)
+                              </span>
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)', marginBottom: 4 }}>Before</div>
+                                <pre style={{ margin: 0, padding: 6, borderRadius: 4, background: 'rgba(255,255,255,0.04)', fontSize: 11, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{preview(e.originalPrompt)}</pre>
+                              </div>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: '#22C55E', marginBottom: 4 }}>After (compressed)</div>
+                                <pre style={{ margin: 0, padding: 6, borderRadius: 4, background: 'rgba(34,197,94,0.07)', fontSize: 11, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{preview(e.compressedPrompt)}</pre>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
+                    Prompts are recorded when you press Enter in a terminal or start an agent with a prompt; bodies are capped at ~8KB per side.
+                  </div>
+                </div>
+              )
+            })()}
           </>
         )}
 

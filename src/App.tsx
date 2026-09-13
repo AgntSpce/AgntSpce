@@ -163,7 +163,7 @@ function App() {
     chatListThreads, chatCreateThread, chatRenameThread, chatClearThread,
     onChatStreamChunk, onChatResponse, onChatError, onChatThreads,
     executionHistory,
-    filterStats, commandHistory, searchEvents,
+    filterStats, commandHistory, searchEvents, promptHistory,
     getOrchestratorStats,
   } = useSocket()
   const tokensSaved = useMemo(() => {
@@ -1039,6 +1039,7 @@ function App() {
           filterStats={filterStats}
           searchEvents={searchEvents}
           commandHistory={commandHistory}
+          promptHistory={promptHistory}
           getOrchestratorStats={getOrchestratorStats}
         />
       </Suspense>
@@ -1046,7 +1047,7 @@ function App() {
     { id: 'settings', label: 'Settings', icon: '⚙', render: () => (
       <Settings theme={theme} onThemeChange={setTheme} onFontSizeChange={setFontSize} onFontFamilyChange={setFontFamily} onPrefsChange={(prefs) => { setUserSettings({ autoRestartSessions: prefs.autoStart }) }} onClose={() => setActiveView(null)} />
     )},
-  ], [workspaces, sessions, activeWorkspace, deletedWorkspaces, switchWorkspace, handleDeleteWorkspace, handleRestoreWorkspace, handlePermanentDelete, handleCreateWorkspace, filterStats, searchEvents, commandHistory, getOrchestratorStats, theme, setUserSettings])
+  ], [workspaces, sessions, activeWorkspace, deletedWorkspaces, switchWorkspace, handleDeleteWorkspace, handleRestoreWorkspace, handlePermanentDelete, handleCreateWorkspace, filterStats, searchEvents, commandHistory, promptHistory, getOrchestratorStats, theme, setUserSettings])
 
   const agentsList = useMemo(() => AGENTS_LIST.filter(a => installedAgents.has(a.id)), [installedAgents])
 

@@ -3,6 +3,17 @@ import { io, Socket } from 'socket.io-client'
 import type { WorkspaceInfo, SessionState, TerminalOutput, StatusChange, BranchChange, WorkspaceChange, AgentConfig, AgentStartConfig, FilterEvent, FilterStats, CommandEvent, ExecutionEvent, ChatModelInfo, ChatThread, ChatAttachment } from '../types'
 import { SERVER_URL, getServerAuthToken, apiHeaders } from '../utils/serverAuth'
 
+export interface PromptCompressEvent {
+  sessionId: string
+  source: 'typed' | 'agent-start'
+  originalPrompt: string
+  compressedPrompt: string
+  originalTokens: number
+  compressedTokens: number
+  reduction: number
+  timestamp: number
+}
+
 export interface OrchestratorTaskStats {
   total: number
   open: number
@@ -65,6 +76,7 @@ interface UseSocketReturn {
   filterHistory: FilterEvent[]
   commandHistory: CommandEvent[]
   searchEvents: CommandEvent[]
+  promptHistory: PromptCompressEvent[]
   executionHistory: ExecutionEvent[]
   sessionStartedAt: number
   requestFilterStats: () => void
@@ -137,6 +149,7 @@ export function useSocket(): UseSocketReturn {
   const [filterHistory, setFilterHistory] = useState<FilterEvent[]>([])
   const [commandHistory, setCommandHistory] = useState<CommandEvent[]>([])
   const [searchEvents, setSearchEvents] = useState<CommandEvent[]>([])
+  const [promptHistory, setPromptHistory] = useState<PromptCompressEvent[]>([])
   const [executionHistory, setExecutionHistory] = useState<ExecutionEvent[]>([])
   const [sessionStartedAt, setSessionStartedAt] = useState<number>(Date.now())
   const terminalOutputCbs = useRef<((data: TerminalOutput) => void)[]>([])
@@ -174,6 +187,7 @@ export function useSocket(): UseSocketReturn {
   const EVENT_BATCH_MS = 250
   const cmdEventBuf = useRef<CommandEvent[]>([])
   const searchEventBuf = useRef<CommandEvent[]>([])
+  const promptEventBuf = useRef<PromptCompressEvent[]>([])
   const execEventBuf = useRef<ExecutionEvent[]>([])
   const filterEventBuf = useRef<FilterEvent[]>([])
   const filterDeltaBuf = useRef<{ ob: number; fb: number; ot: number; ft: number } | null>(null)
@@ -190,6 +204,11 @@ export function useSocket(): UseSocketReturn {
       const batch = searchEventBuf.current
       searchEventBuf.current = []
       setSearchEvents(prev => [...batch.slice().reverse(), ...prev].slice(0, 100))
+    }
+    if (promptEventBuf.current.length) {
+      const batch = promptEventBuf.current
+      promptEventBuf.current = []
+      setPromptHistory(prev => [...batch.slice().reverse(), ...prev].slice(0, 500))
     }
     if (execEventBuf.current.length) {
       const batch = execEventBuf.current
@@ -288,9 +307,11 @@ export function useSocket(): UseSocketReturn {
       setFilterHistory([])
       setCommandHistory([])
       setSearchEvents([])
+      setPromptHistory([])
       setExecutionHistory([])
       cmdEventBuf.current = []
       searchEventBuf.current = []
+      promptEventBuf.current = []
       execEventBuf.current = []
       filterEventBuf.current = []
       filterDeltaBuf.current = null
@@ -426,13 +447,20 @@ socket.emit('get-cumulative-stats', {})
     scheduleEventBatch()
   })
 
-  socket.on('filter-stats', (data: { stats: FilterStats; history: FilterEvent[]; commandHistory: CommandEvent[] }) => {
+  socket.on('prompt-compress-event', (event: PromptCompressEvent) => {
+    promptEventBuf.current.push(event)
+    scheduleEventBatch()
+  })
+
+  socket.on('filter-stats', (data: { stats: FilterStats; history: FilterEvent[]; commandHistory: CommandEvent[]; promptHistory?: PromptCompressEvent[] }) => {
     setFilterStats(data.stats)
     setFilterHistory(data.history || [])
     const all = data.commandHistory || []
     // Newest first to match live command-filter-event ordering
     setCommandHistory([...all].reverse())
     setSearchEvents(all.filter(e => e.command.startsWith('agntspce-search')).reverse())
+    // Prompt compressions newest first to match live prompt-compress-event ordering
+    setPromptHistory([...(data.promptHistory || [])].sort((a, b) => b.timestamp - a.timestamp))
   })
 
   })()
@@ -937,6 +965,7 @@ socket.emit('get-cumulative-stats', {})
     filterHistory,
     commandHistory,
     searchEvents,
+    promptHistory,
     requestFilterStats,
     executionHistory,
     sessionStartedAt,

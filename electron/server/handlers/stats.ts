@@ -63,9 +63,21 @@ export function registerStatsHandlers(ctx: ServerContext, socket: Socket): void 
         commandsProcessed: allCommandHistory.length,
       }
       const allHistory = ctx.sessionManager.outputFilter.getAllHistory()
-      socket.emit('filter-stats', { stats: aggregated, history: trimHistoryBodies(allHistory), commandHistory: allCommandHistory.map(toWireEvent) })
+      const promptHistory = ctx.sessionManager.promptHistory.getAllHistory()
+      socket.emit('filter-stats', { stats: aggregated, history: trimHistoryBodies(allHistory), commandHistory: allCommandHistory.map(toWireEvent), promptHistory })
     } catch (e) {
       console.error('get-filter-stats error:', e)
+    }
+  })
+
+  socket.on('get-prompt-history', ({ sessionId }: { sessionId?: string }, callback?: Function) => {
+    try {
+      const history = sessionId
+        ? ctx.sessionManager.promptHistory.getHistory(sessionId)
+        : ctx.sessionManager.promptHistory.getAllHistory()
+      callback?.({ ok: true, history })
+    } catch (e: any) {
+      callback?.({ ok: false, error: e?.message || String(e) })
     }
   })
 

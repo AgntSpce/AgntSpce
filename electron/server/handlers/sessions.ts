@@ -6,6 +6,11 @@ export function registerSessionHandlers(ctx: ServerContext, socket: Socket): voi
     const inputData = data || input
     if (!inputData) return
     ctx.sessionManager.writeToSession(sessionId, inputData)
+    // Accumulate keystrokes per session; submitted lines (Enter) are recorded
+    // as prompts with before/after agntspce-prompter compression.
+    try {
+      ctx.sessionManager.promptHistory.handleTerminalInput(sessionId, inputData)
+    } catch {}
   })
 
   socket.on('terminal-resize', ({ sessionId, cols, rows }) => {

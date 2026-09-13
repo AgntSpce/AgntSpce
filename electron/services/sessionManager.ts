@@ -11,6 +11,7 @@ import { StatusDetector } from './statusDetector'
 import { GitHelper } from './gitHelper'
 import { WorktreeHelper } from './worktreeHelper'
 import { OutputFilterService } from './outputFilter'
+import { PromptHistoryService } from './promptHistory'
 import { WorkspaceManager } from './workspaceManager'
 import { AgentOrchestrator } from './agentOrchestrator'
 import { TokenUsageTracker } from './outputCompressor'
@@ -228,6 +229,7 @@ export class SessionManager extends EventEmitter {
   sessionHistory: { id: string, type: string, worktreeId: string, branch: string, status: string, lastActivity: number, closedAt: number, agentId?: string }[] = []
   tokenUsageTracker = new TokenUsageTracker()
   outputFilter: OutputFilterService
+  promptHistory: PromptHistoryService
   cavemanService = new CavemanService()
   private contextWriter: ContextWriter | null = null
   private lastStatusRefresh = new Map<string, number>()
@@ -238,6 +240,7 @@ export class SessionManager extends EventEmitter {
     super()
     this.io = io
     this.outputFilter = new OutputFilterService(dataDir)
+    this.promptHistory = new PromptHistoryService(dataDir)
     // Cumulative token savings persist across app restarts (filter-history.json
     // + filter-stats.json in the user data dir). Do NOT reset on startup.
     if (agentManager) this.agentManager = agentManager
@@ -247,6 +250,11 @@ export class SessionManager extends EventEmitter {
         // Wire copies carry only a small output preview — the renderer only
         // renders token counts, and full bodies accumulated in client state.
         this.io.emit('command-filter-event', toWireEvent(event))
+      } catch {}
+    })
+    this.promptHistory.setOnPromptEvent((event) => {
+      try {
+        this.io.emit('prompt-compress-event', event)
       } catch {}
     })
     this.cavemanService.onRunComplete((sessionId, run) => {
@@ -953,6 +961,7 @@ export class SessionManager extends EventEmitter {
     } catch { }
     this.outputFilter.finalizeCommand(sessionId)
     this.outputFilter.cleanup(sessionId)
+    this.promptHistory.cleanup(sessionId)
     this.cavemanService.cleanup(sessionId)
     this.tokenUsageTracker.cleanup(sessionId)
     this.finalizeSessionContext(sessionId)
@@ -1256,6 +1265,15 @@ export class SessionManager extends EventEmitter {
     if (!session || !this.agentManager) return
     const validation = this.agentManager.validateConfig(config)
     if (!validation.valid) throw new Error(validation.error)
+
+    // Capture the user-supplied agent prompt (if any) with its submission
+    // timestamp so the Dashboard Prompts tab shows it before/after
+    // agntspce-prompter compression for this session.
+    if (typeof config?.prompt === 'string' && config.prompt.trim()) {
+      try {
+        this.promptHistory.record(sessionId, config.prompt, 'agent-start')
+      } catch {}
+    }
 
     // 1.5 claim enforcement: the session's task must declare its file scope
     // before the agent starts, and it must not overlap another active task.
