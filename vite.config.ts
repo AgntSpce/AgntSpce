@@ -100,12 +100,23 @@ function postBuildPlugin(): Plugin {
             }
           }
         }
-        // Copy search distribution to dist-electron/search/ for production
+        // Copy search distribution to dist-electron/search/ for production.
+        // Stale bytecode is stripped from the copy: dev runs regenerate
+        // __pycache__ from local sources, and shipping it would let a stale
+        // .pyc shadow the rewritten MCP server name on other PCs.
+        // macOS resource-fork files (._*) and .DS_Store are excluded too.
         const searchDir = join(__dirname, 'search')
         const searchDest = join(__dirname, 'dist-electron', 'search')
         if (existsSync(searchDir)) {
           rmSync(searchDest, { recursive: true, force: true })
-          cpSync(searchDir, searchDest, { recursive: true })
+          cpSync(searchDir, searchDest, {
+            recursive: true,
+            filter: (src) => {
+              const base = src.split(/[\\/]/).pop() || ''
+              if (base.startsWith('._') || base === '.DS_Store') return false
+              return !src.endsWith('__pycache__') && !src.endsWith('.pyc') && !src.endsWith('.pyo')
+            },
+          })
           // Create PYTHONHOME-aware wrapper in the built copy
           const binPath = join(searchDest, 'python', 'bin', 'agntspce-search')
           const pythonBin = join(searchDest, 'python', 'bin', 'python3')

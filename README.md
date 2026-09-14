@@ -116,7 +116,7 @@ Built-in command line output compression powered by [RTK](https://github.com/rtk
 
 ### AgntSpce Search MCP
 
-Semantic code search via MCP protocol — index and search your entire codebase using [Semble](https://github.com/MinishLab/semble). Find relevant code instantly across any workspace.
+Semantic code search via MCP protocol — index and search your entire codebase with AgntSpce Search. Find relevant code instantly across any workspace.
 
 </td>
 <td width="50%">
@@ -221,7 +221,7 @@ AgntSpce is built on the shoulders of giants. We gratefully acknowledge the foll
 
 - **[Caveman](https://github.com/JuliusBrussee/caveman)** — Caveman mode panel for focused, distraction-free work.
 - **[RTK](https://github.com/rtk-ai/rtk)** — Powers AgntSpce command line output compression and intelligent token reduction across every layer.
-- **[Semble](https://github.com/MinishLab/semble)** — Semantic code indexing and search engine behind AgntSpce Search MCP.
+- **AgntSpce Search** — Semantic code indexing and search engine behind the AgntSpce Search MCP (built on open-source code-search technology).
 
 These projects make AgntSpce more efficient, powerful, and intelligent. We are deeply grateful to their creators and communities.
 

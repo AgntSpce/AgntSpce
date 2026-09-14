@@ -77,10 +77,10 @@ function getInstalledSearchDir(): string {
 // Bootstrap executed by the bundled interpreter to start the MCP stdio server.
 // The portable bundle ships no native executable entry point, so on Windows the
 // server is launched as: <bundle>/python/python.exe -c <bootstrap>.
-// The bundle is built from the upstream `semble` pip package but we expose
-// it as `agntspce-search` (FastMCP name and import). The pip package is
-// copied to `agntspce_search` at install time so the import below works.
-// Fallback to `semble` keeps old installs working until the copy exists.
+// The search code is exposed as `agntspce_search` (copied from the bundled
+// package at install time so the import below works). The fallback import
+// keeps very old installs working until the copy exists; both copies announce
+// themselves as `agntspce-search` (see patchMcpServerName).
 const MCP_BOOTSTRAP =
   'import asyncio\n' +
   'try:\n' +
@@ -216,93 +216,401 @@ function cleanupStaleSitePackages(searchDir: string): void {
 
 function isPackageBroken(searchDir: string): boolean {
   const sitePkgs = getSitePackagesDir(searchDir)
-  // The distribution installs the server as `semble` (older builds used
-  // `agntspce_search`) — broken only when neither package is present.
+  // The distribution installs the server under both the original package
+  // name and `agntspce_search` — broken only when neither is present.
   const hasAgntspce = fs.existsSync(path.join(sitePkgs, 'agntspce_search'))
   const hasSemble = fs.existsSync(path.join(sitePkgs, 'semble'))
   return !hasAgntspce && !hasSemble
 }
 
-// The upstream `semble` pip package ships the MCP server as `FastMCP("semble")`
+// Display name announced by the search MCP server (FastMCP name + config keys).
+// The portable bundle is built from the upstream `semble` pip package — that
+// dependency name (and its `semble.*` imports) must stay intact for pip and
+// Python imports to work. Only user-visible names are rewritten.
+const MCP_SERVER_NAME = 'agntspce-search'
+
+// Upstream ships the server name on one line (`FastMCP("semble")`) in older
+// releases and across lines (`FastMCP(\n    "semble",`) in newer ones, so the
+// match must tolerate any whitespace/quoting (and an optional `name=` kwarg).
+const FASTMCP_NAME_RES = [
+  /FastMCP\(\s*name\s*=\s*["']semble["']/g,
+  /FastMCP\(\s*["']semble["']/g,
+]
+
+// User-visible installer strings rewritten to the AgntSpce display name.
+// Functional identifiers (Python imports, `files("semble")` resource refs,
+// `semble[mcp]` pip specs, env vars, cache folders, dist-info dirs) are
+// intentionally left untouched — renaming those would break pip and imports.
+// Doc-section markers are renamed as *values* (constant names stay so
+// imports keep working); legacy values are still honoured via _LEGACY_*
+// constants injected below, so old installs migrate instead of orphaning.
+const INSTALLER_RENAMES: Array<[RegExp, string]> = [
+  [/mcp__semble__/g, 'mcp__agntspce-search__'],
+  [/## Semble Code Search/g, '## AgntSpce Search'],
+  [/A `semble` MCP server/g, 'A `agntspce-search` MCP server'],
+  [/After semble returns/g, 'After agntspce-search returns'],
+  [/\[mcp_servers\.semble\]/g, '[mcp_servers.agntspce-search]'],
+  [/mcp_servers\.semble/g, 'mcp_servers.agntspce-search'],
+  [/one of semble's/g, "one of agntspce-search's"],
+  [/semble MCP entry/g, 'agntspce-search MCP entry'],
+  [/call semble directly as a tool/g, 'call agntspce-search directly as a tool'],
+  [/Install or uninstall semble across coding agents\./g, 'Install or uninstall AgntSpce Search across coding agents.'],
+  [/Semble Uninstaller/g, 'AgntSpce Search Uninstaller'],
+  [/Semble Installer/g, 'AgntSpce Search Installer'],
+  [/Remove semble configuration\?/g, 'Remove AgntSpce Search configuration?'],
+  [/marked semble section/g, 'marked AgntSpce Search section'],
+  [/the semble \[mcp_servers\./g, 'the agntspce-search [mcp_servers.'],
+  // (HTML-comment markers below are spelled with unicode escapes because
+  // `<!--` is not allowed literally in a module.)
+  [/\u003C!-- SEMBLE_START --\u003E/g, '<!-- AGNTSPCE_START -->'],
+  [/\u003C!-- SEMBLE_END --\u003E/g, '<!-- AGNTSPCE_END -->'],
+  [/semble-search/g, 'agntspce-search'],
+  [/semble\.md/g, 'agntspce-search.md'],
+  // The old fallback taught agents to `uvx` the upstream package, which
+  // installed a global `semble` MCP entry on fresh PCs. Point at the bundle.
+  [/If `agntspce-search` is not on `\$PATH`, use `uvx --from "semble\[mcp\]" semble`\./g, 'If `agntspce-search` is not on `$PATH`, reinstall or restart AgntSpce to restore the bundled server.'],
+]
+
+function rewriteMcpServerName(content: string): string {
+  let out = content
+  for (const re of FASTMCP_NAME_RES) {
+    re.lastIndex = 0
+    out = out.replace(re, (m) => (/name\s*=/.test(m) ? 'FastMCP(name="agntspce-search"' : 'FastMCP("agntspce-search"'))
+  }
+  return out
+}
+
+function rewriteInstallerText(content: string): string {
+  let out = content
+  for (const [re, replacement] of INSTALLER_RENAMES) {
+    re.lastIndex = 0
+    out = out.replace(re, replacement)
+  }
+  return out
+}
+
+// installer/agents.py: inject legacy doc-marker constants derived from the
+// (renamed) values so no literal old marker is left for a re-run to clobber.
+function rewriteInstallerAgentsPy(content: string): string {
+  let out = rewriteInstallerText(content)
+  if (!out.includes('_LEGACY_START')) {
+    const lines = out.split('\n')
+    const idx = lines.findIndex((l) => l.startsWith('SEMBLE_END = '))
+    if (idx !== -1) {
+      lines.splice(
+        idx + 1,
+        0,
+        '# Markers written by older installs — consulted when replacing/removing docs.',
+        '_LEGACY_START = SEMBLE_START.replace("AGNTSPCE", "SEMBLE")',
+        '_LEGACY_END = SEMBLE_END.replace("AGNTSPCE", "SEMBLE")',
+      )
+      out = lines.join('\n')
+    }
+  }
+  return out
+}
+
+// installer/config.py: honour legacy markers and the legacy Codex table so
+// docs/configs written by older installs migrate instead of orphaning.
+// All anchors are exact — a shape change skips the step (with a warning)
+// instead of half-applying. Re-runs are no-ops.
+function rewriteInstallerConfigPy(content: string): { text: string; skipped: string[] } {
+  let out = rewriteInstallerText(content)
+  const skipped: string[] = []
+  const legacyImportFrom = 'from semble.installer.agents import SEMBLE_END, SEMBLE_START, Action'
+  if (!out.includes('_LEGACY_START') && out.includes(legacyImportFrom)) {
+    out = out.replace(
+      legacyImportFrom,
+      'from semble.installer.agents import SEMBLE_END, SEMBLE_START, Action, _LEGACY_END, _LEGACY_START',
+    )
+  }
+  const hasLegacy = out.includes('_LEGACY_START')
+  const migrationLine =
+    '    existing = existing.replace(_LEGACY_START, SEMBLE_START).replace(_LEGACY_END, SEMBLE_END)'
+  if (hasLegacy && !out.includes(migrationLine)) {
+    const replaceAnchor = '    existing = path.read_text(encoding="utf-8") if existed else ""'
+    if (out.includes(replaceAnchor)) {
+      out = out.replace(replaceAnchor, `${replaceAnchor}\n${migrationLine}`)
+    } else {
+      skipped.push('replace_or_append_marked anchor')
+    }
+    const removeAnchor = '    existing = path.read_text(encoding="utf-8")\n'
+    if (out.includes(removeAnchor)) {
+      out = out.replace(removeAnchor, `${removeAnchor}${migrationLine}\n`)
+    } else {
+      skipped.push('remove_marked anchor')
+    }
+  }
+  if (!out.includes('_CODEX_MCP_HEADER_LEGACY')) {
+    const lines = out.split('\n')
+    const idx = lines.findIndex((l) => l.startsWith('_CODEX_MCP_HEADER = '))
+    if (idx !== -1) {
+      lines.splice(
+        idx + 1,
+        0,
+        '_CODEX_MCP_HEADER_LEGACY = _CODEX_MCP_HEADER.replace("agntspce-search", "semble")',
+      )
+      out = lines.join('\n')
+    } else {
+      skipped.push('_CODEX_MCP_HEADER anchor')
+    }
+  }
+  if (out.includes('_CODEX_MCP_HEADER_LEGACY')) {
+    const mergeAnchor = '    base = _strip_toml_section(existing, _CODEX_MCP_HEADER).rstrip("\\n")'
+    if (out.includes(mergeAnchor) && !out.includes('_CODEX_MCP_HEADER_LEGACY), _CODEX_MCP_HEADER)')) {
+      out = out.replace(
+        mergeAnchor,
+        '    base = _strip_toml_section(_strip_toml_section(existing, _CODEX_MCP_HEADER_LEGACY), _CODEX_MCP_HEADER).rstrip("\\n")',
+      )
+    }
+    const removeCondAnchor = '    if _CODEX_MCP_HEADER not in existing:'
+    if (out.includes(removeCondAnchor) && !out.includes('_CODEX_MCP_HEADER_LEGACY not in existing')) {
+      out = out.replace(
+        removeCondAnchor,
+        '    if _CODEX_MCP_HEADER not in existing and _CODEX_MCP_HEADER_LEGACY not in existing:',
+      )
+    }
+    const removeStripAnchor = '    remaining = _strip_toml_section(existing, _CODEX_MCP_HEADER).strip("\\n")'
+    if (out.includes(removeStripAnchor) && !out.includes('_CODEX_MCP_HEADER_LEGACY), _CODEX_MCP_HEADER).strip')) {
+      out = out.replace(
+        removeStripAnchor,
+        '    remaining = _strip_toml_section(_strip_toml_section(existing, _CODEX_MCP_HEADER_LEGACY), _CODEX_MCP_HEADER).strip("\\n")',
+      )
+    }
+  }
+  return { text: out, skipped }
+}
+
+// Sub-agent templates (agents/*.md|*.toml) are pure docs with no imports:
+// every remaining standalone `semble` word is a CLI/prose reference. The uvx
+// fallback sentence is removed first so its `semble[mcp]` pip spec is dropped,
+// not rewritten.
+const TEMPLATE_RENAMES: Array<[RegExp, string]> = [
+  [/If `semble` is not on `\$PATH`, use `uvx --from "semble\[mcp\]" semble` in its place\./g, 'If `agntspce-search` is not on `$PATH`, reinstall or restart AgntSpce to restore the bundled server.'],
+  [/\bsemble\b/g, 'agntspce-search'],
+]
+
+function rewriteAgentTemplate(content: string): string {
+  let out = rewriteInstallerText(content)
+  for (const [re, replacement] of TEMPLATE_RENAMES) {
+    re.lastIndex = 0
+    out = out.replace(re, replacement)
+  }
+  return out
+}
+
+// cli.py display strings (`--help` text, argparse prog). Exact anchors —
+// skipped with a warning when upstream changes shape. Imports, package
+// extras and the `pip install 'semble[mcp]'` hint stay intact (functional).
+function rewriteCliPy(content: string): { text: string; skipped: string[] } {
+  let out = content
+  const skipped: string[] = []
+  const pairs: Array<[string, string]> = [
+    ['prog="semble"', 'prog="agntspce-search"'],
+    ['"""Entry point for the semble command-line tool."""', '"""Entry point for the agntspce-search command-line tool."""'],
+    ['"Configure semble across coding agents."', '"Configure AgntSpce Search across coding agents."'],
+    ['"Remove semble configuration from coding agents."', '"Remove AgntSpce Search configuration from coding agents."'],
+  ]
+  for (const [from, to] of pairs) {
+    if (out.includes(from)) {
+      out = out.split(from).join(to)
+    } else if (!out.includes(to)) {
+      skipped.push(from.slice(0, 48))
+    }
+  }
+  return { text: out, skipped }
+}
+
+// stats.py savings-report title shown by the CLI.
+function rewriteStatsPy(content: string): { text: string; skipped: string[] } {
+  const from = '"Semble Token Savings"'
+  const to = '"AgntSpce Search Token Savings"'
+  if (content.includes(from)) return { text: content.split(from).join(to), skipped: [] }
+  if (content.includes(to)) return { text: content, skipped: [] }
+  return { text: content, skipped: ['"Semble Token Savings" anchor'] }
+}
+
+// installer/installer.py: the global MCP entry key. Install writes our key
+// (dropping the legacy one first); uninstall removes both. Exact anchors —
+// skipped with a warning when upstream changes shape.
+function rewriteInstallerMainPy(content: string): { text: string; skipped: string[] } {  let out = rewriteInstallerText(content)
+  const skipped: string[] = []
+  const mergeAnchor =
+    'return WriteResult(path, merge_json_member(path, agent.mcp.key, "semble", agent.mcp.entry))'
+  if (out.includes(mergeAnchor)) {
+    out = out.replace(
+      mergeAnchor,
+      'remove_json_member(path, agent.mcp.key, "semble")\n    return WriteResult(path, merge_json_member(path, agent.mcp.key, "agntspce-search", agent.mcp.entry))',
+    )
+  } else if (!out.includes('"agntspce-search", agent.mcp.entry')) {
+    skipped.push('merge_mcp anchor')
+  }
+  const removeAnchor = 'return WriteResult(path, remove_json_member(path, agent.mcp.key, "semble"))'
+  if (out.includes(removeAnchor)) {
+    out = out.replace(
+      removeAnchor,
+      'remove_json_member(path, agent.mcp.key, "semble")\n    return WriteResult(path, remove_json_member(path, agent.mcp.key, "agntspce-search"))',
+    )
+  } else if (!out.includes('remove_json_member(path, agent.mcp.key, "agntspce-search")')) {
+    skipped.push('remove_mcp anchor')
+  }
+  return { text: out, skipped }
+}
+
+// Recursively delete all bytecode so a stale .pyc can never shadow patched
+// sources. Previously only `mcp.*.pyc` was removed, and the `semble` copy was
+// never patched when upstream split `FastMCP(` and the name across lines —
+// that combination kept announcing the old name on fresh PCs.
+function purgeBytecode(dir: string): void {
+  if (!fs.existsSync(dir)) return
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === '__pycache__') {
+          try { fs.rmSync(full, { recursive: true, force: true }) } catch {}
+        } else {
+          purgeBytecode(full)
+        }
+      } else if (entry.name.endsWith('.pyc') || entry.name.endsWith('.pyo')) {
+        try { fs.rmSync(full) } catch {}
+      }
+    }
+  } catch {}
+}
+
+// The upstream pip package ships the MCP server under its own display name,
 // which makes tools appear as `mcp__semble__search`. AgntSpce exposes it as
-// `agntspce-search` (fully). The portable bundle is built from `semble` but
-// we expose it as `agntspce_search` by copying the package and patching the
+// `agntspce-search`. The portable bundle is built from that package but we
+// expose it as `agntspce_search` by copying the package and rewriting the
 // FastMCP name. Patch both the installed and bundled distributions on the
-// fly so a 0.1.0 tarball that still contains "semble" is corrected.
+// fly so a tarball that still contains the old name is corrected.
 function patchMcpServerName(searchDir: string): void {
   const sitePkgs = getSitePackagesDir(searchDir)
   const semblePath = path.join(sitePkgs, 'semble')
   const agntspcePath = path.join(sitePkgs, 'agntspce_search')
 
-  // Ensure agntspce_search package exists (copy from semble if needed).
-  // This makes `from agntspce_search.mcp import serve` work.
+  // Ensure agntspce_search package exists (copy from the bundled package if
+  // needed). This makes `from agntspce_search.mcp import serve` work.
+  // Bytecode is excluded from the copy so stale caches never propagate.
   if (fs.existsSync(semblePath) && !fs.existsSync(agntspcePath)) {
     try {
-      fs.cpSync(semblePath, agntspcePath, { recursive: true })
-      console.log(`[agntspce] Created agntspce_search package from semble at ${agntspcePath}`)
+      fs.cpSync(semblePath, agntspcePath, {
+        recursive: true,
+        filter: (src) => !src.endsWith('__pycache__') && !src.endsWith('.pyc') && !src.endsWith('.pyo'),
+      })
+      console.log(`[agntspce] Created agntspce_search package at ${agntspcePath}`)
     } catch (e) {
-      console.warn('[agntspce] Failed to copy semble → agntspce_search:', e)
+      console.warn('[agntspce] Failed to copy search package → agntspce_search:', e)
     }
   }
 
-  // Patch both packages (semble for backwards compat, agntspce_search primary)
+  // Rewrite the display name in both packages (bundled copy is primary,
+  // original name kept working for backwards compat).
   for (const pkg of ['semble', 'agntspce_search']) {
     const mcpPath = path.join(sitePkgs, pkg, 'mcp.py')
     if (!fs.existsSync(mcpPath)) continue
     try {
-      let content = fs.readFileSync(mcpPath, 'utf-8')
-      if (content.includes('FastMCP("semble"') || content.includes("FastMCP('semble'")) {
-        content = content.replace(/FastMCP\(\s*["']semble["']/, 'FastMCP("agntspce-search"')
-        fs.writeFileSync(mcpPath, content, 'utf-8')
-        console.log(`[agntspce] Patched MCP server name in ${mcpPath}`)
-      } else if (content.includes('FastMCP("agntspce-search"') || content.includes("FastMCP('agntspce-search'")) {
-        // Already patched, ensure agntspce_search also has it
-      } else if (pkg === 'agntspce_search' && content.includes('FastMCP(')) {
-        // If agntspce_search was copied from semble before patch, ensure it is patched
-        if (!content.includes('"agntspce-search"')) {
-          content = content.replace(/FastMCP\(\s*["'][^"']+["']/, 'FastMCP("agntspce-search"')
-          fs.writeFileSync(mcpPath, content, 'utf-8')
+      const before = fs.readFileSync(mcpPath, 'utf-8')
+      const after = rewriteMcpServerName(before)
+      if (after !== before) {
+        fs.writeFileSync(mcpPath, after, 'utf-8')
+        console.log(`[agntspce] Rewrote MCP server name in ${mcpPath}`)
+      }
+      const verify = fs.readFileSync(mcpPath, 'utf-8')
+      if (/FastMCP\(\s*(?:name\s*=\s*)?["']semble["']/.test(verify)) {
+        console.warn(`[agntspce] MCP server name rewrite did not apply in ${mcpPath}`)
+      }
+    } catch (e) {
+      console.warn(`[agntspce] Failed to rewrite mcp.py (${pkg}):`, e)
+    }
+
+    const rewriteFile = (
+      rel: string,
+      rewrite: (before: string) => string,
+      label: string,
+    ): void => {
+      const filePath = path.join(sitePkgs, pkg, rel)
+      if (!fs.existsSync(filePath)) return
+      try {
+        const before = fs.readFileSync(filePath, 'utf-8')
+        const after = rewrite(before)
+        if (after !== before) {
+          fs.writeFileSync(filePath, after, 'utf-8')
+          console.log(`[agntspce] Rewrote ${label} in ${filePath}`)
+        }
+      } catch (e) {
+        console.warn(`[agntspce] Failed to rewrite ${label} (${pkg}/${rel}):`, e)
+      }
+    }
+
+    rewriteFile(path.join('installer', 'agents.py'), rewriteInstallerAgentsPy, 'installer display strings')
+    rewriteFile(
+      path.join('installer', 'config.py'),
+      (before) => {
+        const { text, skipped } = rewriteInstallerConfigPy(before)
+        if (skipped.length > 0) {
+          console.warn(`[agntspce] Skipped installer/config.py steps (upstream shape changed): ${skipped.join(', ')}`)
+        }
+        return text
+      },
+      'installer display strings',
+    )
+    rewriteFile(
+      path.join('installer', 'installer.py'),
+      (before) => {
+        const { text, skipped } = rewriteInstallerMainPy(before)
+        if (skipped.length > 0) {
+          console.warn(`[agntspce] Skipped installer/installer.py steps (upstream shape changed): ${skipped.join(', ')}`)
+        }
+        return text
+      },
+      'installer MCP key',
+    )
+
+    // Sub-agent templates ship CLI/prose references (`semble search`, …) that
+    // are visible in agent `/agents` lists and sub-agent prompts when
+    // installed. Rename the display/CLI name (pure docs, no imports).
+    try {
+      const agentsDir = path.join(sitePkgs, pkg, 'agents')
+      if (fs.existsSync(agentsDir)) {
+        for (const entry of fs.readdirSync(agentsDir)) {
+          if (!entry.endsWith('.md') && !entry.endsWith('.toml')) continue
+          rewriteFile(path.join('agents', entry), rewriteAgentTemplate, 'sub-agent display name')
         }
       }
     } catch (e) {
-      console.warn(`[agntspce] Failed to patch mcp.py (${pkg}):`, e)
+      console.warn(`[agntspce] Failed to rewrite sub-agent templates (${pkg}):`, e)
     }
 
-    const installerPath = path.join(sitePkgs, pkg, 'installer', 'agents.py')
-    if (!fs.existsSync(installerPath)) continue
-    try {
-      let content = fs.readFileSync(installerPath, 'utf-8')
-      if (content.includes('mcp__semble__')) {
-        const before = content
-        content = content
-          .replace(/mcp__semble__/g, 'mcp__agntspce-search__')
-          .replace(/## Semble Code Search/g, '## Agntspce Search')
-          .replace(/A `semble` MCP server/g, 'A `agntspce-search` MCP server')
-          .replace(/After semble returns/g, 'After agntspce-search returns')
-        if (content !== before) {
-          fs.writeFileSync(installerPath, content, 'utf-8')
-          console.log(`[agntspce] Patched installer instructions in ${installerPath}`)
+    // CLI display strings (`--help` text, argparse prog) and the
+    // savings-report title. Exact anchors, fail-safe.
+    rewriteFile(
+      'cli.py',
+      (before) => {
+        const { text, skipped } = rewriteCliPy(before)
+        if (skipped.length > 0) {
+          console.warn(`[agntspce] Skipped cli.py steps (upstream shape changed): ${skipped.join(', ')}`)
         }
-      }
-    } catch (e) {
-      console.warn(`[agntspce] Failed to patch installer (${pkg}):`, e)
-    }
-  }
+        return text
+      },
+      'CLI display strings',
+    )
+    rewriteFile(
+      'stats.py',
+      (before) => {
+        const { text, skipped } = rewriteStatsPy(before)
+        if (skipped.length > 0) {
+          console.warn(`[agntspce] Skipped stats.py steps (upstream shape changed): ${skipped.join(', ')}`)
+        }
+        return text
+      },
+      'savings-report title',
+    )
 
-  // Delete stale bytecode so the patched source is recompiled on next
-  // launch. A copied __pycache__/mcp.pyc still embeds FastMCP("semble")
-  // and would otherwise keep announcing as `semble` on a different PC.
-  for (const pkg of ['semble', 'agntspce_search']) {
-    try {
-      const cacheDir = path.join(sitePkgs, pkg, '__pycache__')
-      if (fs.existsSync(cacheDir)) {
-        for (const entry of fs.readdirSync(cacheDir)) {
-          if (entry.startsWith('mcp.') && entry.endsWith('.pyc')) {
-            try { fs.rmSync(path.join(cacheDir, entry)) } catch {}
-          }
-        }
-      }
-    } catch {}
+    // Delete all stale bytecode under the package so the rewritten sources
+    // are recompiled on next launch.
+    purgeBytecode(path.join(sitePkgs, pkg))
   }
 }
 
@@ -331,8 +639,8 @@ function installSearch(): string | null {
     if (!isPackageBroken(installed)) {
       console.log(`[agntspce] Search v${bundledVersion} already installed at ${installed}`)
       fixSearchBinary(currentBinary, installed)
-      // Ensure an already-installed 0.1.1 that still contains FastMCP("semble")
-      // is corrected without requiring a version bump.
+      // Re-apply the display-name rewrite on every start so an install that
+      // still carries the old server name is corrected without a version bump.
       patchMcpServerName(installed)
       return currentBinary
     }
@@ -347,8 +655,8 @@ function installSearch(): string | null {
     }
 
     fs.cpSync(bundled, installed, { recursive: true })
-    // Patch the freshly copied bundle: the prebuilt tarball still ships
-    // FastMCP("semble") which would appear as mcp__semble__search.
+    // Rewrite the freshly copied bundle: prebuilt tarballs may still ship
+    // the old server display name, which would surface the wrong MCP name.
     patchMcpServerName(installed)
 
     const binPath = findInstalledBinary(getInstalledBinaryCandidates())
@@ -406,17 +714,42 @@ function injectClaudeCodeConfig(projectPath: string): InjectResult {
     type: 'stdio',
   }
   if (launch.args) serverEntry.args = launch.args
-  const entry = { mcpServers: { 'agntspce-search': serverEntry } }
 
-  const newContent = JSON.stringify(entry, null, 2) + '\n'
-
+  // Merge with any existing project config: preserve the user's other
+  // servers, drop a stale legacy entry under the old display name, and
+  // (re)point our entry at the installed bundle. Overwriting the whole file
+  // used to delete unrelated servers, and a legacy entry travelling with the
+  // project folder kept surfacing the old name on other PCs.
+  let config: { mcpServers?: Record<string, unknown> } = {}
+  let hadFile = false
   if (fs.existsSync(mcpPath)) {
-    const existing = fs.readFileSync(mcpPath, 'utf-8').trim()
-    if (existing === newContent.trim()) return { agent: 'claude', action: 'unchanged' }
+    hadFile = true
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        config = parsed as { mcpServers?: Record<string, unknown> }
+      }
+    } catch {
+      config = {}
+    }
+  }
+  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+    config.mcpServers = {}
   }
 
-  if (writeWithBackup(mcpPath, newContent)) {
-    return { agent: 'claude', action: 'created' }
+  let removedLegacy = false
+  if (config.mcpServers['semble']) {
+    delete config.mcpServers['semble']
+    removedLegacy = true
+  }
+
+  const existing = JSON.stringify(config.mcpServers[MCP_SERVER_NAME])
+  const wanted = JSON.stringify(serverEntry)
+  if (existing === wanted && !removedLegacy) return { agent: 'claude', action: 'unchanged' }
+
+  config.mcpServers[MCP_SERVER_NAME] = serverEntry
+  if (writeWithBackup(mcpPath, JSON.stringify(config, null, 2) + '\n')) {
+    return { agent: 'claude', action: hadFile ? 'updated' : 'created' }
   }
   return { agent: 'claude', action: 'error' }
 }
@@ -540,9 +873,12 @@ function removeOpenCodeConfig(): InjectResult {
       return removeOpenCodeConfigTextFallback(configPath, raw)
     }
 
-    if (!config.mcp?.['agntspce-search']) return { agent: 'opencode', action: 'unchanged' }
+    if (!config.mcp?.['agntspce-search'] && !config.mcp?.['semble']) {
+      return { agent: 'opencode', action: 'unchanged' }
+    }
 
     delete config.mcp['agntspce-search']
+    delete config.mcp['semble']
     if (Object.keys(config.mcp).length === 0) {
       delete config.mcp
     }
@@ -630,11 +966,45 @@ function stripJsoncComments(text: string): string {
   return lines.filter(l => l.trim()).join('\n')
 }
 
+// A manual (or agent-triggered, via the old uvx fallback instruction)
+// upstream `install` writes a global `semble` MCP entry to ~/.claude.json.
+// Claude Code merges it with the project .mcp.json, so the old brand kept
+// surfacing as `mcp__semble__*` on machines where it was never cleaned.
+// Drop the legacy key (with backup); our own entry lives in the project
+// .mcp.json and is left alone. Unparsable files are never touched.
+function cleanupLegacyGlobalClaudeConfig(): void {
+  const globalPath = path.join(os.homedir(), '.claude.json')
+  if (!fs.existsSync(globalPath)) return
+  let raw: string
+  try {
+    raw = fs.readFileSync(globalPath, 'utf-8')
+  } catch {
+    return
+  }
+  let config: any
+  try {
+    config = JSON.parse(raw)
+  } catch {
+    return
+  }
+  const servers = config?.mcpServers
+  if (!servers || typeof servers !== 'object' || !servers['semble']) return
+  delete servers['semble']
+  if (writeWithBackup(globalPath, JSON.stringify(config, null, 2) + '\n')) {
+    console.log('[agntspce] Removed legacy `semble` MCP entry from ~/.claude.json')
+  }
+}
+
 function initialize(): string | null {
   const installedPath = installSearch()
   _activeSearchPath = installedPath
   if (installedPath) {
     _activeSearchDir = path.dirname(path.dirname(installedPath))
+  }
+  try {
+    cleanupLegacyGlobalClaudeConfig()
+  } catch (e) {
+    console.warn('[agntspce] Failed to clean legacy global search config:', e)
   }
   return _activeSearchPath
 }
