@@ -515,7 +515,7 @@ export default memo(function TerminalArea({
     }
   }
 
-  const useHorizontalScroll = bottomShellOpen && filteredSessions.length >= 6
+  const useHorizontalScroll = bottomShellOpen && filteredSessions.length >= 3
   const isFullScreen = focusSessionId !== null && splitLayout === 'grid'
 
   const sessionMap = useMemo(() => {
