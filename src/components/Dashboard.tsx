@@ -415,7 +415,17 @@ export default function Dashboard(props: Props) {
                 )
               }
               const active = groups.find(g => g.sid === selectedPromptSession) || groups[0]
+              const totalOrig = groups.reduce((s, g) => s + g.orig, 0)
+              const totalFilt = groups.reduce((s, g) => s + g.filt, 0)
+              const totalSaved = totalOrig - totalFilt
+              const totalPct = totalOrig > 0 ? Math.round((totalSaved / totalOrig) * 100) : 0
+              const totalCount = groups.reduce((s, g) => s + g.count, 0)
               return (
+                <>
+                <div className="dashboard-overview">
+                  <OverviewCard label="Prompt Tokens Saved" value={totalSaved.toLocaleString()} change={totalPct > 0 ? `↑ ${totalPct}% reduction` : undefined} changeClass={totalPct > 0 ? 'up' : 'neutral'} />
+                  <OverviewCard label="Prompts Compressed" value={String(totalCount)} change={`${totalOrig.toLocaleString()} → ${totalFilt.toLocaleString()} tokens`} />
+                </div>
                 <div className="dashboard-chart">
                   <div className="dashboard-chart-header">
                     <span className="dashboard-chart-label">AgntSpce-PC</span>
@@ -496,6 +506,7 @@ export default function Dashboard(props: Props) {
                     Prompts are recorded when you press Enter in a terminal or start an agent with a prompt; full before/after bodies are shown.
                   </div>
                 </div>
+                </>
               )
             })()}
           </>
