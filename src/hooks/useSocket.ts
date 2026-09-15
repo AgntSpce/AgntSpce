@@ -3,6 +3,8 @@ import { io, Socket } from 'socket.io-client'
 import type { WorkspaceInfo, SessionState, TerminalOutput, StatusChange, BranchChange, WorkspaceChange, AgentConfig, AgentStartConfig, FilterEvent, FilterStats, CommandEvent, ExecutionEvent, ChatModelInfo, ChatThread, ChatAttachment } from '../types'
 import { SERVER_URL, getServerAuthToken, apiHeaders } from '../utils/serverAuth'
 
+export type CompressionMode = 'lite' | 'medium' | 'extreme'
+
 export interface PromptCompressEvent {
   sessionId: string
   source: 'typed' | 'agent-start'
@@ -79,6 +81,9 @@ interface UseSocketReturn {
   promptHistory: PromptCompressEvent[]
   executionHistory: ExecutionEvent[]
   sessionStartedAt: number
+  sessionCompressionModes: Record<string, CompressionMode>
+  setSessionCompressionMode: (sessionId: string, mode: CompressionMode) => void
+  onSessionCompressionModeChange: (cb: (sessionId: string, mode: CompressionMode) => void) => () => void
   requestFilterStats: () => void
   createWorkspaceFromGit: (gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }) => Promise<any>
   updateWorkspaceConfig: (workspaceId: string, updates: any) => Promise<any>
@@ -152,6 +157,8 @@ export function useSocket(): UseSocketReturn {
   const [promptHistory, setPromptHistory] = useState<PromptCompressEvent[]>([])
   const [executionHistory, setExecutionHistory] = useState<ExecutionEvent[]>([])
   const [sessionStartedAt, setSessionStartedAt] = useState<number>(Date.now())
+  const [sessionCompressionModes, setSessionCompressionModes] = useState<Record<string, CompressionMode>>({})
+  const sessionCompressionCbs = useRef<((sessionId: string, mode: CompressionMode) => void)[]>([])
   const terminalOutputCbs = useRef<((data: TerminalOutput) => void)[]>([])
   const lastStatsFetchAt = useRef(0)
   const statusChangeCbs = useRef<((data: StatusChange) => void)[]>([])
@@ -410,6 +417,12 @@ socket.emit('get-cumulative-stats', {})
         return next
       })
       delete outputBuffer.current[sessionId]
+      setSessionCompressionModes(prev => {
+        if (!(sessionId in prev)) return prev
+        const next = { ...prev }
+        delete next[sessionId]
+        return next
+      })
     })
 
     socket.on('session-unhealthy', (data: { sessionId: string, reason: string, usage?: any }) => {
@@ -450,6 +463,21 @@ socket.emit('get-cumulative-stats', {})
   socket.on('prompt-compress-event', (event: PromptCompressEvent) => {
     promptEventBuf.current.push(event)
     scheduleEventBatch()
+  })
+
+  socket.on('session-compression-modes', (modes: Record<string, CompressionMode>) => {
+    if (!modes || typeof modes !== 'object') return
+    const valid: Record<string, CompressionMode> = {}
+    for (const [id, mode] of Object.entries(modes)) {
+      if (mode === 'lite' || mode === 'medium' || mode === 'extreme') valid[id] = mode
+    }
+    setSessionCompressionModes(valid)
+  })
+
+  socket.on('session-compression-mode-changed', ({ sessionId, mode }: { sessionId: string, mode: CompressionMode }) => {
+    if (!sessionId || (mode !== 'lite' && mode !== 'medium' && mode !== 'extreme')) return
+    setSessionCompressionModes(prev => (prev[sessionId] === mode ? prev : { ...prev, [sessionId]: mode }))
+    queueMicrotask(() => { sessionCompressionCbs.current.forEach(cb => cb(sessionId, mode)) })
   })
 
   socket.on('filter-stats', (data: { stats: FilterStats; history: FilterEvent[]; commandHistory: CommandEvent[]; promptHistory?: PromptCompressEvent[] }) => {
@@ -779,6 +807,19 @@ socket.emit('get-cumulative-stats', {})
     socketRef.current?.emit('set-user-settings', settings)
   }, [])
 
+  const setSessionCompressionMode = useCallback((sessionId: string, mode: CompressionMode) => {
+    if (!sessionId || (mode !== 'lite' && mode !== 'medium' && mode !== 'extreme')) return
+    setSessionCompressionModes(prev => (prev[sessionId] === mode ? prev : { ...prev, [sessionId]: mode }))
+    socketRef.current?.emit('set-session-compression-mode', { sessionId, mode })
+  }, [])
+
+  const onSessionCompressionModeChange = useCallback((cb: (sessionId: string, mode: CompressionMode) => void) => {
+    sessionCompressionCbs.current.push(cb)
+    return () => {
+      sessionCompressionCbs.current = sessionCompressionCbs.current.filter(c => c !== cb)
+    }
+  }, [])
+
   const getWorkspaceTree = useCallback((worktreePath: string): Promise<any> => {
     return emitAck('get-workspace-tree', { worktreePath })
   }, [emitAck])
@@ -969,6 +1010,9 @@ socket.emit('get-cumulative-stats', {})
     requestFilterStats,
     executionHistory,
     sessionStartedAt,
+    sessionCompressionModes,
+    setSessionCompressionMode,
+    onSessionCompressionModeChange,
     getOrchestratorStats,
     getSessionUsage,
     getSessionHistory,

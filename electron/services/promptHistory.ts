@@ -29,15 +29,14 @@ export interface PromptCompressEvent {
 const MAX_PER_SESSION_EVENTS = 200
 const MAX_TOTAL_EVENTS = 1200
 const MAX_PERSISTED_EVENTS = 600
-// Stored prompt bodies stay small: 8KB × 2 sides × 1200 events is bounded,
-// and the renderer only ever renders previews of these strings.
-const MAX_STORED_CHARS = 8 * 1024
-const MAX_INPUT_BUFFER_CHARS = 64 * 1024
+// Full prompt bodies are stored verbatim — the Dashboard "Prompts" tab must
+// show the complete before/after text. Per-session/global/persisted caps above
+// keep total size bounded; no per-prompt character truncation is applied.
+// Large pastes (multi-KB design-system prompts) arrive via terminal input,
+// so the keystroke buffer is generous.
+const MAX_INPUT_BUFFER_CHARS = 512 * 1024
 // Single-key confirmations (y/n) and empty submits are not prompts.
 const MIN_PROMPT_CHARS = 2
-// Lite compression: keep ~85% of tokens so content words (names, venue,
-// time, quantities) survive. Lower rates dropped critical details.
-const PROMPT_RATE = 0.85
 // Prompts this short carry too few tokens for percentile-threshold
 // compression to be meaningful — even lite rates drop content words
 // (e.g. "please fix the login bug" lost "fix"/"bug"). Stored verbatim.
@@ -76,9 +75,10 @@ function extractPromptText(text: string): string | null {
 }
 
 function capStoredText(text: string): string {
-  if (text.length <= MAX_STORED_CHARS) return text
-  const head = text.slice(0, MAX_STORED_CHARS - 1024)
-  return `${head}\n…[${(text.length - head.length).toLocaleString()} chars omitted]…\n${text.slice(-1024)}`
+  // Store the full prompt — no truncation. Previously capped at ~8KB per
+  // side, which cut off large prompts in the Dashboard before/after view.
+  // Kept as an identity helper so existing call sites stay unchanged.
+  return text
 }
 
 export class PromptHistoryService {
@@ -89,12 +89,58 @@ export class PromptHistoryService {
   private inputBuffers = new Map<string, string>()
   private onPromptEvent: ((event: PromptCompressEvent) => void) | null = null
   private historyFilePath = ''
+  // Default compression mode for sessions without a per-session override.
+  // Lite keeps detail (0.85), medium is balanced (0.65), extreme maxes
+  // savings (0.4). Lite is the default for all agents.
+  private compressionMode: 'lite' | 'medium' | 'extreme' = 'lite'
+  // Per-session (per-agent) overrides set from the agent tab dropdown.
+  private sessionModes = new Map<string, 'lite' | 'medium' | 'extreme'>()
 
-  constructor(dataDir?: string) {
+  constructor(dataDir?: string, compressionMode: 'lite' | 'medium' | 'extreme' = 'lite') {
     if (dataDir) {
       this.historyFilePath = path.join(dataDir, 'prompt-history.json')
       this.load()
     }
+    this.setCompressionMode(compressionMode)
+  }
+
+  private static rateForMode(mode: 'lite' | 'medium' | 'extreme'): number {
+    switch (mode) {
+      case 'lite':
+        return 0.85
+      case 'medium':
+        return 0.65
+      case 'extreme':
+        return 0.4
+    }
+  }
+
+  private static isMode(mode: unknown): mode is 'lite' | 'medium' | 'extreme' {
+    return mode === 'lite' || mode === 'medium' || mode === 'extreme'
+  }
+
+  /** Update the default compression mode (lite, medium, extreme). */
+  setCompressionMode(mode: 'lite' | 'medium' | 'extreme'): void {
+    if (!PromptHistoryService.isMode(mode)) return
+    this.compressionMode = mode
+  }
+
+  getCompressionMode(): 'lite' | 'medium' | 'extreme' {
+    return this.compressionMode
+  }
+
+  /** Override the compression mode for one session (agent tab dropdown). */
+  setSessionCompressionMode(sessionId: string, mode: 'lite' | 'medium' | 'extreme'): void {
+    if (!sessionId || !PromptHistoryService.isMode(mode)) return
+    this.sessionModes.set(sessionId, mode)
+  }
+
+  getSessionCompressionMode(sessionId: string): 'lite' | 'medium' | 'extreme' {
+    return this.sessionModes.get(sessionId) ?? this.compressionMode
+  }
+
+  getAllSessionModes(): Record<string, 'lite' | 'medium' | 'extreme'> {
+    return Object.fromEntries(this.sessionModes)
   }
 
   setOnPromptEvent(cb: (event: PromptCompressEvent) => void) {
@@ -135,7 +181,8 @@ export class PromptHistoryService {
       if (originalTokens <= MIN_TOKENS_FOR_COMPRESSION) {
         compressedTokens = originalTokens
       } else {
-        const res = getPrompter().compressPrompt(original, '', '', { rate: PROMPT_RATE })
+        const rate = PromptHistoryService.rateForMode(this.getSessionCompressionMode(sessionId))
+        const res = getPrompter().compressPrompt(original, '', '', { rate })
         originalTokens = res.origin_tokens
         compressedTokens = res.compressed_tokens
         const candidate = (res.compressed_prompt || '').trim()
@@ -190,13 +237,16 @@ export class PromptHistoryService {
 
   cleanup(sessionId: string) {
     // Keep history so per-session prompts survive session close and app
-    // restarts. Only clear the transient keystroke buffer.
+    // restarts. Only clear the transient keystroke buffer and the
+    // per-session compression override (a new session starts at default).
     this.inputBuffers.delete(sessionId)
+    this.sessionModes.delete(sessionId)
   }
 
   reset() {
     this.history.clear()
     this.inputBuffers.clear()
+    this.sessionModes.clear()
     this.save()
   }
 

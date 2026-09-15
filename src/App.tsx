@@ -165,6 +165,7 @@ function App() {
     executionHistory,
     filterStats, commandHistory, searchEvents, promptHistory,
     getOrchestratorStats,
+    sessionCompressionModes, setSessionCompressionMode,
   } = useSocket()
   const tokensSaved = useMemo(() => {
     const orig = executionHistory.reduce((s: number, e: any) => s + (e.totalOriginalTokens || 0), 0)
@@ -1269,6 +1270,8 @@ function App() {
             shellOnly={viewMode === 'files'}
             onToggleChatSidebar={handleToggleChatSidebar}
             onTerminalOutput={onTerminalOutput}
+            sessionCompressionModes={sessionCompressionModes}
+            onSessionCompressionModeChange={setSessionCompressionMode}
             onTerminalResizerMouseDown={onTerminalResizerMouseDown}
             terminalHeight={terminalHeight}
             terminalDrag={terminalDrag}

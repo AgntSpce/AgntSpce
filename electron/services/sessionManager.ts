@@ -235,12 +235,13 @@ export class SessionManager extends EventEmitter {
   private lastStatusRefresh = new Map<string, number>()
   private lastStatusBytes = new Map<string, number>()
   private pendingOutput = new Map<string, { chunks: string[]; bytes: number; timer: ReturnType<typeof setTimeout> | null }>()
+  private compressionMode: 'lite' | 'medium' | 'extreme' = 'lite'
 
   constructor(io: any, agentManager?: any, dataDir?: string) {
     super()
     this.io = io
     this.outputFilter = new OutputFilterService(dataDir)
-    this.promptHistory = new PromptHistoryService(dataDir)
+    this.promptHistory = new PromptHistoryService(dataDir, this.compressionMode)
     // Cumulative token savings persist across app restarts (filter-history.json
     // + filter-stats.json in the user data dir). Do NOT reset on startup.
     if (agentManager) this.agentManager = agentManager
@@ -262,9 +263,48 @@ export class SessionManager extends EventEmitter {
         this.io.emit('caveman-run-complete', { sessionId, run })
       } catch {}
     })
+      // Listen for compression mode changes from the renderer
+      this.io.on('connection', (socket: any) => {
+        // Send the current mode to the newly connected renderer
+        socket.emit('compression-mode-changed', this.compressionMode)
+        socket.on('set-compression-mode', (mode: 'lite' | 'medium' | 'extreme') => {
+          if (mode !== 'lite' && mode !== 'medium' && mode !== 'extreme') return
+          this.setCompressionMode(mode)
+        })
+        // Per-session (per-agent) modes for the tab dropdowns
+        socket.emit('session-compression-modes', this.promptHistory.getAllSessionModes())
+        socket.on('set-session-compression-mode', (payload: { sessionId?: string, mode?: 'lite' | 'medium' | 'extreme' }) => {
+          const sessionId = payload?.sessionId
+          const mode = payload?.mode
+          if (!sessionId || (mode !== 'lite' && mode !== 'medium' && mode !== 'extreme')) return
+          this.setSessionCompressionMode(sessionId, mode)
+        })
+      })
   }
 
   setAgentManager(am: any) { this.agentManager = am }
+
+  setCompressionMode(mode: 'lite' | 'medium' | 'extreme') {
+    if (mode !== 'lite' && mode !== 'medium' && mode !== 'extreme') return
+    if (this.compressionMode === mode) return
+    this.compressionMode = mode
+    this.promptHistory.setCompressionMode(mode)
+    this.io.emit('compression-mode-changed', mode)
+  }
+
+  getCompressionMode(): 'lite' | 'medium' | 'extreme' {
+    return this.compressionMode
+  }
+
+  setSessionCompressionMode(sessionId: string, mode: 'lite' | 'medium' | 'extreme') {
+    if (!sessionId || (mode !== 'lite' && mode !== 'medium' && mode !== 'extreme')) return
+    this.promptHistory.setSessionCompressionMode(sessionId, mode)
+    this.io.emit('session-compression-mode-changed', { sessionId, mode })
+  }
+
+  getSessionCompressionMode(sessionId: string): 'lite' | 'medium' | 'extreme' {
+    return this.promptHistory.getSessionCompressionMode(sessionId)
+  }
 
   setStatusDetector(d: StatusDetector) { this.statusDetector = d }
   setGitHelper(g: GitHelper) { this.gitHelper = g }

@@ -47,7 +47,7 @@ type DashboardTab = 'workspaces' | 'tokens' | 'prompts' | 'orchestration'
 const TAB_ORDER: { id: DashboardTab; label: string }[] = [
   { id: 'workspaces', label: 'Workspaces' },
   { id: 'tokens', label: 'Tokens' },
-  { id: 'prompts', label: 'Prompts' },
+  { id: 'prompts', label: 'AgntSpce-PC' },
   { id: 'orchestration', label: 'Orchestration' },
 ]
 
@@ -336,33 +336,75 @@ export default function Dashboard(props: Props) {
         {tab === 'prompts' && (
           <>
             {(() => {
-              const bySession = new Map<string, PromptCompressEvent[]>()
-              for (const e of [...promptHistory].sort((a, b) => b.timestamp - a.timestamp)) {
-                const list = bySession.get(e.sessionId) || []
-                list.push(e)
-                bySession.set(e.sessionId, list)
+              // One card per full prompt: consecutive typed lines submitted
+              // close together (multi-line paste, multi-Enter compose) merge
+              // into a single before/after entry. Short per-line submits
+              // stored verbatim (compressed == original) are skipped so
+              // shell one-liners never flood this list.
+              const GROUP_GAP_MS = 30_000
+              interface PromptGroup {
+                key: string
+                source: 'typed' | 'agent-start'
+                lines: number
+                originalPrompt: string
+                compressedPrompt: string
+                orig: number
+                filt: number
+                reduction: number
+                latest: number
               }
-              const groups = [...bySession.entries()].map(([sid, events]) => {
-                const sorted = [...events].sort((a, b) => b.timestamp - a.timestamp)
-                const orig = sorted.reduce((s, e) => s + e.originalTokens, 0)
-                const filt = sorted.reduce((s, e) => s + e.compressedTokens, 0)
+              const bySession = new Map<string, PromptGroup[]>()
+              const compressedOnly = promptHistory.filter(e => e.compressedTokens < e.originalTokens)
+              for (const e of [...compressedOnly].sort((a, b) => a.timestamp - b.timestamp)) {
+                let list = bySession.get(e.sessionId)
+                if (!list) {
+                  list = []
+                  bySession.set(e.sessionId, list)
+                }
+                const last = list[list.length - 1]
+                if (e.source === 'typed' && last && last.source === 'typed' && e.timestamp - last.latest <= GROUP_GAP_MS) {
+                  last.lines += 1
+                  last.originalPrompt += '\n' + e.originalPrompt
+                  last.compressedPrompt += '\n' + e.compressedPrompt
+                  last.orig += e.originalTokens
+                  last.filt += e.compressedTokens
+                  last.reduction = last.orig > 0 ? Math.round((1 - last.filt / last.orig) * 10000) / 100 : 0
+                  last.latest = e.timestamp
+                } else {
+                  list.push({
+                    key: `${e.sessionId}-${e.timestamp}-${list.length}`,
+                    source: e.source,
+                    lines: 1,
+                    originalPrompt: e.originalPrompt,
+                    compressedPrompt: e.compressedPrompt,
+                    orig: e.originalTokens,
+                    filt: e.compressedTokens,
+                    reduction: e.reduction,
+                    latest: e.timestamp,
+                  })
+                }
+              }
+              const groups = [...bySession.entries()].map(([sid, items]) => {
+                const sorted = [...items].sort((a, b) => b.latest - a.latest)
+                const orig = sorted.reduce((s, g) => s + g.orig, 0)
+                const filt = sorted.reduce((s, g) => s + g.filt, 0)
                 const saved = orig - filt
                 return {
                   sid,
-                  events: sorted,
+                  items: sorted,
                   count: sorted.length,
                   orig,
                   filt,
                   saved,
                   pct: orig > 0 ? Math.round((saved / orig) * 100) : 0,
-                  latest: sorted.length > 0 ? sorted[0].timestamp : 0,
+                  latest: sorted.length > 0 ? sorted[0].latest : 0,
                 }
               }).sort((a, b) => b.latest - a.latest)
               if (groups.length === 0) {
                 return (
                   <div className="dashboard-chart">
                     <div className="dashboard-chart-header">
-                      <span className="dashboard-chart-label">Compressed Prompts</span>
+                      <span className="dashboard-chart-label">AgntSpce-PC</span>
                       <span className="dashboard-chart-legend">before &rarr; after per session</span>
                     </div>
                     <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>
@@ -376,7 +418,7 @@ export default function Dashboard(props: Props) {
               return (
                 <div className="dashboard-chart">
                   <div className="dashboard-chart-header">
-                    <span className="dashboard-chart-label">Compressed Prompts</span>
+                    <span className="dashboard-chart-label">AgntSpce-PC</span>
                     <span className="dashboard-chart-legend">before &rarr; after per session, newest first</span>
                   </div>
                   <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
@@ -412,34 +454,37 @@ export default function Dashboard(props: Props) {
                     </div>
                     {/* Before/after detail, latest to oldest */}
                     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 560, overflowY: 'auto' }}>
-                      {active.events.map((e, i) => {
-                        const ts = new Date(e.timestamp).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
-                        const preview = (text: string) => {
+                      {active.items.map((g) => {
+                        const ts = new Date(g.latest).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                        // Full prompt bodies are rendered verbatim — no
+                        // character truncation. The <pre> scrolls (maxHeight
+                        // + overflow auto) so large prompts stay readable.
+                        const fullText = (text: string) => {
                           if (!text) return '(empty)'
-                          return text.length > 3000 ? `${text.slice(0, 3000)}\n…[${(text.length - 3000).toLocaleString()} more chars]…` : text
+                          return text
                         }
                         return (
-                          <div key={`${e.timestamp}-${i}`} style={{ border: '1px solid var(--border, #2e2e2e)', borderRadius: 6, padding: 8 }}>
+                          <div key={g.key} style={{ border: '1px solid var(--border, #2e2e2e)', borderRadius: 6, padding: 8 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
                               <span style={{ fontSize: 11, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
-                                {e.source === 'agent-start' ? 'agent start prompt' : 'typed prompt'}
+                                {g.source === 'agent-start' ? 'agent start prompt' : g.lines > 1 ? `typed prompt · ${g.lines} lines` : 'typed prompt'}
                               </span>
                               <span style={{ color: 'var(--text-dim)', whiteSpace: 'nowrap', fontSize: 11 }}>{ts}</span>
                             </div>
                             <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
-                              {e.originalTokens.toLocaleString()} &rarr; {e.compressedTokens.toLocaleString()} tokens
-                              <span style={{ color: e.reduction > 0 ? '#22C55E' : 'var(--text-dim)', marginLeft: 6 }}>
-                                ({e.reduction}% saved)
+                              {g.orig.toLocaleString()} &rarr; {g.filt.toLocaleString()} tokens
+                              <span style={{ color: g.reduction > 0 ? '#22C55E' : 'var(--text-dim)', marginLeft: 6 }}>
+                                ({g.reduction}% saved)
                               </span>
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
                               <div style={{ minWidth: 0 }}>
                                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)', marginBottom: 4 }}>Before</div>
-                                <pre style={{ margin: 0, padding: 6, borderRadius: 4, background: 'rgba(255,255,255,0.04)', fontSize: 11, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{preview(e.originalPrompt)}</pre>
+                                <pre style={{ margin: 0, padding: 6, borderRadius: 4, background: 'rgba(255,255,255,0.04)', fontSize: 11, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{fullText(g.originalPrompt)}</pre>
                               </div>
                               <div style={{ minWidth: 0 }}>
                                 <div style={{ fontSize: 11, fontWeight: 600, color: '#22C55E', marginBottom: 4 }}>After (compressed)</div>
-                                <pre style={{ margin: 0, padding: 6, borderRadius: 4, background: 'rgba(34,197,94,0.07)', fontSize: 11, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{preview(e.compressedPrompt)}</pre>
+                                <pre style={{ margin: 0, padding: 6, borderRadius: 4, background: 'rgba(34,197,94,0.07)', fontSize: 11, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{fullText(g.compressedPrompt)}</pre>
                               </div>
                             </div>
                           </div>
@@ -448,7 +493,7 @@ export default function Dashboard(props: Props) {
                     </div>
                   </div>
                   <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
-                    Prompts are recorded when you press Enter in a terminal or start an agent with a prompt; bodies are capped at ~8KB per side.
+                    Prompts are recorded when you press Enter in a terminal or start an agent with a prompt; full before/after bodies are shown.
                   </div>
                 </div>
               )

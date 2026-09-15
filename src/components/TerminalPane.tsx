@@ -28,6 +28,8 @@ interface Props {
   onTerminalOutput?: (cb: (event: { sessionId: string, data: string }) => void) => () => void
   layoutMode?: 'grid' | 'focus' | 'side-left' | 'side-right'
   onLayoutChange?: (mode: 'grid' | 'focus' | 'side-left' | 'side-right') => void
+  sessionCompressionMode?: 'lite' | 'medium' | 'extreme'
+  onSessionCompressionModeChange?: (sessionId: string, mode: 'lite' | 'medium' | 'extreme') => void
   onResizeStart?: (sessionId: string, edge: 'left' | 'right' | 'top' | 'bottom', x: number, y: number) => void
   onResizeMove?: (sessionId: string, edge: 'left' | 'right' | 'top' | 'bottom', x: number, y: number) => void
   onResizeEnd?: () => void
@@ -124,7 +126,7 @@ function safeFit(fitAddon: FitAddon, term: Terminal, paneEl: HTMLElement | null,
 
 
 export default memo(function TerminalPane(props: Props) {
-  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing } = props
+  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing } = props
   const isResizingRef = useRef(isResizing)
   useEffect(() => { isResizingRef.current = isResizing }, [isResizing])
   const terminalRef = useRef<HTMLDivElement>(null)
@@ -569,8 +571,32 @@ function handleResizeDown(edge: 'left' | 'right' | 'top' | 'bottom', e: React.Mo
         {session.branch && session.branch !== 'unknown' && (
           <span className="terminal-branch">{session.branch}</span>
         )}
-
         <span className="terminal-layout-btns">
+          {isAgentType && (
+            <label
+              className="terminal-compression-picker"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span className="terminal-compression-label">agntspce-pc</span>
+              <span
+                className="terminal-compression-help"
+                data-tip="Prompt compression for this agent. Lite keeps ~85% of tokens (most detail). Medium keeps ~65% (balanced). Extreme keeps ~40% (maximum savings, least detail). Applies to prompts sent after switching."
+              >?</span>
+              <select
+                className="terminal-compression-select"
+                value={sessionCompressionMode}
+                onChange={(e) => {
+                  e.stopPropagation()
+                  onSessionCompressionModeChange?.(session.id, e.target.value as 'lite' | 'medium' | 'extreme')
+                }}
+              >
+                <option value="lite">Lite</option>
+                <option value="medium">Medium</option>
+                <option value="extreme">Extreme</option>
+              </select>
+            </label>
+          )}
           <button
             className={`terminal-layout-btn ${layoutMode === 'focus' ? 'active' : ''}`}
             onClick={(e) => { e.stopPropagation(); onLayoutChange?.(layoutMode === 'focus' ? 'grid' : 'focus') }}
@@ -626,6 +652,8 @@ function areTerminalPanePropsEqual(prev: Props, next: Props): boolean {
   if (prev.writeData !== next.writeData) return false
   if (prev.dimmed !== next.dimmed) return false
   if (prev.layoutMode !== next.layoutMode) return false
+  if (prev.sessionCompressionMode !== next.sessionCompressionMode) return false
+  if (prev.onSessionCompressionModeChange !== next.onSessionCompressionModeChange) return false
   if (prev.agentConfigs !== next.agentConfigs) return false
   if (prev.isResizing !== next.isResizing) return false
   const ps = prev.style

@@ -100,6 +100,24 @@ describe('PromptHistoryService', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  it('applies per-session compression modes independently', () => {
+    svc.setSessionCompressionMode('s-lite', 'lite')
+    svc.setSessionCompressionMode('s-extreme', 'extreme')
+    expect(svc.getSessionCompressionMode('s-lite')).toBe('lite')
+    expect(svc.getSessionCompressionMode('s-extreme')).toBe('extreme')
+    // Sessions without an override fall back to the lite default.
+    expect(svc.getSessionCompressionMode('s-other')).toBe('lite')
+    const lite = svc.record('s-lite', WORDY_PROMPT, 'typed')
+    const extreme = svc.record('s-extreme', WORDY_PROMPT, 'typed')
+    expect(lite).not.toBeNull()
+    expect(extreme).not.toBeNull()
+    // Lite keeps at least as many tokens as extreme for the same prompt.
+    expect(lite!.compressedTokens).toBeGreaterThanOrEqual(extreme!.compressedTokens)
+    // Invalid modes are ignored.
+    svc.setSessionCompressionMode('s-lite', 'bogus' as any)
+    expect(svc.getSessionCompressionMode('s-lite')).toBe('lite')
+  })
+
   it('purges mouse-noise events saved before filtering existed', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agntspce-prompt-purge-'))
     const junk = {
