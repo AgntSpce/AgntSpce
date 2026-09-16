@@ -125,7 +125,7 @@ export default memo(function WorkspaceSidebar({
                       style={{ fontSize: 12, width: 16 }}
                     />
                   </div>
-                  <i className={`codicon ${selectedFilePath ? 'codicon-file' : 'codicon-folder'} workspace-icon`} style={{ fontSize: 14, flexShrink: 0, color: '#CCCCCC' }} />
+                  <i className={`codicon ${selectedFilePath ? 'codicon-file' : 'codicon-folder'} workspace-icon`} style={{ fontSize: 14, flexShrink: 0, color: 'var(--text-primary)' }} />
                   <div
                     className={`workspace-tree-name${isActive ? ' active' : ''}`}
                     onClick={() => onSelect(ws.id)}

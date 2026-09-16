@@ -16,7 +16,7 @@ interface FileTreeProps {
 
 function FileIcon({ name }: { name: string }) {
   const icon = getFileIconClass(name)
-  return <i className={`codicon codicon-${icon}`} style={{ fontSize: 14, flexShrink: 0, color: '#CCCCCC' }} />
+  return <i className={`codicon codicon-${icon}`} style={{ fontSize: 14, flexShrink: 0, color: 'var(--text-primary)' }} />
 }
 
 export function FileTree({
