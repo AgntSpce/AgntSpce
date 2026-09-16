@@ -35,6 +35,8 @@ interface Props {
   onResizeEnd?: () => void
   edgeHandles?: ('left' | 'right' | 'top' | 'bottom')[]
   isResizing?: boolean
+  fontSize?: number
+  fontFamily?: string
 }
 
 // WebGL hygiene latch (Orca pattern): once an attach fails (GPU process dead,
@@ -126,7 +128,7 @@ function safeFit(fitAddon: FitAddon, term: Terminal, paneEl: HTMLElement | null,
 
 
 export default memo(function TerminalPane(props: Props) {
-  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing } = props
+  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace" } = props
   const isResizingRef = useRef(isResizing)
   useEffect(() => { isResizingRef.current = isResizing }, [isResizing])
   const terminalRef = useRef<HTMLDivElement>(null)
@@ -226,8 +228,8 @@ export default memo(function TerminalPane(props: Props) {
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: 'block',
-      fontSize: 16,
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
+      fontSize,
+      fontFamily,
       theme: buildTheme(),
       allowTransparency: false,
       scrollback: 200,
@@ -469,6 +471,27 @@ export default memo(function TerminalPane(props: Props) {
       fitAddonRef.current = null
     }
   }, [session.id, session.restorable])
+
+  // Apply font size/family changes live (settings) without rebuilding the
+  // terminal: xterm picks up option changes, then refit to the new cell size
+  // (which reflows cols/rows and notifies the PTY via the normal path).
+  useEffect(() => {
+    const applyFont = (term: Terminal, fit: FitAddon | null) => {
+      try {
+        if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize
+        if (term.options.fontFamily !== fontFamily) term.options.fontFamily = fontFamily
+        if (fit) fit.fit()
+      } catch {}
+    }
+    if (termInstance.current && fitAddonRef.current) {
+      applyFont(termInstance.current, fitAddonRef.current)
+    } else {
+      // Pane is parked (alive but unmounted): update the parked instance so
+      // the next remount already uses the new font.
+      const parked = parkedTerminals.get(session.id)
+      if (parked?.alive) applyFont(parked.term, parked.fitAddon)
+    }
+  }, [fontSize, fontFamily, session.id])
 
   // Hold flush → only final cols/rows reach backend after drag
   useEffect(() => {

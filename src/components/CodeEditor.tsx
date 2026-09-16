@@ -14,6 +14,8 @@ interface CodeEditorProps {
   language: string
   isDirty: boolean
   theme: 'dark' | 'light'
+  fontSize?: number
+  fontFamily?: string
   scrollPosition?: { line: number; column: number } | null
   onContentChange: (value: string | undefined) => void
   onSave: () => void
@@ -26,6 +28,8 @@ export function CodeEditor({
   language,
   isDirty,
   theme,
+  fontSize = 13,
+  fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, Monaco, 'Courier New', monospace",
   scrollPosition,
   onContentChange,
   onSave,
@@ -142,8 +146,8 @@ export function CodeEditor({
           onMount={handleEditorDidMount}
           beforeMount={handleBeforeMount}
           options={{
-            fontSize: 13,
-            fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, Monaco, 'Courier New', monospace",
+            fontSize,
+            fontFamily,
             lineNumbers: 'on',
             minimap: { enabled: false },
             scrollBeyondLastLine: false,

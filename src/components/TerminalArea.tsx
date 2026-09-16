@@ -55,6 +55,8 @@ interface Props {
   terminalHeight?: number
   terminalDrag?: boolean
   agentPickerTrigger?: number
+  fontSize?: number
+  fontFamily?: string
 }
 
 const AGENT_TYPES = [
@@ -64,13 +66,15 @@ const AGENT_TYPES = [
   { id: 'gemini', label: 'Gemini CLI', icon: '✨' },
 ]
 
-const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, writeData, hidden, onTerminalOutput }: {
+const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, writeData, hidden, onTerminalOutput, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace" }: {
   session: SessionState
   onInput: (sessionId: string, data: string) => void
   onResize: (sessionId: string, cols: number, rows: number) => void
   writeData: string
   hidden: boolean
   onTerminalOutput?: (cb: (data: any) => void) => () => void
+  fontSize?: number
+  fontFamily?: string
 }) {
   const terminalRef = useRef<HTMLDivElement>(null)
   const termInstance = useRef<Terminal | null>(null)
@@ -110,8 +114,8 @@ const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, 
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: 'block',
-      fontSize: 16,
-      fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
+      fontSize,
+      fontFamily,
       theme: buildTheme(),
       allowTransparency: false,
     })
@@ -201,6 +205,17 @@ const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, 
       try { fitAddonRef.current.fit() } catch {}
     }
   }, [hidden])
+
+  // Apply font size/family changes live (settings) without rebuilding.
+  useEffect(() => {
+    const term = termInstance.current
+    if (!term) return
+    try {
+      if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize
+      if (term.options.fontFamily !== fontFamily) term.options.fontFamily = fontFamily
+      fitAddonRef.current?.fit()
+    } catch {}
+  }, [fontSize, fontFamily])
 
   useEffect(() => {
     const el = terminalRef.current
@@ -383,6 +398,8 @@ export default memo(function TerminalArea({
   pageViews, activeView, onViewChange, shellOnly,
   onTerminalResizerMouseDown, terminalHeight = 40, terminalDrag,
   agentPickerTrigger = 0,
+  fontSize = 16,
+  fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace",
 }: Props) {
   const [activeGroupTab, setActiveGroupTab] = useState<string>('all')
   const [showDropdown, setShowDropdown] = useState(false)
@@ -552,6 +569,8 @@ export default memo(function TerminalArea({
         isResizing={isFlexDragging}
         sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'}
         onSessionCompressionModeChange={onSessionCompressionModeChange}
+        fontSize={fontSize}
+        fontFamily={fontFamily}
       />
     )
   }
@@ -590,6 +609,8 @@ export default memo(function TerminalArea({
                     writeData={writeBuffersRef.current[s.id] || ''}
                     hidden={s.id !== activeShellId}
                     onTerminalOutput={onTerminalOutput}
+                    fontSize={fontSize}
+                    fontFamily={fontFamily}
                   />
                 ))
               )}
@@ -722,9 +743,11 @@ export default memo(function TerminalArea({
                           session={s}
                           onInput={onInput}
                           onResize={onResize}
-                          writeData={writeBuffersRef.current[s.id] || ''}
-                          hidden={s.id !== activeShellId}
-                          onTerminalOutput={onTerminalOutput}
+                        writeData={writeBuffersRef.current[s.id] || ''}
+                        hidden={s.id !== activeShellId}
+                        onTerminalOutput={onTerminalOutput}
+                        fontSize={fontSize}
+                        fontFamily={fontFamily}
                         />
                       ))
                     )}
@@ -758,11 +781,11 @@ export default memo(function TerminalArea({
                   {splitLayout === 'side-left' ? (
                     <>
                       {filteredSessions.filter(s => s.id === focusSessionId).map(session => (
-                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-left" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} />
+                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-left" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
                       ))}
                       <div className="terminal-area" style={{ flex: 1, minWidth: 0, display: 'grid', gap: 4, gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', alignContent: 'start' }}>
                         {filteredSessions.filter(s => s.id !== focusSessionId).map(session => (
-                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} />
+                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
                         ))}
                       </div>
                     </>
@@ -770,11 +793,11 @@ export default memo(function TerminalArea({
                     <>
                       <div className="terminal-area" style={{ flex: 1, minWidth: 0, display: 'grid', gap: 4, gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', alignContent: 'start' }}>
                         {filteredSessions.filter(s => s.id !== focusSessionId).map(session => (
-                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} />
+                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
                         ))}
                       </div>
                       {filteredSessions.filter(s => s.id === focusSessionId).map(session => (
-                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-right" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} />
+                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-right" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
                       ))}
                     </>
                   )}
@@ -826,6 +849,8 @@ export default memo(function TerminalArea({
                           dimmed={false}
                           onTerminalOutput={onTerminalOutput}
                           isResizing={isFlexDragging}
+                          fontSize={fontSize}
+                          fontFamily={fontFamily}
                         />
                       </div>
                     ))
@@ -854,6 +879,8 @@ export default memo(function TerminalArea({
                           dimmed={focusMode && session.id !== activeSessionId && !isFullScreen}
                           onTerminalOutput={onTerminalOutput}
                           isResizing={isFlexDragging}
+                          fontSize={fontSize}
+                          fontFamily={fontFamily}
                         />
                       ))}
                     </div>
@@ -892,6 +919,8 @@ export default memo(function TerminalArea({
                           dimmed={focusMode && session.id !== activeSessionId && !isFullScreen}
                           onTerminalOutput={onTerminalOutput}
                           isResizing={isFlexDragging}
+                          fontSize={fontSize}
+                          fontFamily={fontFamily}
                         />
                       ))}
                     </div>
@@ -917,9 +946,11 @@ export default memo(function TerminalArea({
                         session={s}
                         onInput={onInput}
                         onResize={onResize}
-                        writeData={writeBuffersRef.current[s.id] || ''}
-                        hidden={s.id !== activeShellId}
-                        onTerminalOutput={onTerminalOutput}
+                      writeData={writeBuffersRef.current[s.id] || ''}
+                      hidden={s.id !== activeShellId}
+                      onTerminalOutput={onTerminalOutput}
+                      fontSize={fontSize}
+                      fontFamily={fontFamily}
                       />
                     ))
                   )}

@@ -1228,6 +1228,8 @@ function App() {
                         language={activeFile.language}
                         isDirty={isActiveFileDirty}
                         theme={theme}
+                        fontSize={fontSize}
+                        fontFamily={fontFamily}
                         scrollPosition={editorScrollPositions[activeFile.id] || null}
                         onContentChange={handleFileContentChange}
                         onSave={handleSaveFile}
@@ -1279,6 +1281,8 @@ function App() {
             pageViews={pageViews}
             activeView={activeView}
             onViewChange={handleViewChange}
+            fontSize={fontSize}
+            fontFamily={fontFamily}
           />
         </main>
         <div className="resizer" style={{ opacity: chatSidebarOpen ? 1 : 0, pointerEvents: chatSidebarOpen ? 'auto' : 'none' }} onMouseDown={onResizerMouseDown('right')} />

@@ -11,14 +11,18 @@ interface UserPrefs {
   tokenCompression: boolean
   autoStart: boolean
   sessionRecovery: boolean
-  maxTokensPerSession: number
   layoutPreset: string
 }
 
 function loadPrefs(): UserPrefs {
   try {
     const raw = localStorage.getItem('agent-workspace-prefs')
-    if (raw) return { ...defaultPrefs, ...JSON.parse(raw) }
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      // Dropped setting: sessions have no token limit.
+      delete parsed.maxTokensPerSession
+      return { ...defaultPrefs, ...parsed }
+    }
   } catch {}
   return { ...defaultPrefs }
 }
@@ -34,7 +38,6 @@ const defaultPrefs: UserPrefs = {
   tokenCompression: true,
   autoStart: true,
   sessionRecovery: true,
-  maxTokensPerSession: 100000,
   layoutPreset: 'auto',
 }
 
@@ -393,21 +396,6 @@ export default function Settings({ theme, onThemeChange, onFontSizeChange, onFon
               />
               <span className="settings-toggle-slider" />
             </label>
-          </div>
-          <div className="settings-row">
-            <div>
-              <span className="settings-label">Max tokens per session</span>
-              <span className="settings-label-desc">Auto-close session when token budget exceeded</span>
-            </div>
-            <input
-              className="settings-input"
-              type="number"
-              min={10000}
-              max={1000000}
-              step={10000}
-              value={prefs.maxTokensPerSession}
-              onChange={e => updatePrefs({ maxTokensPerSession: parseInt(e.target.value) || 100000 })}
-            />
           </div>
         </div>
 
