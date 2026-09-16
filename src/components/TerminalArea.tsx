@@ -57,6 +57,8 @@ interface Props {
   agentPickerTrigger?: number
   fontSize?: number
   fontFamily?: string
+  pendingCloseSessionId?: string | null
+  onCloseConfirm?: (sessionId: string, confirmed: boolean) => void
 }
 
 const AGENT_TYPES = [
@@ -400,6 +402,8 @@ export default memo(function TerminalArea({
   agentPickerTrigger = 0,
   fontSize = 16,
   fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace",
+  pendingCloseSessionId = null,
+  onCloseConfirm,
 }: Props) {
   const [activeGroupTab, setActiveGroupTab] = useState<string>('all')
   const [showDropdown, setShowDropdown] = useState(false)
@@ -513,6 +517,23 @@ export default memo(function TerminalArea({
     }
   }, [agentPickerTrigger])
 
+  const areaRef = useRef<HTMLDivElement>(null)
+  // Track the pane the user is actually interacting with: clicking or typing
+  // in a grid pane doesn't change tab selection, so without this the app's
+  // activeSessionId lags behind and actions like Cmd+R target the wrong
+  // agent. Pane roots carry data-pane-id (shell terminals don't, ignored).
+  useEffect(() => {
+    const root = areaRef.current
+    if (!root) return
+    const onFocusIn = (e: FocusEvent) => {
+      const t = e.target as HTMLElement | null
+      const id = t?.closest?.('[data-pane-id]')?.getAttribute('data-pane-id')
+      if (id) onActiveSessionChange(id)
+    }
+    root.addEventListener('focusin', onFocusIn)
+    return () => root.removeEventListener('focusin', onFocusIn)
+  }, [onActiveSessionChange])
+
   function handleDropdownSelect(agentId: string) {
     setShowDropdown(false)
     onSelectAgent(agentId)
@@ -571,6 +592,8 @@ export default memo(function TerminalArea({
         onSessionCompressionModeChange={onSessionCompressionModeChange}
         fontSize={fontSize}
         fontFamily={fontFamily}
+        confirmClose={pendingCloseSessionId === session.id}
+        onCloseConfirmResponse={onCloseConfirm}
       />
     )
   }
@@ -652,7 +675,7 @@ export default memo(function TerminalArea({
   }
 
   return (
-    <div className={`terminal-area-wrapper${terminalFullscreen ? ' fullscreen' : ''}`} style={{ position: 'relative' }}>
+    <div ref={areaRef} className={`terminal-area-wrapper${terminalFullscreen ? ' fullscreen' : ''}`} style={{ position: 'relative' }}>
       <div style={{
         display: 'flex',
         flexDirection: 'column',
@@ -781,11 +804,11 @@ export default memo(function TerminalArea({
                   {splitLayout === 'side-left' ? (
                     <>
                       {filteredSessions.filter(s => s.id === focusSessionId).map(session => (
-                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-left" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
+                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-left" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                       ))}
                       <div className="terminal-area" style={{ flex: 1, minWidth: 0, display: 'grid', gap: 4, gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', alignContent: 'start' }}>
                         {filteredSessions.filter(s => s.id !== focusSessionId).map(session => (
-                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
+                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                         ))}
                       </div>
                     </>
@@ -793,11 +816,11 @@ export default memo(function TerminalArea({
                     <>
                       <div className="terminal-area" style={{ flex: 1, minWidth: 0, display: 'grid', gap: 4, gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', alignContent: 'start' }}>
                         {filteredSessions.filter(s => s.id !== focusSessionId).map(session => (
-                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
+                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                         ))}
                       </div>
                       {filteredSessions.filter(s => s.id === focusSessionId).map(session => (
-                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-right" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} />
+                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-right" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                       ))}
                     </>
                   )}
@@ -851,6 +874,8 @@ export default memo(function TerminalArea({
                           isResizing={isFlexDragging}
                           fontSize={fontSize}
                           fontFamily={fontFamily}
+                          confirmClose={pendingCloseSessionId === session.id}
+                          onCloseConfirmResponse={onCloseConfirm}
                         />
                       </div>
                     ))
@@ -881,6 +906,8 @@ export default memo(function TerminalArea({
                           isResizing={isFlexDragging}
                           fontSize={fontSize}
                           fontFamily={fontFamily}
+                          confirmClose={pendingCloseSessionId === session.id}
+                          onCloseConfirmResponse={onCloseConfirm}
                         />
                       ))}
                     </div>
@@ -921,6 +948,8 @@ export default memo(function TerminalArea({
                           isResizing={isFlexDragging}
                           fontSize={fontSize}
                           fontFamily={fontFamily}
+                          confirmClose={pendingCloseSessionId === session.id}
+                          onCloseConfirmResponse={onCloseConfirm}
                         />
                       ))}
                     </div>

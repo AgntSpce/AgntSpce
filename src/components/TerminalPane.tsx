@@ -37,6 +37,8 @@ interface Props {
   isResizing?: boolean
   fontSize?: number
   fontFamily?: string
+  confirmClose?: boolean
+  onCloseConfirmResponse?: (sessionId: string, confirmed: boolean) => void
 }
 
 // WebGL hygiene latch (Orca pattern): once an attach fails (GPU process dead,
@@ -128,7 +130,7 @@ function safeFit(fitAddon: FitAddon, term: Terminal, paneEl: HTMLElement | null,
 
 
 export default memo(function TerminalPane(props: Props) {
-  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace" } = props
+  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace", confirmClose = false, onCloseConfirmResponse } = props
   const isResizingRef = useRef(isResizing)
   useEffect(() => { isResizingRef.current = isResizing }, [isResizing])
   const terminalRef = useRef<HTMLDivElement>(null)
@@ -139,6 +141,57 @@ export default memo(function TerminalPane(props: Props) {
   const [showStartup, setShowStartup] = useState(false)
   const onTerminalOutputRef = useRef(onTerminalOutput)
   useEffect(() => { onTerminalOutputRef.current = onTerminalOutput })
+  const onCloseConfirmRef = useRef(onCloseConfirmResponse)
+  useEffect(() => { onCloseConfirmRef.current = onCloseConfirmResponse })
+  // Close-confirm dialog state (Cmd/Ctrl+R): Yes is the default choice.
+  const [confirmChoice, setConfirmChoice] = useState<'yes' | 'no'>('yes')
+  const confirmChoiceRef = useRef<'yes' | 'no'>('yes')
+  useEffect(() => { confirmChoiceRef.current = confirmChoice })
+  const respondedRef = useRef(false)
+  const prevConfirmCloseRef = useRef(confirmClose)
+  const confirmBoxRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (confirmClose) {
+      respondedRef.current = false
+      setConfirmChoice('yes')
+      // autoFocus is unreliable on plain divs: focus explicitly (rAF so the
+      // node exists) or arrows/enter fall through to the terminal behind.
+      const raf = requestAnimationFrame(() => {
+        try { confirmBoxRef.current?.focus({ preventScroll: true }) } catch {}
+      })
+      prevConfirmCloseRef.current = confirmClose
+      return () => cancelAnimationFrame(raf)
+    } else if (prevConfirmCloseRef.current) {
+      // Dialog dismissed without closing → hand focus back to the terminal.
+      try { termInstance.current?.focus() } catch {}
+    }
+    prevConfirmCloseRef.current = confirmClose
+  }, [confirmClose])
+
+  function respondCloseConfirm(confirmed: boolean) {
+    if (respondedRef.current) return
+    respondedRef.current = true
+    onCloseConfirmRef.current?.(session.id, confirmed)
+  }
+
+  // Dialog keys work no matter where DOM focus actually landed (terminal,
+  // sidebar, another pane): capture globally while this dialog is open.
+  // The box's own onKeyDown below stays as the focused-path handler; both
+  // funnel through respondCloseConfirm's once-guard.
+  useEffect(() => {
+    if (!confirmClose) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Enter' && e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'ArrowLeft') setConfirmChoice('yes')
+      else if (e.key === 'ArrowRight') setConfirmChoice('no')
+      else if (e.key === 'Escape') respondCloseConfirm(false)
+      else respondCloseConfirm(confirmChoiceRef.current === 'yes')
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
+  }, [confirmClose])
   // Active edge-drag listeners — removed if the pane unmounts mid-drag.
   const dragCleanupRef = useRef<(() => void) | null>(null)
   useEffect(() => () => { dragCleanupRef.current?.() }, [])
@@ -661,6 +714,40 @@ function handleResizeDown(edge: 'left' | 'right' | 'top' | 'bottom', e: React.Mo
             />
           </div>
         )}
+        {confirmClose && (
+          <div
+            className="pane-confirm-overlay"
+            onMouseDown={(e) => { if (e.target === e.currentTarget) respondCloseConfirm(false) }}
+          >
+            <div
+              className="pane-confirm-box"
+              tabIndex={-1}
+              ref={confirmBoxRef}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowLeft') { e.preventDefault(); setConfirmChoice('yes') }
+                else if (e.key === 'ArrowRight') { e.preventDefault(); setConfirmChoice('no') }
+                else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); respondCloseConfirm(confirmChoice === 'yes') }
+                else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); respondCloseConfirm(false) }
+              }}
+            >
+              <div className="pane-confirm-title">Remove this agent?</div>
+              <div className="pane-confirm-sub">{session.type} · {session.id.slice(-8)}</div>
+              <div className="pane-confirm-actions">
+                <button
+                  tabIndex={-1}
+                  className={`pane-confirm-btn yes${confirmChoice === 'yes' ? ' selected' : ''}`}
+                  onClick={() => respondCloseConfirm(true)}
+                >Yes</button>
+                <button
+                  tabIndex={-1}
+                  className={`pane-confirm-btn no${confirmChoice === 'no' ? ' selected' : ''}`}
+                  onClick={() => respondCloseConfirm(false)}
+                >No</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -679,6 +766,9 @@ function areTerminalPanePropsEqual(prev: Props, next: Props): boolean {
   if (prev.onSessionCompressionModeChange !== next.onSessionCompressionModeChange) return false
   if (prev.agentConfigs !== next.agentConfigs) return false
   if (prev.isResizing !== next.isResizing) return false
+  if (prev.fontSize !== next.fontSize) return false
+  if (prev.fontFamily !== next.fontFamily) return false
+  if (prev.confirmClose !== next.confirmClose) return false
   const ps = prev.style
   const ns = next.style
   if (ps?.flex !== ns?.flex) return false

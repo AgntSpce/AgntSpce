@@ -2348,6 +2348,11 @@
   transform: translateX(2px);
 }
 
+.agent-dropdown-item.highlighted {
+  background: var(--bg-elevated);
+  transform: translateX(2px);
+}
+
 .agent-dropdown-item:active {
   transform: scale(0.98);
   transition-duration: 50ms;
@@ -4602,6 +4607,91 @@
   background: rgba(10, 10, 11, 0.85);
   z-index: 10;
   backdrop-filter: blur(2px);
+}
+
+/* ── Pane close confirmation (Cmd/Ctrl+R) ─── */
+.pane-confirm-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 30;
+}
+
+.pane-confirm-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 220px;
+  max-width: 90%;
+  padding: 18px 22px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  outline: none;
+  animation: scaleIn var(--anim-duration-normal) var(--anim-ease);
+}
+
+.pane-confirm-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pane-confirm-sub {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.pane-confirm-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.pane-confirm-btn {
+  min-width: 72px;
+  padding: 7px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  opacity: 0.75;
+  transition:
+    opacity var(--anim-duration) var(--anim-ease),
+    box-shadow var(--anim-duration) var(--anim-ease),
+    transform var(--anim-duration-fast) var(--anim-ease);
+}
+
+.pane-confirm-btn:hover {
+  opacity: 1;
+}
+
+.pane-confirm-btn:active {
+  transform: scale(0.96);
+}
+
+.pane-confirm-btn.yes {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.pane-confirm-btn.no {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+  color: var(--text-primary);
+}
+
+.pane-confirm-btn.selected {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 0 4px currentColor;
 }
 
 .terminal-resume-overlay {

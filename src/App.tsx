@@ -194,6 +194,7 @@ function App() {
   const [createWorkspaceModalOpen, setCreateWorkspaceModalOpen] = useState(false)
   const [commanderOpen, setCommanderOpen] = useState(false)
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false)
+  const [pendingCloseSessionId, setPendingCloseSessionId] = useState<string | null>(null)
 
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileId, setActiveFileId] = useState<string | null>(null)
@@ -523,9 +524,24 @@ function App() {
     setNotifications([])
   }
 
+  // Cmd/Ctrl+R: ask for confirmation inside the active agent's own window
+  // before closing it. Only fires while agent panes are visible (not in the
+  // file viewer or over a full-page dashboard/settings view). Reads live
+  // state through shortcutDepsRef (declared below, read at call time only).
+  const requestCloseActiveAgent = useCallback(() => {
+    const { activeSessionId, agentSessions, viewMode, activeView } = shortcutDepsRef.current
+    if (viewMode !== 'agents' || activeView === 'dashboard' || activeView === 'settings') return
+    if (agentSessions.length === 0) return
+    const target = activeSessionId && agentSessions.some(s => s.id === activeSessionId)
+      ? activeSessionId
+      : agentSessions[0].id
+    setPendingCloseSessionId(target)
+  }, [])
+
   const commanderCommands = useMemo(() => [
     { id: 'commander', category: 'Navigation', label: 'Open Command Palette', description: 'Search and run commands', combo: 'cmd+k', action: () => { setCommanderOpen(o => !o) } },
     { id: 'new-agent', category: 'Terminals', label: 'New Agent Session', description: 'Create a new AI agent terminal', combo: 'cmd+a', action: () => { handleToggleNewAgentPicker() } },
+    { id: 'close-agent', category: 'Terminals', label: 'Close Active Agent', description: 'Confirm inside the pane, then close the active agent session', combo: 'cmd+r', action: () => { requestCloseActiveAgent() } },
     { id: 'new-shell', category: 'Terminals', label: 'New Shell Terminal', description: 'Open a shell terminal', combo: 'cmd+s', action: () => { handleToggleBottomShell() } },
     { id: 'new-workspace', category: 'Workspaces', label: 'Create Workspace', description: 'Create a new workspace', combo: 'cmd+n', action: () => { setCreateWorkspaceModalOpen(true) } },
     { id: 'load-workspace', category: 'Workspaces', label: 'Open Workspace', description: 'Load a workspace file', combo: 'cmd+o', action: () => { handleLoadWorkspace() } },
@@ -538,7 +554,7 @@ function App() {
     { id: 'show-git-review', category: 'View', label: 'Show Git Review', description: 'Review git changes and comments', combo: 'cmd+g', action: () => { handleToggleView('git-review') } },
     { id: 'show-settings', category: 'View', label: 'Show Settings', description: 'Configure preferences', combo: 'cmd+j', action: () => { handleToggleView('settings') } },
     { id: 'clear-notifications', category: 'Notifications', label: 'Clear Notifications', description: 'Dismiss all notifications', action: () => { dismissAllNotifications() } },
-  ], [setFocusMode, handleToggleChatSidebar, handleToggleWorkspaceSidebar, handleToggleBottomShell, setActiveView, setCommanderOpen, handleLoadWorkspace, handleToggleNewAgentPicker, handleToggleView])
+  ], [setFocusMode, handleToggleChatSidebar, handleToggleWorkspaceSidebar, handleToggleBottomShell, setActiveView, setCommanderOpen, handleLoadWorkspace, handleToggleNewAgentPicker, handleToggleView, requestCloseActiveAgent])
 
   const shortcuts = useMemo(() => {
     return commanderCommands
@@ -596,6 +612,11 @@ function App() {
       setActiveSessionId(remaining.length > 0 ? remaining[0].id : null)
     }
   }, [closeTab, activeSessionId, agentSessions])
+
+  const handleCloseConfirm = useCallback((sessionId: string, confirmed: boolean) => {
+    setPendingCloseSessionId(null)
+    if (confirmed) handleCloseAgentTab(sessionId)
+  }, [handleCloseAgentTab])
 
   const handleNewShell = useCallback(() => {
     handleNewTerminal('shell')
@@ -656,8 +677,8 @@ function App() {
   // Latest session state for the keydown handler — reading through a ref lets
   // the listener stay bound for the app lifetime instead of being removed and
   // re-added on every status flip (which also re-rendered the whole tree).
-  const shortcutDepsRef = useRef({ activeSessionId, agentSessions })
-  shortcutDepsRef.current = { activeSessionId, agentSessions }
+  const shortcutDepsRef = useRef({ activeSessionId, agentSessions, viewMode, activeView })
+  shortcutDepsRef.current = { activeSessionId, agentSessions, viewMode, activeView }
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -1283,6 +1304,8 @@ function App() {
             onViewChange={handleViewChange}
             fontSize={fontSize}
             fontFamily={fontFamily}
+            pendingCloseSessionId={pendingCloseSessionId}
+            onCloseConfirm={handleCloseConfirm}
           />
         </main>
         <div className="resizer" style={{ opacity: chatSidebarOpen ? 1 : 0, pointerEvents: chatSidebarOpen ? 'auto' : 'none' }} onMouseDown={onResizerMouseDown('right')} />
