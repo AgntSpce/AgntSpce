@@ -534,6 +534,38 @@ export default memo(function TerminalArea({
     return () => root.removeEventListener('focusin', onFocusIn)
   }, [onActiveSessionChange])
 
+  // Ctrl+Tab / Ctrl+Shift+Tab: move keyboard focus across agent panes in
+  // visual order (left-to-right, top-to-bottom = DOM order) on both macOS
+  // and Windows. Cmd+Tab never reaches the renderer on macOS (the OS steals
+  // it for app switching), so Ctrl is the cross-platform modifier. Capture
+  // phase + stopPropagation so the focused xterm doesn't also see the Tab.
+  useEffect(() => {
+    const root = areaRef.current
+    if (!root) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || !e.ctrlKey || e.metaKey || e.altKey) return
+      const panes = [...root.querySelectorAll('[data-pane-id]')].filter(el => {
+        const r = (el as HTMLElement).getBoundingClientRect()
+        return r.width > 0 && r.height > 0
+      }) as HTMLElement[]
+      if (panes.length === 0) return
+      e.preventDefault()
+      e.stopPropagation()
+      const ids = panes.map(p => p.getAttribute('data-pane-id')!)
+      let idx = panes.findIndex(p => p.contains(document.activeElement))
+      if (idx < 0) idx = activeSessionId ? ids.indexOf(activeSessionId) : -1
+      const dir = e.shiftKey ? -1 : 1
+      const next = (idx + dir + panes.length) % panes.length
+      const target = panes[next]
+      const id = ids[next]
+      if (id) onActiveSessionChange(id)
+      const focusEl = (target.querySelector('textarea') ?? target.querySelector('button')) as HTMLElement | null
+      try { focusEl?.focus({ preventScroll: true }) } catch { try { focusEl?.focus() } catch {} }
+    }
+    root.addEventListener('keydown', onKeyDown, true)
+    return () => root.removeEventListener('keydown', onKeyDown, true)
+  }, [onActiveSessionChange, activeSessionId])
+
   function handleDropdownSelect(agentId: string) {
     setShowDropdown(false)
     onSelectAgent(agentId)
