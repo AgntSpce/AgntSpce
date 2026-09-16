@@ -202,6 +202,20 @@ export class ResourceTracker {
     return total
   }
 
+  /** Total CPU across all tracked session subtrees (app-wide agent total). */
+  getTotalCpuPercent(): number {
+    let total = 0
+    for (const usage of this.usageCache.values()) total += usage.cpuPercent || 0
+    return Math.round(total * 10) / 10
+  }
+
+  /** Total processes attributed across all session subtrees. */
+  getTotalProcessCount(): number {
+    let total = 0
+    for (const usage of this.usageCache.values()) total += usage.processCount ?? 1
+    return total
+  }
+
   get thresholds_(): ResourceThresholds {
     return this.thresholds
   }

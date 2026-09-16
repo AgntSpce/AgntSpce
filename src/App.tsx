@@ -1074,7 +1074,7 @@ function App() {
 
   return (
     <div className="app">
-      <TitleBar />
+      <TitleBar getOrchestratorStats={getOrchestratorStats} />
       <div className="app-body" ref={appBodyRef}>
           <div className="activity-bar">
             <div className="activity-bar-top">

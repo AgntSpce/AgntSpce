@@ -32,6 +32,9 @@ export interface OrchestratorStats {
   concurrency: { active: number, queued: number, max: number }
   sessionCount: number
   totalMemoryMB: number
+  totalCpuPercent: number
+  totalProcessCount?: number
+  appCpuPercent?: number | null
   resourceUsage: { sessionId: string, pid: number, cpuPercent: number, memoryMB: number, subtreeMemoryMB?: number, processCount?: number, collectedAt: number }[]
   appMemory?: { mainMB: number, rendererMB: number, gpuMB: number, otherMB: number } | null
   orchestration: {
@@ -684,7 +687,7 @@ socket.emit('get-cumulative-stats', {})
   const getOrchestratorStats = useCallback(async (): Promise<OrchestratorStats> => {
     const res = await emitAck('get-orchestrator-stats', {})
     if (res?.ok) return res
-    return { concurrency: { active: 0, queued: 0, max: 6 }, sessionCount: 0, totalMemoryMB: 0, resourceUsage: [], orchestration: null }
+    return { concurrency: { active: 0, queued: 0, max: 6 }, sessionCount: 0, totalMemoryMB: 0, totalCpuPercent: 0, resourceUsage: [], orchestration: null }
   }, [emitAck])
 
   const getSessionUsage = useCallback((sessionId: string): Promise<any> => {

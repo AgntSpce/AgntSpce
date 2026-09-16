@@ -20,10 +20,6 @@ function formatPct(n: number): string {
   return `${Math.round(n * 100)}%`
 }
 
-function formatMB(n: number): string {
-  return `${n.toFixed(0)} MB`
-}
-
 function StatCard({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: string }) {
   return (
     <div className="orch-stat-card">
@@ -116,15 +112,6 @@ export default function OrchestrationPanel({ getOrchestratorStats }: { getOrches
           label="Sessions"
           value={`${orch.sessions}`}
           sub={`${stats?.sessionCount ?? 0} tracked · ${orch.worktrees} worktrees`}
-        />
-        <StatCard
-          label="Memory"
-          value={formatMB(stats?.totalMemoryMB ?? 0)}
-          sub={
-            stats?.appMemory
-              ? `agents · app: main ${formatMB(stats.appMemory.mainMB)} · ui ${formatMB(stats.appMemory.rendererMB)} · gpu ${formatMB(stats.appMemory.gpuMB)}`
-              : `${stats?.resourceUsage?.length ?? 0} sampled sessions`
-          }
         />
       </div>
 
@@ -234,29 +221,6 @@ export default function OrchestrationPanel({ getOrchestratorStats }: { getOrches
         </div>
       </div>
 
-      {/* Resource usage heat list */}
-      {stats?.resourceUsage && stats.resourceUsage.length > 0 && (
-        <div className="orch-chart">
-          <div className="orch-chart-header">
-            <span className="orch-section-title">Resource Usage (per session)</span>
-            <span className="orch-section-total">{stats.resourceUsage.length} sessions sampled</span>
-          </div>
-          <div className="orch-session-list">
-            {stats.resourceUsage.map(r => (
-              <div key={r.sessionId} className="orch-session-row">
-                <span className="orch-session-name">{r.sessionId.slice(0, 12)}</span>
-                <span className="orch-session-value">
-                  {r.cpuPercent?.toFixed?.(1) ?? '0'}% CPU ·{' '}
-                  {r.subtreeMemoryMB != null
-                    ? `${formatMB(r.subtreeMemoryMB)} tree (${formatMB(r.memoryMB ?? 0)} shell)${r.processCount ? ` · ${r.processCount} procs` : ''}`
-                    : formatMB(r.memoryMB ?? 0)}
-                  {' '}· pid {r.pid}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

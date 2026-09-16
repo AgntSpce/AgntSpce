@@ -191,6 +191,14 @@ export class AgentOrchestrator {
     return this.resourceTracker.getTotalMemoryMB()
   }
 
+  getTotalCpuPercent(): number {
+    return this.resourceTracker.getTotalCpuPercent()
+  }
+
+  getTotalProcessCount(): number {
+    return this.resourceTracker.getTotalProcessCount()
+  }
+
   private startHealthChecks(): void {
     if (this.healthInterval) return
     this.healthInterval = setInterval(() => this.runHealthCheck(), this.HEALTH_CHECK_INTERVAL_MS)

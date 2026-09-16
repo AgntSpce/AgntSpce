@@ -14,8 +14,8 @@ function getAppMemoryBuckets(): AppMemoryBuckets | null {
     if (!Array.isArray(metrics)) return null
     const buckets: AppMemoryBuckets = { mainMB: 0, rendererMB: 0, gpuMB: 0, otherMB: 0 }
     for (const m of metrics) {
-      // workingSetSize is already reported in MB.
-      const mb = Math.round((m as any)?.memory?.workingSetSize ?? 0)
+      // workingSetSize is reported in Kilobytes — convert to MB.
+      const mb = Math.round(((m as any)?.memory?.workingSetSize ?? 0) / 1024)
       switch (m.type) {
         case 'browser': buckets.mainMB += mb; break
         case 'renderer':
@@ -30,6 +30,21 @@ function getAppMemoryBuckets(): AppMemoryBuckets | null {
   }
 }
 
+// Electron's own CPU across its processes (main/renderer/GPU/other).
+// ProcessMetric.cpu.percentCPUUsage is percent of a single core.
+function getAppCpuPercent(): number | null {
+  try {
+    const metrics = app?.getAppMetrics?.()
+    if (!Array.isArray(metrics)) return null
+    let total = 0
+    for (const m of metrics) {
+      total += (m as any)?.cpu?.percentCPUUsage ?? 0
+    }
+    return Math.round(total * 10) / 10
+  } catch {
+    return null
+  }
+}
 // History payloads go to the renderer for display of token counts only;
 // output bodies are trimmed so large histories don't bloat client memory.
 function trimHistoryBodies<T extends { original?: string; filtered?: string }>(entries: T[]): T[] {
@@ -110,6 +125,9 @@ export function registerStatsHandlers(ctx: ServerContext, socket: Socket): void 
         concurrency: ctx.agentOrchestrator.getConcurrencyLoad(),
         sessionCount: ctx.agentOrchestrator.getSessionCount(),
         totalMemoryMB: ctx.agentOrchestrator.getTotalMemoryMB(),
+        totalCpuPercent: ctx.agentOrchestrator.getTotalCpuPercent(),
+        totalProcessCount: ctx.agentOrchestrator.getTotalProcessCount(),
+        appCpuPercent: getAppCpuPercent(),
         resourceUsage: ctx.agentOrchestrator.getAllResourceUsage(),
         orchestration: ctx.agentOrchestrator.getOrchestrationStats(),
         appMemory: getAppMemoryBuckets(),

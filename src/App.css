@@ -352,6 +352,57 @@
   min-width: 0;
 }
 
+/* ── Title Bar resource stats (app totals) ── */
+.title-bar-resources {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 0 8px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.title-bar-resource {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+.title-bar-resource svg {
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
+.macos-title-bar {
+  position: relative;
+}
+
+.macos-title-bar .title-bar-resources {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  transform: translateX(-50%);
+  height: auto;
+  max-width: 60vw;
+}
+
+@media (max-width: 760px) {
+  .title-bar-resources .title-bar-resource:nth-child(3) {
+    display: none;
+  }
+}
+
 /* ── Modals ─────────────────────────────── */
 .modal-overlay {
   position: fixed;
