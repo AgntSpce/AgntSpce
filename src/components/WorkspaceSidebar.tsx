@@ -29,6 +29,7 @@ interface Props {
   selectedFilePath: string | null
   onSelectFile: (path: string) => void
   getWorkspaceTree: (worktreePath: string) => Promise<any>
+  getFileInfo: (absolutePath: string) => Promise<any>
   createFile: (absolutePath: string) => Promise<any>
   createFolder: (absolutePath: string) => Promise<any>
   renameFile: (oldPath: string, newPath: string) => Promise<any>
@@ -39,33 +40,45 @@ function wsExpandKey(wsId: string) {
   return `ws:${wsId}`
 }
 
+// Keep the floating menu on-screen (mirrors FileExplorer's helper).
+function clampContextMenuPos(x: number, y: number, estW = 230, estH = 340) {
+  return {
+    x: Math.max(4, Math.min(x, Math.max(4, window.innerWidth - estW))),
+    y: Math.max(4, Math.min(y, Math.max(4, window.innerHeight - estH))),
+  }
+}
+
 export default memo(function WorkspaceSidebar({
   workspaces, activeWorkspace, deletedWorkspaces,
   onSelect, onEdit, onDelete, onRestore, onPermanentDelete,
   onOpenCreateModal, showModal,
   expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile,
-  getWorkspaceTree, createFile, createFolder, renameFile, deleteFile,
+  getWorkspaceTree, getFileInfo, createFile, createFolder, renameFile, deleteFile,
 }: Props) {
   const [showTrash, setShowTrash] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
+  const [wsMenu, setWsMenu] = useState<{ x: number; y: number; wsId: string } | null>(null)
   const [selectedFolderPath, setSelectedFolderPath] = useState<Record<string, string | null>>({})
   const [refreshSignal, setRefreshSignal] = useState(0)
 
-  const closeContextMenu = useCallback(() => setMenuOpenId(null), [])
+  const closeContextMenu = useCallback(() => { setMenuOpenId(null); setWsMenu(null) }, [])
 
   useEffect(() => {
-    if (menuOpenId) {
+    if (menuOpenId || wsMenu) {
       const handler = () => closeContextMenu()
       document.addEventListener('click', handler)
       return () => document.removeEventListener('click', handler)
     }
-  }, [menuOpenId, closeContextMenu])
+  }, [menuOpenId, wsMenu, closeContextMenu])
 
-  const handleCreateFile = useCallback((ws: WorkspaceInfo) => {
+  const handleCreateFile = useCallback((ws: WorkspaceInfo, folder?: string | null) => {
     setMenuOpenId(null)
+    setWsMenu(null)
     const wsPath = ws.repository?.path || ''
     if (!wsPath) return
-    const selectedFolder = selectedFolderPath[ws.id] || null
+    // Explicit folder (null = workspace root) wins; otherwise fall back to
+    // the folder selected inside this workspace's tree (⋮ menu behavior).
+    const selectedFolder = folder !== undefined ? folder : (selectedFolderPath[ws.id] || null)
     showModal('New file name:', (name) => {
       const trimmed = name.trim()
       if (!trimmed) return
@@ -76,11 +89,12 @@ export default memo(function WorkspaceSidebar({
     })
   }, [showModal, selectedFolderPath, createFile, onExpandFolder])
 
-  const handleCreateFolder = useCallback((ws: WorkspaceInfo) => {
+  const handleCreateFolder = useCallback((ws: WorkspaceInfo, folder?: string | null) => {
     setMenuOpenId(null)
+    setWsMenu(null)
     const wsPath = ws.repository?.path || ''
     if (!wsPath) return
-    const selectedFolder = selectedFolderPath[ws.id] || null
+    const selectedFolder = folder !== undefined ? folder : (selectedFolderPath[ws.id] || null)
     showModal('New folder name:', (name) => {
       const trimmed = name.trim()
       if (!trimmed) return
@@ -90,6 +104,13 @@ export default memo(function WorkspaceSidebar({
       createFolder(`${base}/${trimmed}`).then(() => setRefreshSignal(s => s + 1))
     })
   }, [showModal, selectedFolderPath, createFolder, onExpandFolder])
+
+  const handleWsContextMenu = useCallback((e: React.MouseEvent, wsId: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenuOpenId(null)
+    setWsMenu({ x: e.clientX, y: e.clientY, wsId })
+  }, [])
 
   return (
     <aside className="sidebar">
@@ -112,7 +133,7 @@ export default memo(function WorkspaceSidebar({
             return (
               <div key={ws.id} className={`workspace-tree-item${isActive ? ' active' : ''}`}>
                 {/* Workspace row: arrow + name */}
-                <div className="workspace-tree-row">
+                <div className="workspace-tree-row" onContextMenu={(e) => handleWsContextMenu(e, ws.id)}>
                   <div
                     className="workspace-tree-arrow"
                     onClick={(e) => {
@@ -193,6 +214,8 @@ export default memo(function WorkspaceSidebar({
                       onSelectFolder={(path) => setSelectedFolderPath(prev => ({ ...prev, [ws.id]: path }))}
                       refreshSignal={refreshSignal}
                       getWorkspaceTree={getWorkspaceTree}
+                      getFileInfo={getFileInfo}
+                      showModal={showModal}
                       createFile={createFile}
                       createFolder={createFolder}
                       renameFile={renameFile}
@@ -215,6 +238,61 @@ export default memo(function WorkspaceSidebar({
             </div>
           )}
         </div>
+
+        {/* Right-click floating menu on a workspace row */}
+        {wsMenu && (() => {
+          const ws = workspaces.find(w => w.id === wsMenu.wsId)
+          if (!ws) return null
+          const pos = clampContextMenuPos(wsMenu.x, wsMenu.y)
+          const dismiss = () => setWsMenu(null)
+          return (
+            <div
+              className="file-context-menu"
+              style={{ left: pos.x, top: pos.y }}
+              onClick={e => e.stopPropagation()}
+            >
+              <button className="file-context-menu-item" onClick={() => handleCreateFile(ws, null)}>
+                <i className="codicon codicon-new-file" style={{ fontSize: 13, marginRight: 6 }} />
+                New File
+              </button>
+              <button className="file-context-menu-item" onClick={() => handleCreateFolder(ws, null)}>
+                <i className="codicon codicon-new-folder" style={{ fontSize: 13, marginRight: 6 }} />
+                New Folder
+              </button>
+              <div className="file-context-menu-separator" />
+              <button
+                className="file-context-menu-item"
+                onClick={() => { setRefreshSignal(s => s + 1); dismiss() }}
+              >
+                <i className="codicon codicon-refresh" style={{ fontSize: 13, marginRight: 6 }} />
+                Refresh
+              </button>
+              <div className="file-context-menu-separator" />
+              <button
+                className="file-context-menu-item"
+                onClick={() => {
+                  dismiss()
+                  showModal('Rename workspace:', (name) => {
+                    onEdit(ws.id, name, ws.repository?.path || '')
+                  }, ws.name)
+                }}
+              >
+                <i className="codicon codicon-edit" style={{ fontSize: 13, marginRight: 6 }} />
+                Rename
+              </button>
+              <button
+                className="file-context-menu-item danger"
+                onClick={() => {
+                  dismiss()
+                  if (confirm(`Delete workspace "${ws.name}"?`)) onDelete(ws.id)
+                }}
+              >
+                <i className="codicon codicon-trash" style={{ fontSize: 13, marginRight: 6 }} />
+                Delete
+              </button>
+            </div>
+          )
+        })()}
 
         {/* Trash section */}
         {deletedWorkspaces.length > 0 && (

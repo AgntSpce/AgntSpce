@@ -165,4 +165,79 @@ export function registerFileHandlers(ctx: ServerContext, socket: Socket): void {
       if (callback) callback({ ok: false, error: error.message })
     }
   })
+
+  socket.on('get-file-info', async ({ absolutePath }: { absolutePath: string }, callback?: Function) => {
+    try {
+      if (!isPathInWorkspace(ctx, absolutePath)) {
+        if (callback) callback({ ok: false, error: 'Path is outside the workspace' })
+        return
+      }
+      const root = resolveWorkspaceRoot(ctx)
+      const resolved = path.resolve(absolutePath)
+      const stat = await fs.stat(resolved)
+      const birthMs = stat.birthtimeMs || (stat as any).ctimeMs || 0
+      const info: Record<string, any> = {
+        name: path.basename(resolved),
+        absolutePath: resolved,
+        relativePath: root ? path.relative(root, resolved).replace(/\\/g, '/') : path.basename(resolved),
+        type: stat.isDirectory() ? 'directory' : 'file',
+        sizeBytes: stat.isDirectory() ? 0 : stat.size,
+        createdAt: birthMs ? new Date(birthMs).toISOString() : null,
+        modifiedAt: new Date(stat.mtimeMs).toISOString(),
+        accessedAt: new Date(stat.atimeMs).toISOString(),
+      }
+      if (stat.isFile()) {
+        const ext = path.extname(resolved)
+        if (ext) info.extension = ext
+      } else {
+        // Directory rollup: immediate breakdown + recursive totals.
+        // Dotfiles skipped (matches get-workspace-tree); entry cap keeps
+        // huge trees (node_modules) from stalling the stat call.
+        const MAX_ENTRIES = 20000
+        let immediateFiles = 0
+        let immediateDirs = 0
+        let totalFiles = 0
+        let totalDirs = 0
+        let totalSize = 0
+        let visited = 0
+        let truncated = false
+        const stack: { dir: string; immediate: boolean }[] = [{ dir: resolved, immediate: true }]
+        while (stack.length > 0) {
+          const { dir, immediate } = stack.pop()!
+          let entries
+          try {
+            entries = await fs.readdir(dir, { withFileTypes: true })
+          } catch {
+            continue
+          }
+          for (const entry of entries) {
+            if (entry.name.startsWith('.')) continue
+            if (++visited > MAX_ENTRIES) { truncated = true; break }
+            const full = path.join(dir, entry.name)
+            if (entry.isDirectory()) {
+              if (immediate) immediateDirs++
+              totalDirs++
+              stack.push({ dir: full, immediate: false })
+            } else if (entry.isFile()) {
+              if (immediate) immediateFiles++
+              totalFiles++
+              try {
+                totalSize += (await fs.stat(full)).size
+              } catch {}
+            }
+          }
+          if (truncated) break
+        }
+        info.immediateFiles = immediateFiles
+        info.immediateDirs = immediateDirs
+        info.totalFiles = totalFiles
+        info.totalDirs = totalDirs
+        info.totalSizeBytes = totalSize
+        info.truncated = truncated
+      }
+      if (callback) callback({ ok: true, info })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
 }

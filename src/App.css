@@ -1337,6 +1337,15 @@
   transition-duration: 50ms;
 }
 
+.file-context-menu-item.danger {
+  color: var(--danger);
+}
+
+.file-context-menu-item.danger:hover {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
 .file-context-menu-separator {
   height: 1px;
   background: var(--border);

@@ -120,6 +120,7 @@ interface UseSocketReturn {
   setUserSettings: (settings: { autoRestartSessions?: boolean }) => void
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   readFile: (absolutePath: string) => Promise<any>
+  getFileInfo: (absolutePath: string) => Promise<any>
   writeFile: (absolutePath: string, content: string) => Promise<any>
   createFile: (absolutePath: string) => Promise<any>
   createFolder: (absolutePath: string) => Promise<any>
@@ -831,6 +832,10 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('read-file', { absolutePath })
   }, [emitAck])
 
+  const getFileInfo = useCallback((absolutePath: string): Promise<any> => {
+    return emitAck('get-file-info', { absolutePath })
+  }, [emitAck])
+
   const writeFile = useCallback((absolutePath: string, content: string): Promise<any> => {
     return emitAck('write-file', { absolutePath, content })
   }, [emitAck])
@@ -1042,6 +1047,7 @@ socket.emit('get-cumulative-stats', {})
     setUserSettings,
     getWorkspaceTree,
     readFile,
+    getFileInfo,
     writeFile,
     createFile,
     createFolder,

@@ -158,7 +158,7 @@ function App() {
     getGitFileDiff, getGitLog, getGitBranches, getGitCommitFiles,
     getGitFullStatus, gitStageFile, gitUnstageFile, gitCommit, gitPull, gitPush, gitFetch,
     setUserSettings, updateWorkspaceConfig, refreshWorkspaces,
-    getWorkspaceTree, readFile, writeFile, createFile, createFolder, renameFile, deleteFile,
+    getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
     chatListThreads, chatCreateThread, chatRenameThread, chatClearThread,
     onChatStreamChunk, onChatResponse, onChatError, onChatThreads,
@@ -199,6 +199,38 @@ function App() {
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileId, setActiveFileId] = useState<string | null>(null)
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
+  // Persisted per workspace so the explorer reopens exactly as left (VS Code
+  // behavior) across app restarts. Guarded by a suppress flag so loading a
+  // workspace's saved set doesn't immediately overwrite it with stale state.
+  const suppressExpandedSaveRef = useRef(false)
+  useEffect(() => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    suppressExpandedSaveRef.current = true
+    try {
+      const raw = localStorage.getItem(`agent-workspace-expanded:${wsId}`)
+      const arr = raw ? JSON.parse(raw) : null
+      setExpandedFolders(new Set(
+        Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string').slice(0, 1000) : []
+      ))
+    } catch {
+      setExpandedFolders(new Set())
+    }
+  }, [activeWorkspace?.id])
+  useEffect(() => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    if (suppressExpandedSaveRef.current) {
+      suppressExpandedSaveRef.current = false
+      return
+    }
+    try {
+      localStorage.setItem(
+        `agent-workspace-expanded:${wsId}`,
+        JSON.stringify([...expandedFolders].slice(0, 1000))
+      )
+    } catch {}
+  }, [expandedFolders, activeWorkspace?.id])
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [fileContents, setFileContents] = useState<Record<string, string>>({})
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set())
@@ -1187,6 +1219,7 @@ function App() {
               selectedFilePath={selectedFilePath}
               onSelectFile={selectFile}
               getWorkspaceTree={getWorkspaceTree}
+              getFileInfo={getFileInfo}
               createFile={createFile}
               createFolder={createFolder}
               renameFile={renameFile}
