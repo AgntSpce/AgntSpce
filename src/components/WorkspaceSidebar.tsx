@@ -232,7 +232,6 @@ export default memo(function WorkspaceSidebar({
                       refreshSignal={refreshSignal}
                       getWorkspaceTree={getWorkspaceTree}
                       getFileInfo={getFileInfo}
-                      showModal={showModal}
                       createRequest={createRequests[ws.id] ?? null}
                       onCreateRequestHandled={(nonce) => handleCreateRequestHandled(ws.id, nonce)}
                       createFile={createFile}

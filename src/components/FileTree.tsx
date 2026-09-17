@@ -12,6 +12,16 @@ export interface PendingCreate {
   onCancel: () => void
 }
 
+export interface PendingRename {
+  /** Relative path of the item being renamed. */
+  path: string
+  name: string
+  onNameChange: (name: string) => void
+  /** Name is passed explicitly from the input (ground truth at commit time). */
+  onCommit: (name: string) => void
+  onCancel: () => void
+}
+
 interface FileTreeProps {
   nodes: FileTreeNode[]
   expandedFolders: Set<string>
@@ -27,6 +37,7 @@ interface FileTreeProps {
   pending?: PendingCreate | null
   /** Relative path of the row to flash with the just-created glow. */
   highlightPath?: string | null
+  renaming?: PendingRename | null
 }
 
 function FileIcon({ name }: { name: string }) {
@@ -47,6 +58,7 @@ export function FileTree({
   levelPath = '',
   pending = null,
   highlightPath = null,
+  renaming = null,
 }: FileTreeProps) {
   // Merge the in-progress creation row into this level (when it belongs
   // here) using the same ordering as the backend: folders first, then
@@ -92,6 +104,7 @@ export function FileTree({
             onContextMenu={onContextMenu}
             pending={pending}
             highlightPath={highlightPath}
+            renaming={renaming}
             depth={depth}
           />
         )
@@ -157,6 +170,51 @@ function PendingRow({ depth, pending }: { depth: number; pending: PendingCreate 
   )
 }
 
+function RenameInput({ renaming }: { renaming: PendingRename }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  // Capture the initial name once: selection must anchor to what was there
+  // when editing started, not to later keystrokes.
+  const initialNameRef = useRef(renaming.name)
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      try {
+        const el = inputRef.current
+        if (!el) return
+        el.focus({ preventScroll: true })
+        // VS Code style: select the stem, leave the extension (.html, .py…)
+        // unselected. Dotfiles (dot at 0) and extensionless names select all.
+        const dot = initialNameRef.current.lastIndexOf('.')
+        if (dot > 0) el.setSelectionRange(0, dot)
+        else el.select()
+      } catch {}
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const commitFromDom = () => {
+    renaming.onCommit(inputRef.current?.value ?? renaming.name)
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      autoFocus
+      className="file-tree-inline-input"
+      value={renaming.name}
+      spellCheck={false}
+      autoComplete="off"
+      onChange={(e) => renaming.onNameChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commitFromDom() }
+        else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renaming.onCancel() }
+      }}
+      onBlur={() => commitFromDom()}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    />
+  )
+}
+
 function TreeNode({
   node,
   expandedFolders,
@@ -168,6 +226,7 @@ function TreeNode({
   onContextMenu,
   pending,
   highlightPath,
+  renaming,
   depth,
 }: {
   node: FileTreeNode
@@ -180,6 +239,7 @@ function TreeNode({
   onContextMenu?: (e: React.MouseEvent, path: string, isDirectory: boolean) => void
   pending?: PendingCreate | null
   highlightPath?: string | null
+  renaming?: PendingRename | null
   depth: number
 }) {
   const isDirectory = node.type === 'directory'
@@ -198,8 +258,13 @@ function TreeNode({
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
+    // Swallow right-clicks on a row that's mid-rename to avoid stale states.
+    if (renaming?.path === node.path) {
+      e.stopPropagation()
+      return
+    }
     onContextMenu?.(e, node.path, isDirectory)
-  }, [onContextMenu, node.path, isDirectory])
+  }, [onContextMenu, node.path, isDirectory, renaming])
 
   return (
     <div className="file-tree-node">
@@ -226,7 +291,11 @@ function TreeNode({
         ) : (
           <FileIcon name={node.name} />
         )}
-        <span className="file-tree-label">{node.name}</span>
+        {renaming && renaming.path === node.path ? (
+          <RenameInput renaming={renaming} />
+        ) : (
+          <span className="file-tree-label">{node.name}</span>
+        )}
       </div>
       {isDirectory && isExpanded && node.children && (
         <div className="file-tree-children">
@@ -242,6 +311,7 @@ function TreeNode({
             levelPath={node.path}
             pending={pending}
             highlightPath={highlightPath}
+            renaming={renaming}
             depth={depth + 1}
           />
         </div>

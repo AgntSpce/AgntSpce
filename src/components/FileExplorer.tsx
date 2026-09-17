@@ -23,7 +23,6 @@ interface FileExplorerProps {
   refreshSignal?: number
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   getFileInfo: (absolutePath: string) => Promise<any>
-  showModal: (title: string, onSubmit: (value: string) => void, defaultValue?: string) => void
   /** External creation trigger (workspace-level menu): consumed once per nonce. */
   createRequest?: { type: 'file' | 'folder'; nonce: number } | null
   onCreateRequestHandled?: (nonce: number) => void
@@ -58,7 +57,6 @@ export function FileExplorer({
   refreshSignal,
   getWorkspaceTree,
   getFileInfo,
-  showModal,
   createRequest = null,
   onCreateRequestHandled,
   createFile,
@@ -72,6 +70,9 @@ export function FileExplorer({
   const [pending, setPending] = useState<{ type: 'file' | 'folder'; parentPath: string; name: string } | null>(null)
   const pendingRef = useRef(pending)
   pendingRef.current = pending
+  const [renaming, setRenaming] = useState<{ path: string; name: string } | null>(null)
+  const renamingRef = useRef(renaming)
+  renamingRef.current = renaming
   // Briefly glow the row that was just created so its landing spot is obvious.
   const [justCreated, setJustCreated] = useState<string | null>(null)
   const justCreatedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -142,6 +143,40 @@ export function FileExplorer({
     setPending(null)
   }, [])
 
+  // VS Code-style inline rename: Enter/blur commits (clearing first so the
+  // pair can't double-fire), Esc or unchanged/empty/slashed names cancel.
+  // The committed name comes straight from the input (ground truth), and
+  // backend failures surface instead of failing silently. The refresh
+  // re-sorts, so a renamed item glides to its new alpha slot.
+  const commitRename = useCallback((name: string) => {
+    const r = renamingRef.current
+    if (!r) return
+    setRenaming(null)
+    const trimmed = name.trim()
+    const oldName = r.path.split('/').pop() || ''
+    if (!trimmed || trimmed === oldName || trimmed.includes('/')) return
+    // lastIndexOf returns -1 for root-level items — slice(0, -1) would chop
+    // the last char ('1.html' -> parent '1.htm'), so guard explicitly.
+    const sep = r.path.lastIndexOf('/')
+    const parentPath = sep >= 0 ? r.path.slice(0, sep) : ''
+    const newRelPath = parentPath ? `${parentPath}/${trimmed}` : trimmed
+    const wsRoot = workspacePath.replace(/\\/g, '/')
+    renameFile(`${wsRoot}/${r.path}`, `${wsRoot}/${newRelPath}`).then((res: any) => {
+      if (res?.ok) {
+        flashCreated(newRelPath)
+        loadTree()
+      } else {
+        alert(`Could not rename "${oldName}"${res?.error ? `: ${res.error}` : '.'}`)
+      }
+    }).catch(() => {
+      alert(`Could not rename "${oldName}".`)
+    })
+  }, [workspacePath, renameFile, loadTree, flashCreated])
+
+  const cancelRename = useCallback(() => {
+    setRenaming(null)
+  }, [])
+
   // Workspace-level menu trigger: create at the tree root.
   const handledCreateNonceRef = useRef<number | null>(null)
   useEffect(() => {
@@ -163,21 +198,10 @@ export function FileExplorer({
   const handleRename = useCallback(() => {
     if (!contextMenu) return
     const targetPath = contextMenu.targetPath
-    const oldName = targetPath.split('/').pop() || ''
-    // Native prompt() is a no-op in Electron — use the app's input modal.
-    showModal('Rename to:', (newName) => {
-      const trimmed = newName.trim()
-      if (!trimmed || trimmed === oldName) return
-      const parentPath = targetPath.slice(0, targetPath.lastIndexOf('/'))
-      const newPath = parentPath ? `${parentPath}/${trimmed}` : trimmed
-      const absOldPath = workspacePath.replace(/\\/g, '/') + '/' + targetPath
-      const absNewPath = workspacePath.replace(/\\/g, '/') + '/' + newPath
-      renameFile(absOldPath, absNewPath).then((res: any) => {
-        if (res?.ok) loadTree()
-      })
-    }, oldName)
     closeContextMenu()
-  }, [contextMenu, workspacePath, renameFile, loadTree, closeContextMenu, showModal])
+    setPending(null)
+    setRenaming({ path: targetPath, name: targetPath.split('/').pop() || '' })
+  }, [contextMenu, closeContextMenu])
 
   const handleDelete = useCallback(() => {
     if (!contextMenu) return
@@ -268,6 +292,13 @@ export function FileExplorer({
           onSelectFolder={onSelectFolder}
           onContextMenu={handleTreeContextMenu}
           highlightPath={justCreated}
+          renaming={renaming ? {
+            path: renaming.path,
+            name: renaming.name,
+            onNameChange: (name: string) => setRenaming(prev => (prev ? { ...prev, name } : prev)),
+            onCommit: commitRename,
+            onCancel: cancelRename,
+          } : null}
           pending={pending ? {
             type: pending.type,
             parentPath: pending.parentPath,
