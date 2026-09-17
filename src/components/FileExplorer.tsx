@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { FileTreeNode } from '../types'
 import { FileTree } from './FileTree'
 import { copyToClipboard } from '../utils/clipboard'
@@ -24,6 +24,9 @@ interface FileExplorerProps {
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   getFileInfo: (absolutePath: string) => Promise<any>
   showModal: (title: string, onSubmit: (value: string) => void, defaultValue?: string) => void
+  /** External creation trigger (workspace-level menu): consumed once per nonce. */
+  createRequest?: { type: 'file' | 'folder'; nonce: number } | null
+  onCreateRequestHandled?: (nonce: number) => void
   createFile: (absolutePath: string) => Promise<any>
   createFolder: (absolutePath: string) => Promise<any>
   renameFile: (oldPath: string, newPath: string) => Promise<any>
@@ -56,6 +59,8 @@ export function FileExplorer({
   getWorkspaceTree,
   getFileInfo,
   showModal,
+  createRequest = null,
+  onCreateRequestHandled,
   createFile,
   createFolder,
   renameFile,
@@ -64,6 +69,23 @@ export function FileExplorer({
   const [treeData, setTreeData] = useState<FileTreeNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pending, setPending] = useState<{ type: 'file' | 'folder'; parentPath: string; name: string } | null>(null)
+  const pendingRef = useRef(pending)
+  pendingRef.current = pending
+  // Briefly glow the row that was just created so its landing spot is obvious.
+  const [justCreated, setJustCreated] = useState<string | null>(null)
+  const justCreatedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (justCreatedTimerRef.current) clearTimeout(justCreatedTimerRef.current)
+  }, [])
+  const flashCreated = useCallback((relPath: string) => {
+    setJustCreated(relPath)
+    if (justCreatedTimerRef.current) clearTimeout(justCreatedTimerRef.current)
+    justCreatedTimerRef.current = setTimeout(() => {
+      justCreatedTimerRef.current = null
+      setJustCreated(null)
+    }, 2200)
+  }, [])
   const [contextMenu, setContextMenu] = useState<{
     x: number
     y: number
@@ -96,6 +118,39 @@ export function FileExplorer({
   const closeContextMenu = useCallback(() => {
     setContextMenu(null)
   }, [])
+
+  // VS Code-style inline creation: commit the pending row (Enter/blur),
+  // clearing first so double-fires (Enter + blur) are no-ops.
+  const commitPending = useCallback(() => {
+    const p = pendingRef.current
+    if (!p) return
+    setPending(null)
+    const name = p.name.trim()
+    if (!name) return
+    const base = workspacePath.replace(/\\/g, '/') + (p.parentPath ? '/' + p.parentPath : '')
+    const run = p.type === 'file' ? createFile(`${base}/${name}`) : createFolder(`${base}/${name}`)
+    run.then((res: any) => {
+      if (res?.ok) {
+        if (p.parentPath && !expandedFolders.has(p.parentPath)) onToggleFolder(p.parentPath)
+        flashCreated(p.parentPath ? `${p.parentPath}/${name}` : name)
+        loadTree()
+      }
+    })
+  }, [workspacePath, createFile, createFolder, expandedFolders, onToggleFolder, loadTree, flashCreated])
+
+  const cancelPending = useCallback(() => {
+    setPending(null)
+  }, [])
+
+  // Workspace-level menu trigger: create at the tree root.
+  const handledCreateNonceRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (createRequest && handledCreateNonceRef.current !== createRequest.nonce) {
+      handledCreateNonceRef.current = createRequest.nonce
+      setPending({ type: createRequest.type, parentPath: '', name: '' })
+      onCreateRequestHandled?.(createRequest.nonce)
+    }
+  }, [createRequest, onCreateRequestHandled])
 
   useEffect(() => {
     if (contextMenu) {
@@ -137,32 +192,22 @@ export function FileExplorer({
   }, [contextMenu, workspacePath, deleteFile, loadTree, closeContextMenu])
 
   const handleNewFile = useCallback(() => {
-    const basePath = contextMenu
-      ? workspacePath.replace(/\\/g, '/') + '/' + (contextMenu.isDirectory ? contextMenu.targetPath : contextMenu.targetPath.split('/').slice(0, -1).join('/'))
-      : workspacePath.replace(/\\/g, '/')
-    showModal('File name:', (name) => {
-      const trimmed = name.trim()
-      if (!trimmed) return
-      createFile(`${basePath}/${trimmed}`).then((res: any) => {
-        if (res?.ok) loadTree()
-      })
-    })
+    if (!contextMenu) return
+    const targetPath = contextMenu.targetPath
+    const parentPath = contextMenu.isDirectory ? targetPath : targetPath.split('/').slice(0, -1).join('/')
     closeContextMenu()
-  }, [contextMenu, workspacePath, createFile, loadTree, closeContextMenu, showModal])
+    if (parentPath && !expandedFolders.has(parentPath)) onToggleFolder(parentPath)
+    setPending({ type: 'file', parentPath, name: '' })
+  }, [contextMenu, expandedFolders, onToggleFolder, closeContextMenu])
 
   const handleNewFolder = useCallback(() => {
-    const basePath = contextMenu
-      ? workspacePath.replace(/\\/g, '/') + '/' + (contextMenu.isDirectory ? contextMenu.targetPath : contextMenu.targetPath.split('/').slice(0, -1).join('/'))
-      : workspacePath.replace(/\\/g, '/')
-    showModal('Folder name:', (name) => {
-      const trimmed = name.trim()
-      if (!trimmed) return
-      createFolder(`${basePath}/${trimmed}`).then((res: any) => {
-        if (res?.ok) loadTree()
-      })
-    })
+    if (!contextMenu) return
+    const targetPath = contextMenu.targetPath
+    const parentPath = contextMenu.isDirectory ? targetPath : targetPath.split('/').slice(0, -1).join('/')
     closeContextMenu()
-  }, [contextMenu, workspacePath, createFolder, loadTree, closeContextMenu, showModal])
+    if (parentPath && !expandedFolders.has(parentPath)) onToggleFolder(parentPath)
+    setPending({ type: 'folder', parentPath, name: '' })
+  }, [contextMenu, expandedFolders, onToggleFolder, closeContextMenu])
 
   const handleInfo = useCallback(() => {
     if (!contextMenu) return
@@ -222,6 +267,15 @@ export function FileExplorer({
           onSelectFile={onSelectFile}
           onSelectFolder={onSelectFolder}
           onContextMenu={handleTreeContextMenu}
+          highlightPath={justCreated}
+          pending={pending ? {
+            type: pending.type,
+            parentPath: pending.parentPath,
+            name: pending.name,
+            onNameChange: (name: string) => setPending(prev => (prev ? { ...prev, name } : prev)),
+            onCommit: commitPending,
+            onCancel: cancelPending,
+          } : null}
         />
       )}
       {contextMenu && (() => {

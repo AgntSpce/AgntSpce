@@ -58,6 +58,8 @@ export default memo(function WorkspaceSidebar({
   const [showTrash, setShowTrash] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [wsMenu, setWsMenu] = useState<{ x: number; y: number; wsId: string } | null>(null)
+  // Inline-creation triggers for each workspace's tree (consumed by FileExplorer).
+  const [createRequests, setCreateRequests] = useState<Record<string, { type: 'file' | 'folder'; nonce: number }>>({})
   const [selectedFolderPath, setSelectedFolderPath] = useState<Record<string, string | null>>({})
   const [refreshSignal, setRefreshSignal] = useState(0)
 
@@ -71,14 +73,12 @@ export default memo(function WorkspaceSidebar({
     }
   }, [menuOpenId, wsMenu, closeContextMenu])
 
-  const handleCreateFile = useCallback((ws: WorkspaceInfo, folder?: string | null) => {
+  const handleCreateFile = useCallback((ws: WorkspaceInfo) => {
     setMenuOpenId(null)
     setWsMenu(null)
     const wsPath = ws.repository?.path || ''
     if (!wsPath) return
-    // Explicit folder (null = workspace root) wins; otherwise fall back to
-    // the folder selected inside this workspace's tree (⋮ menu behavior).
-    const selectedFolder = folder !== undefined ? folder : (selectedFolderPath[ws.id] || null)
+    const selectedFolder = selectedFolderPath[ws.id] || null
     showModal('New file name:', (name) => {
       const trimmed = name.trim()
       if (!trimmed) return
@@ -89,12 +89,12 @@ export default memo(function WorkspaceSidebar({
     })
   }, [showModal, selectedFolderPath, createFile, onExpandFolder])
 
-  const handleCreateFolder = useCallback((ws: WorkspaceInfo, folder?: string | null) => {
+  const handleCreateFolder = useCallback((ws: WorkspaceInfo) => {
     setMenuOpenId(null)
     setWsMenu(null)
     const wsPath = ws.repository?.path || ''
     if (!wsPath) return
-    const selectedFolder = folder !== undefined ? folder : (selectedFolderPath[ws.id] || null)
+    const selectedFolder = selectedFolderPath[ws.id] || null
     showModal('New folder name:', (name) => {
       const trimmed = name.trim()
       if (!trimmed) return
@@ -110,6 +110,23 @@ export default memo(function WorkspaceSidebar({
     e.stopPropagation()
     setMenuOpenId(null)
     setWsMenu({ x: e.clientX, y: e.clientY, wsId })
+  }, [])
+
+  // Workspace-menu creation: expand the tree and ask its FileExplorer to
+  // show the inline row at the root (consumed once per nonce).
+  const requestWsCreate = useCallback((ws: WorkspaceInfo, type: 'file' | 'folder') => {
+    setWsMenu(null)
+    onExpandFolder(wsExpandKey(ws.id))
+    setCreateRequests(prev => ({ ...prev, [ws.id]: { type, nonce: Date.now() } }))
+  }, [onExpandFolder])
+
+  const handleCreateRequestHandled = useCallback((wsId: string, nonce: number) => {
+    setCreateRequests(prev => {
+      if (prev[wsId]?.nonce !== nonce) return prev
+      const next = { ...prev }
+      delete next[wsId]
+      return next
+    })
   }, [])
 
   return (
@@ -216,6 +233,8 @@ export default memo(function WorkspaceSidebar({
                       getWorkspaceTree={getWorkspaceTree}
                       getFileInfo={getFileInfo}
                       showModal={showModal}
+                      createRequest={createRequests[ws.id] ?? null}
+                      onCreateRequestHandled={(nonce) => handleCreateRequestHandled(ws.id, nonce)}
                       createFile={createFile}
                       createFolder={createFolder}
                       renameFile={renameFile}
@@ -251,11 +270,11 @@ export default memo(function WorkspaceSidebar({
               style={{ left: pos.x, top: pos.y }}
               onClick={e => e.stopPropagation()}
             >
-              <button className="file-context-menu-item" onClick={() => handleCreateFile(ws, null)}>
+              <button className="file-context-menu-item" onClick={() => requestWsCreate(ws, 'file')}>
                 <i className="codicon codicon-new-file" style={{ fontSize: 13, marginRight: 6 }} />
                 New File
               </button>
-              <button className="file-context-menu-item" onClick={() => handleCreateFolder(ws, null)}>
+              <button className="file-context-menu-item" onClick={() => requestWsCreate(ws, 'folder')}>
                 <i className="codicon codicon-new-folder" style={{ fontSize: 13, marginRight: 6 }} />
                 New Folder
               </button>

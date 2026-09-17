@@ -1297,6 +1297,47 @@
   white-space: nowrap;
 }
 
+/* ── Inline new file/folder row (VS Code style) ─ */
+.file-tree-item.pending {
+  cursor: text;
+}
+
+/* Brief glow marking where a just-created row landed. */
+@keyframes justCreatedGlow {
+  0% {
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+    background: var(--accent-bg);
+  }
+  70% {
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+    background: transparent;
+  }
+  100% {
+    box-shadow: none;
+    background: transparent;
+  }
+}
+
+.file-tree-item.just-created {
+  border-radius: 4px;
+  animation: justCreatedGlow 2s ease-out;
+}
+
+.file-tree-inline-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 1px 5px;
+  margin-right: 4px;
+  outline: none;
+  caret-color: var(--accent);
+}
+
 /* ── File Context Menu ──────────────────── */
 .file-context-menu {
   position: fixed;
