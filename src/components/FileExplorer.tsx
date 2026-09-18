@@ -40,6 +40,8 @@ interface FileExplorerProps {
   createFolder: (absolutePath: string) => Promise<any>
   renameFile: (oldPath: string, newPath: string) => Promise<any>
   deleteFile: (absolutePath: string) => Promise<any>
+  /** Fired after a successful delete so open viewer tabs can follow. */
+  onFileDeleted?: (relPath: string) => void
 }
 
 function formatBytes(n: number): string {
@@ -143,6 +145,7 @@ export function FileExplorer({
   createFolder,
   renameFile,
   deleteFile,
+  onFileDeleted,
 }: FileExplorerProps) {
   const [treeData, setTreeData] = useState<FileTreeNode[]>([])
   const [loading, setLoading] = useState(false)
@@ -365,15 +368,19 @@ export function FileExplorer({
 
   const handleDelete = useCallback(() => {
     if (!contextMenu) return
-    const name = contextMenu.targetPath.split('/').pop() || ''
+    const targetPath = contextMenu.targetPath
+    const name = targetPath.split('/').pop() || ''
     if (confirm(`Delete "${name}"?`)) {
-      const absPath = workspacePath.replace(/\\/g, '/') + '/' + contextMenu.targetPath
+      const absPath = workspacePath.replace(/\\/g, '/') + '/' + targetPath
       deleteFile(absPath).then((res: any) => {
-        if (res?.ok) loadTree()
+        if (res?.ok) {
+          onFileDeleted?.(targetPath)
+          loadTree()
+        }
       })
     }
     closeContextMenu()
-  }, [contextMenu, workspacePath, deleteFile, loadTree, closeContextMenu])
+  }, [contextMenu, workspacePath, deleteFile, loadTree, closeContextMenu, onFileDeleted])
 
   const handleNewFile = useCallback(() => {
     if (!contextMenu) return

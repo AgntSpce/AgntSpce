@@ -1049,6 +1049,45 @@ function App() {
     setSelectedFilePath(null)
   }, [activeFileId, openFiles])
 
+  // Drop viewer tabs showing a deleted path (file or anything under a
+  // deleted folder, including diff tabs). Falls back to a remaining tab, or
+  // back to the agents section when nothing is left open.
+  const handleExplorerFileDeleted = useCallback((relPath: string) => {
+    const matches = (filePath: string) => filePath === relPath || filePath.startsWith(`${relPath}/`)
+    const remaining = openFiles.filter(f => !matches(f.filePath))
+    const removedIds = new Set(openFiles.filter(f => matches(f.filePath)).map(f => f.id))
+    if (removedIds.size === 0) return
+    setOpenFiles(remaining)
+    if (activeFileId && removedIds.has(activeFileId)) {
+      if (remaining.length > 0) {
+        const idx = openFiles.findIndex(f => f.id === activeFileId)
+        const next = remaining[Math.min(Math.max(0, idx), remaining.length - 1)]
+        setActiveFileId(next.id)
+      } else {
+        setActiveFileId(null)
+      }
+    }
+    setFileContents(prev => {
+      const next = { ...prev }
+      for (const id of removedIds) delete next[id]
+      return next
+    })
+    setDirtyFiles(prev => {
+      const next = new Set(prev)
+      for (const id of removedIds) next.delete(id)
+      return next
+    })
+    setGitDiffContents(prev => {
+      const next = { ...prev }
+      for (const id of removedIds) delete next[id]
+      return next
+    })
+    if (remaining.length === 0) {
+      setViewMode('agents')
+    }
+    setSelectedFilePath(null)
+  }, [openFiles, activeFileId])
+
   // Hide the file viewer and show the agents section. Open files (and their
   // dirty state) are kept — reopening any file returns to the viewer.
   const handleCloseFileViewer = useCallback(() => {
@@ -1269,6 +1308,7 @@ function App() {
               onExpandFolder={expandFolder}
               selectedFilePath={selectedFilePath}
               onSelectFile={selectFile}
+              onFileDeleted={handleExplorerFileDeleted}
               getWorkspaceTree={getWorkspaceTree}
               getFileInfo={getFileInfo}
               gitFilesByWorkspace={gitFilesByWs}

@@ -28,6 +28,7 @@ interface Props {
   onExpandFolder: (path: string) => void
   selectedFilePath: string | null
   onSelectFile: (path: string) => void
+  onFileDeleted?: (relPath: string) => void
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   getFileInfo: (absolutePath: string) => Promise<any>
   gitFilesByWorkspace?: Record<string, { filePath: string; status: string }[]>
@@ -60,7 +61,7 @@ export default memo(function WorkspaceSidebar({
   workspaces, activeWorkspace, deletedWorkspaces,
   onSelect, onEdit, onDelete, onRestore, onPermanentDelete,
   onOpenCreateModal, showModal,
-  expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile,
+  expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile, onFileDeleted,
   getWorkspaceTree, getFileInfo, gitFilesByWorkspace, createFile, createFolder, renameFile, deleteFile,
 }: Props) {
   const [showTrash, setShowTrash] = useState(false)
@@ -251,6 +252,7 @@ export default memo(function WorkspaceSidebar({
                       createFolder={createFolder}
                       renameFile={renameFile}
                       deleteFile={deleteFile}
+                      onFileDeleted={onFileDeleted}
                     />
                   </div>
                 )}
