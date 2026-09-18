@@ -93,6 +93,16 @@ export function FileExplorer({
     targetPath: string
     isDirectory: boolean
   } | null>(null)
+  // Small info card anchored near the right-click point (replaces alert()).
+  const [infoPopup, setInfoPopup] = useState<{
+    x: number
+    y: number
+    targetPath: string
+    isDirectory: boolean
+    info: any | null
+    error?: string
+  } | null>(null)
+  const infoPopupRef = useRef<HTMLDivElement | null>(null)
 
   const loadTree = useCallback(async () => {
     if (!workspacePath) return
@@ -115,6 +125,20 @@ export function FileExplorer({
   useEffect(() => {
     loadTree()
   }, [loadTree, refreshSignal])
+
+  useEffect(() => {
+    if (!infoPopup) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setInfoPopup(null) }
+    const onDown = (e: MouseEvent) => {
+      if (infoPopupRef.current && !infoPopupRef.current.contains(e.target as Node)) setInfoPopup(null)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onDown)
+    }
+  }, [infoPopup])
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null)
@@ -235,35 +259,25 @@ export function FileExplorer({
 
   const handleInfo = useCallback(() => {
     if (!contextMenu) return
-    const targetPath = contextMenu.targetPath
-    const isDirectory = contextMenu.isDirectory
+    const { x, y, targetPath, isDirectory } = contextMenu
     const absPath = workspacePath.replace(/\\/g, '/') + '/' + targetPath
     closeContextMenu()
+    // Open the card immediately (loading state), anchored just right of the click.
+    setInfoPopup({ x: x + 8, y, targetPath, isDirectory, info: null })
     getFileInfo(absPath).then((res: any) => {
       if (!res?.ok || !res.info) {
-        alert(`Could not load info for "${targetPath}"${res?.error ? `: ${res.error}` : '.'}`)
+        setInfoPopup(prev => prev && prev.targetPath === targetPath
+          ? { ...prev, error: res?.error || 'Could not load info.' }
+          : prev)
         return
       }
-      const info = res.info
-      const lines = [
-        `Name: ${info.name}`,
-        `Type: ${isDirectory ? 'Folder' : 'File'}`,
-      ]
-      if (isDirectory) {
-        lines.push(`Items: ${info.immediateFiles + info.immediateDirs} (${info.immediateFiles} files, ${info.immediateDirs} folders)`)
-        lines.push(`Total contents: ${info.totalFiles} files, ${info.totalDirs} folders, ${formatBytes(info.totalSizeBytes)}${info.truncated ? ' (count capped)' : ''}`)
-      } else {
-        lines.push(`Size: ${formatBytes(info.sizeBytes)}`)
-        if (info.extension) lines.push(`Extension: ${info.extension}`)
-      }
-      lines.push(`Relative path: ${info.relativePath || targetPath}`)
-      lines.push(`Absolute path: ${info.absolutePath}`)
-      lines.push(`Created: ${formatDateTime(info.createdAt)}`)
-      lines.push(`Modified: ${formatDateTime(info.modifiedAt)}`)
-      lines.push(`Accessed: ${formatDateTime(info.accessedAt)}`)
-      alert(lines.join('\n'))
+      setInfoPopup(prev => prev && prev.targetPath === targetPath
+        ? { ...prev, info: res.info }
+        : prev)
     }).catch(() => {
-      alert(`Could not load info for "${targetPath}".`)
+      setInfoPopup(prev => prev && prev.targetPath === targetPath
+        ? { ...prev, error: 'Could not load info.' }
+        : prev)
     })
   }, [contextMenu, workspacePath, getFileInfo, closeContextMenu])
 
@@ -355,6 +369,91 @@ export function FileExplorer({
             Info
           </button>
         </div>
+        )
+      })()}
+      {infoPopup && (() => {
+        const pos = clampContextMenuPos(infoPopup.x, infoPopup.y, 300, 420)
+        const info = infoPopup.info
+        const name = info?.name || infoPopup.targetPath.split('/').pop() || infoPopup.targetPath
+        return (
+          <div
+            className="file-info-popup"
+            ref={infoPopupRef}
+            style={{ left: pos.x, top: pos.y }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="file-info-popup-header">
+              <i className={`codicon ${infoPopup.isDirectory ? 'codicon-folder' : 'codicon-file'}`} style={{ fontSize: 14, flexShrink: 0 }}></i>
+              <span className="file-info-popup-name" title={name}>{name}</span>
+              <button className="file-info-popup-close" onClick={() => setInfoPopup(null)} title="Close">✕</button>
+            </div>
+            <div className="file-info-popup-body">
+              {!info && !infoPopup.error && (
+                <span className="file-info-loading">Loading…</span>
+              )}
+              {infoPopup.error && (
+                <span className="file-tree-error">{infoPopup.error}</span>
+              )}
+              {info && (
+                <>
+                  <div className="file-info-row">
+                    <span className="file-info-label">Type</span>
+                    <span className="file-info-value">{infoPopup.isDirectory ? 'Folder' : 'File'}</span>
+                  </div>
+                  {infoPopup.isDirectory ? (
+                    <>
+                      <div className="file-info-row">
+                        <span className="file-info-label">Items</span>
+                        <span className="file-info-value">{info.immediateFiles + info.immediateDirs} ({info.immediateFiles} files, {info.immediateDirs} folders)</span>
+                      </div>
+                      <div className="file-info-row">
+                        <span className="file-info-label">Total</span>
+                        <span className="file-info-value">{info.totalFiles} files, {info.totalDirs} folders, {formatBytes(info.totalSizeBytes)}{info.truncated ? ' (count capped)' : ''}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="file-info-row">
+                        <span className="file-info-label">Size</span>
+                        <span className="file-info-value">{formatBytes(info.sizeBytes)}</span>
+                      </div>
+                      {info.extension && (
+                        <div className="file-info-row">
+                          <span className="file-info-label">Extension</span>
+                          <span className="file-info-value mono">{info.extension}</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div className="file-info-row">
+                    <span className="file-info-label">Relative path</span>
+                    <span className="file-info-value mono">{info.relativePath || infoPopup.targetPath}</span>
+                  </div>
+                  <div className="file-info-row">
+                    <span className="file-info-label">Absolute path</span>
+                    <span className="file-info-value mono">{info.absolutePath}</span>
+                  </div>
+                  <div className="file-info-row">
+                    <span className="file-info-label">Created</span>
+                    <span className="file-info-value">{formatDateTime(info.createdAt)}</span>
+                  </div>
+                  <div className="file-info-row">
+                    <span className="file-info-label">Modified</span>
+                    <span className="file-info-value">{formatDateTime(info.modifiedAt)}</span>
+                  </div>
+                  <div className="file-info-row">
+                    <span className="file-info-label">Accessed</span>
+                    <span className="file-info-value">{formatDateTime(info.accessedAt)}</span>
+                  </div>
+                </>
+              )}
+            </div>
+            {info?.absolutePath && (
+              <div className="file-info-popup-footer">
+                <button onClick={() => copyToClipboard(info.absolutePath)} title="Copy absolute path">Copy Path</button>
+              </div>
+            )}
+          </div>
         )
       })()}
     </div>

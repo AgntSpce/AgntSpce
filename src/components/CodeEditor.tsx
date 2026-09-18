@@ -26,7 +26,6 @@ export function CodeEditor({
   filePath,
   content,
   language,
-  isDirty,
   theme,
   fontSize = 13,
   fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, Monaco, 'Courier New', monospace",
@@ -132,10 +131,6 @@ export function CodeEditor({
 
   return (
     <div className="code-editor-container">
-      <div className="code-editor-header">
-        <span className="code-editor-path">{filePath}</span>
-        {isDirty && <span className="code-editor-dirty">Unsaved</span>}
-      </div>
       <div className="code-editor-wrapper">
         <Editor
           key={filePath}
