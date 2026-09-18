@@ -18,6 +18,11 @@ app.name = 'AgntSpce'
 // bounded enough that a runaway leak still surfaces (Orca uses 128, Superset
 // 256; Tabby's 9000 masks leaks).
 app.commandLine.appendSwitch('max-active-webgl-contexts', '128')
+// Silence benign Chromium GPU-teardown ERROR spam (SharedImageManager /
+// Invalid mailbox) printed to stderr on window close. Those come from the
+// compositor shutting down, not from app code, so hide them instead of
+// changing any behavior.
+app.commandLine.appendSwitch('disable-logging')
 // TEMP DEBUG: CDP access for diagnosing renderer issues (remove after).
 if (process.env.AGNTSPCE_DEBUG_CDP) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.AGNTSPCE_DEBUG_CDP)
