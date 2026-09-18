@@ -29,6 +29,7 @@ interface FileExplorerProps {
   onSelectFile: (path: string) => void
   onSelectFolder?: (path: string) => void
   refreshSignal?: number
+  extraRefreshSignal?: number
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   getFileInfo: (absolutePath: string) => Promise<any>
   /** Shared git changed-files for this workspace (from App's poll — connected, not independent). */
@@ -136,6 +137,7 @@ export function FileExplorer({
   onSelectFile,
   onSelectFolder,
   refreshSignal,
+  extraRefreshSignal,
   getWorkspaceTree,
   getFileInfo,
   gitStatusFiles,
@@ -207,7 +209,7 @@ export function FileExplorer({
 
   useEffect(() => {
     loadTree()
-  }, [loadTree, refreshSignal])
+  }, [loadTree, refreshSignal, extraRefreshSignal])
 
   // Explorer row colors from App's shared git poll (same git truth as the
   // badge count and git review). U/A -> 'added' (green), M -> 'modified'

@@ -2,6 +2,7 @@ import type { Socket } from 'socket.io'
 import type { ServerContext } from '../context'
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import { app } from 'electron'
 
 function resolveWorkspaceRoot(ctx: ServerContext): string {
   const ws = ctx.workspaceManager.getActiveWorkspace()
@@ -26,6 +27,67 @@ async function getRepoRoot(wsPath: string): Promise<string> {
     return wsPath
   } catch {
     return wsPath
+  }
+}
+
+// ── Per-workspace file trash (recycle bin) ─────────────────────────────
+// Explorer deletes move here instead of unlinking, so files stay
+// recoverable. One trash dir per workspace id under the app userData dir,
+// plus a small JSON index describing each entry.
+interface TrashEntry {
+  id: string
+  name: string
+  relPath: string
+  absolutePath: string
+  storedName: string
+  isDirectory: boolean
+  deletedAt: string
+}
+
+function sanitizeTrashId(wsId: string): string {
+  return String(wsId || 'default').replace(/[^a-z0-9-_]+/gi, '-').slice(0, 80) || 'default'
+}
+
+function trashDirFor(wsId: string): string {
+  return path.join(app.getPath('userData'), 'trash', sanitizeTrashId(wsId))
+}
+
+function trashIndexPath(wsId: string): string {
+  return path.join(trashDirFor(wsId), 'index.json')
+}
+
+async function readTrashIndex(wsId: string): Promise<TrashEntry[]> {
+  try {
+    const raw = await fs.readFile(trashIndexPath(wsId), 'utf-8')
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+async function writeTrashIndex(wsId: string, entries: TrashEntry[]): Promise<void> {
+  await fs.mkdir(trashDirFor(wsId), { recursive: true })
+  await fs.writeFile(trashIndexPath(wsId), JSON.stringify(entries, null, 2), 'utf-8')
+}
+
+// Stored file must stay inside its workspace trash dir (guards a tampered index).
+function trashStoredPath(wsId: string, storedName: string): string | null {
+  const dir = trashDirFor(wsId)
+  const resolved = path.resolve(dir, storedName)
+  if (resolved === dir || !resolved.startsWith(dir + path.sep)) return null
+  return resolved
+}
+
+// Move that also works across volumes (rename fails with EXDEV there).
+async function movePath(src: string, dest: string): Promise<void> {
+  await fs.mkdir(path.dirname(dest), { recursive: true })
+  try {
+    await fs.rename(src, dest)
+  } catch (err: any) {
+    if (err?.code !== 'EXDEV') throw err
+    await fs.cp(src, dest, { recursive: true })
+    await fs.rm(src, { recursive: true, force: true })
   }
 }
 
@@ -154,12 +216,133 @@ export function registerFileHandlers(ctx: ServerContext, socket: Socket): void {
         if (callback) callback({ ok: false, error: 'Path is outside the workspace' })
         return
       }
-      const stat = await fs.stat(absolutePath)
-      if (stat.isDirectory()) {
-        await fs.rm(absolutePath, { recursive: true, force: true })
-      } else {
-        await fs.unlink(absolutePath)
+      const resolved = path.resolve(absolutePath)
+      const stat = await fs.stat(resolved)
+      const wsId = ctx.workspaceManager.getActiveWorkspace()?.id || 'default'
+      const dir = trashDirFor(wsId)
+      await fs.mkdir(dir, { recursive: true })
+      const root = await getRepoRoot(path.dirname(resolved))
+      const relPath = path.relative(root, resolved).replace(/\\/g, '/')
+      const base = path.basename(resolved) || 'item'
+      const storedName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${base}`
+      const entry: TrashEntry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: base,
+        relPath,
+        absolutePath: resolved,
+        storedName,
+        isDirectory: stat.isDirectory(),
+        deletedAt: new Date().toISOString(),
       }
+      await movePath(resolved, path.join(dir, storedName))
+      const entries = await readTrashIndex(wsId)
+      entries.unshift(entry)
+      await writeTrashIndex(wsId, entries)
+      if (callback) callback({ ok: true })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('trash-list', async ({ workspaceId }: { workspaceId: string }, callback?: Function) => {
+    try {
+      const wsId = sanitizeTrashId(workspaceId)
+      const entries = await readTrashIndex(wsId)
+      // Self-heal: drop index rows whose stored file is gone.
+      const kept: TrashEntry[] = []
+      for (const e of entries) {
+        const stored = trashStoredPath(wsId, e.storedName)
+        if (!stored) continue
+        try {
+          await fs.stat(stored)
+          kept.push(e)
+        } catch {}
+      }
+      if (kept.length !== entries.length) await writeTrashIndex(wsId, kept)
+      if (callback) callback({ ok: true, entries: kept })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('trash-restore', async ({ workspaceId, id }: { workspaceId: string; id: string }, callback?: Function) => {
+    try {
+      const wsId = sanitizeTrashId(workspaceId)
+      const entries = await readTrashIndex(wsId)
+      const idx = entries.findIndex(e => e.id === id)
+      if (idx < 0) {
+        if (callback) callback({ ok: false, error: 'Trash entry not found' })
+        return
+      }
+      const entry = entries[idx]
+      if (!isPathInWorkspace(ctx, entry.absolutePath)) {
+        if (callback) callback({ ok: false, error: 'Original location is outside the workspace' })
+        return
+      }
+      const stored = trashStoredPath(wsId, entry.storedName)
+      if (!stored) {
+        if (callback) callback({ ok: false, error: 'Invalid trash entry' })
+        return
+      }
+      try {
+        await fs.stat(stored)
+      } catch {
+        if (callback) callback({ ok: false, error: 'Trashed file is missing' })
+        return
+      }
+      // Never overwrite: find a free sibling name when something is back there.
+      let target = entry.absolutePath
+      try {
+        await fs.stat(target)
+        const dirn = path.dirname(target)
+        const ext = path.extname(entry.name)
+        const stem = path.basename(entry.name, ext)
+        let n = 1
+        for (;;) {
+          const candidate = path.join(dirn, `${stem} (restored${n > 1 ? ` ${n}` : ''})${ext}`)
+          try {
+            await fs.stat(candidate)
+            n++
+          } catch {
+            target = candidate
+            break
+          }
+        }
+      } catch {}
+      await movePath(stored, target)
+      entries.splice(idx, 1)
+      await writeTrashIndex(wsId, entries)
+      if (callback) callback({ ok: true, restoredPath: target })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('trash-delete', async ({ workspaceId, id }: { workspaceId: string; id: string }, callback?: Function) => {
+    try {
+      const wsId = sanitizeTrashId(workspaceId)
+      const entries = await readTrashIndex(wsId)
+      const idx = entries.findIndex(e => e.id === id)
+      if (idx < 0) {
+        if (callback) callback({ ok: false, error: 'Trash entry not found' })
+        return
+      }
+      const stored = trashStoredPath(wsId, entries[idx].storedName)
+      if (stored) {
+        try { await fs.rm(stored, { recursive: true, force: true }) } catch {}
+      }
+      entries.splice(idx, 1)
+      await writeTrashIndex(wsId, entries)
+      if (callback) callback({ ok: true })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('trash-empty', async ({ workspaceId }: { workspaceId: string }, callback?: Function) => {
+    try {
+      const wsId = sanitizeTrashId(workspaceId)
+      await fs.rm(trashDirFor(wsId), { recursive: true, force: true })
       if (callback) callback({ ok: true })
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })

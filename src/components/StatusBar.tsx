@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from 'react'
 import type { SessionState, WorkspaceInfo } from '../types'
 
 interface Props {
@@ -7,6 +8,10 @@ interface Props {
   notificationPanelOpen: boolean
   onNotificationClick: () => void
   unreadCount: number
+  fileTrash: { id: string; name: string; relPath: string; isDirectory: boolean; deletedAt: string }[]
+  onRecoverFile: (id: string) => void
+  onDeleteTrashFile: (id: string) => void
+  onEmptyTrash: () => void
 }
 
 function getSessionStats(sessions: Record<string, SessionState>) {
@@ -17,8 +22,35 @@ function getSessionStats(sessions: Record<string, SessionState>) {
   return { total, busy, shells }
 }
 
-export default function StatusBar({ sessions, workspaces, activeWorkspace, notificationPanelOpen, onNotificationClick, unreadCount }: Props) {
+export default function StatusBar({ sessions, workspaces, activeWorkspace, notificationPanelOpen, onNotificationClick, unreadCount, fileTrash, onRecoverFile, onDeleteTrashFile, onEmptyTrash }: Props) {
   const stats = getSessionStats(sessions)
+  const [trashOpen, setTrashOpen] = useState(false)
+  const trashRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!trashOpen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setTrashOpen(false) }
+    const onDown = (e: MouseEvent) => {
+      if (trashRef.current && !trashRef.current.contains(e.target as Node)) setTrashOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onDown)
+    }
+  }, [trashOpen])
+
+  function handleDelete(id: string, name: string) {
+    if (confirm(`Permanently delete "${name}"? It cannot be recovered.`)) onDeleteTrashFile(id)
+  }
+
+  function handleEmpty() {
+    if (fileTrash.length === 0) return
+    if (confirm(`Permanently delete ${fileTrash.length} trashed item${fileTrash.length !== 1 ? 's' : ''}? They cannot be recovered.`)) {
+      onEmptyTrash()
+    }
+  }
 
   return (
     <footer className="status-bar">
@@ -49,10 +81,45 @@ export default function StatusBar({ sessions, workspaces, activeWorkspace, notif
           <i className="codicon codicon-folder" style={{ fontSize: 14 }}></i>
           {workspaces.length}
         </span>
-        <span className="status-bar-item" title="Theme">
-          <i className="codicon codicon-color-mode" style={{ fontSize: 14 }}></i>
-        </span>
+        <button
+          className={`status-bar-item status-bar-notif-btn ${trashOpen ? 'active' : ''}`}
+          onMouseDown={e => e.nativeEvent.stopPropagation()}
+          onClick={() => setTrashOpen(o => !o)}
+          title="Trash"
+        >
+          <i className="codicon codicon-trash" style={{ fontSize: 14 }}></i>
+          {fileTrash.length > 0 && <span className="status-bar-badge">{fileTrash.length}</span>}
+        </button>
       </div>
+      {trashOpen && (
+        <div className="status-bar-trash-popup" ref={trashRef} onClick={e => e.stopPropagation()}>
+          <div className="status-bar-trash-header">
+            <span>Trash{fileTrash.length > 0 ? ` (${fileTrash.length})` : ''}</span>
+            <button className="status-bar-trash-close" onClick={() => setTrashOpen(false)} title="Close">✕</button>
+          </div>
+          <div className="status-bar-trash-list">
+            {fileTrash.length === 0 ? (
+              <span className="status-bar-trash-empty">Trash is empty</span>
+            ) : (
+              fileTrash.map(item => (
+                <div key={item.id} className="status-bar-trash-item">
+                  <i className={`codicon ${item.isDirectory ? 'codicon-folder' : 'codicon-file'}`} style={{ fontSize: 13, flexShrink: 0 }}></i>
+                  <span className="status-bar-trash-name" title={item.relPath || item.name}>{item.name}</span>
+                  <div className="status-bar-trash-actions">
+                    <button onClick={() => onRecoverFile(item.id)} title="Recover">↩ Recover</button>
+                    <button className="danger" onClick={() => handleDelete(item.id, item.name)} title="Delete">✕ Delete</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          {fileTrash.length > 0 && (
+            <div className="status-bar-trash-footer">
+              <button className="status-bar-trash-empty-btn" onClick={handleEmpty}>Empty Bin</button>
+            </div>
+          )}
+        </div>
+      )}
     </footer>
   )
 }

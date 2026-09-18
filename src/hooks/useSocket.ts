@@ -126,6 +126,10 @@ interface UseSocketReturn {
   createFolder: (absolutePath: string) => Promise<any>
   renameFile: (oldPath: string, newPath: string) => Promise<any>
   deleteFile: (absolutePath: string) => Promise<any>
+  trashList: (workspaceId: string) => Promise<any>
+  trashRestore: (workspaceId: string, id: string) => Promise<any>
+  trashDelete: (workspaceId: string, id: string) => Promise<any>
+  trashEmpty: (workspaceId: string) => Promise<any>
   chatGetModels: () => Promise<ChatModelInfo[]>
   chatSend: (threadId: string, providerId: string, content: string, model?: string) => Promise<any>
   chatSendStream: (threadId: string, providerId: string, content: string, model?: string, attachments?: ChatAttachment[]) => void
@@ -856,6 +860,22 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('delete-file', { absolutePath })
   }, [emitAck])
 
+  const trashList = useCallback((workspaceId: string): Promise<any> => {
+    return emitAck('trash-list', { workspaceId })
+  }, [emitAck])
+
+  const trashRestore = useCallback((workspaceId: string, id: string): Promise<any> => {
+    return emitAck('trash-restore', { workspaceId, id })
+  }, [emitAck])
+
+  const trashDelete = useCallback((workspaceId: string, id: string): Promise<any> => {
+    return emitAck('trash-delete', { workspaceId, id })
+  }, [emitAck])
+
+  const trashEmpty = useCallback((workspaceId: string): Promise<any> => {
+    return emitAck('trash-empty', { workspaceId })
+  }, [emitAck])
+
   // Chat functions
   const chatReqId = useRef(0)
 
@@ -1053,6 +1073,10 @@ socket.emit('get-cumulative-stats', {})
     createFolder,
     renameFile,
     deleteFile,
+    trashList,
+    trashRestore,
+    trashDelete,
+    trashEmpty,
     chatGetModels,
     chatSend,
     chatSendStream,

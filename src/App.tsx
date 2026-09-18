@@ -159,6 +159,7 @@ function App() {
     getGitFullStatus, gitStageFile, gitUnstageFile, gitCommit, gitPull, gitPush, gitFetch,
     setUserSettings, updateWorkspaceConfig, refreshWorkspaces,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
+    trashList, trashRestore, trashDelete, trashEmpty,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
     chatListThreads, chatCreateThread, chatRenameThread, chatClearThread,
     onChatStreamChunk, onChatResponse, onChatError, onChatThreads,
@@ -640,6 +641,50 @@ function App() {
     permanentDeleteWorkspace(id).then(() => refreshDeleted())
   }, [permanentDeleteWorkspace, refreshDeleted])
 
+  // Per-workspace file trash (recycle bin): files deleted in the explorer
+  // land here and stay recoverable until removed or the bin is emptied.
+  const [fileTrash, setFileTrash] = useState<{ id: string; name: string; relPath: string; isDirectory: boolean; deletedAt: string }[]>([])
+  const refreshFileTrash = useCallback(() => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) {
+      setFileTrash([])
+      return Promise.resolve()
+    }
+    return trashList(wsId).then((res: any) => {
+      if (res?.ok) setFileTrash(res.entries || [])
+    }).catch(() => {})
+  }, [activeWorkspace?.id, trashList])
+
+  useEffect(() => {
+    refreshFileTrash()
+    const id = setInterval(refreshFileTrash, 5000)
+    return () => clearInterval(id)
+  }, [refreshFileTrash])
+
+  const handleRecoverTrashFile = useCallback((id: string) => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    trashRestore(wsId, id).then(() => {
+      refreshFileTrash()
+      setFileTreeRefreshTick(t => t + 1)
+    })
+  }, [activeWorkspace?.id, trashRestore, refreshFileTrash])
+
+  const handleDeleteTrashFile = useCallback((id: string) => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    trashDelete(wsId, id).then(() => refreshFileTrash())
+  }, [activeWorkspace?.id, trashDelete, refreshFileTrash])
+
+  const handleEmptyFileTrash = useCallback(() => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    trashEmpty(wsId).then(() => refreshFileTrash())
+  }, [activeWorkspace?.id, trashEmpty, refreshFileTrash])
+
+  // Bumped after a trash recover so explorer trees reload and show it again.
+  const [fileTreeRefreshTick, setFileTreeRefreshTick] = useState(0)
+
   const handleSelectAgent = useCallback((agentId: string) => {
     if (AGENT_TYPE_SET.has(agentId)) {
       const defaultConfig = { agentId, mode: 'fresh', flags: [] }
@@ -1053,6 +1098,7 @@ function App() {
   // deleted folder, including diff tabs). Falls back to a remaining tab, or
   // back to the agents section when nothing is left open.
   const handleExplorerFileDeleted = useCallback((relPath: string) => {
+    refreshFileTrash()
     const matches = (filePath: string) => filePath === relPath || filePath.startsWith(`${relPath}/`)
     const remaining = openFiles.filter(f => !matches(f.filePath))
     const removedIds = new Set(openFiles.filter(f => matches(f.filePath)).map(f => f.id))
@@ -1086,7 +1132,7 @@ function App() {
       setViewMode('agents')
     }
     setSelectedFilePath(null)
-  }, [openFiles, activeFileId])
+  }, [openFiles, activeFileId, refreshFileTrash])
 
   // Hide the file viewer and show the agents section. Open files (and their
   // dirty state) are kept — reopening any file returns to the viewer.
@@ -1312,6 +1358,7 @@ function App() {
               getWorkspaceTree={getWorkspaceTree}
               getFileInfo={getFileInfo}
               gitFilesByWorkspace={gitFilesByWs}
+              fileTreeRefreshTick={fileTreeRefreshTick}
               createFile={createFile}
               createFolder={createFolder}
               renameFile={renameFile}
@@ -1484,6 +1531,10 @@ function App() {
         notificationPanelOpen={notificationPanelOpen}
         onNotificationClick={() => setNotificationPanelOpen(o => !o)}
         unreadCount={notifications.filter(n => !n.read).length}
+        fileTrash={fileTrash}
+        onRecoverFile={handleRecoverTrashFile}
+        onDeleteTrashFile={handleDeleteTrashFile}
+        onEmptyTrash={handleEmptyFileTrash}
       />
     </div>
   )
