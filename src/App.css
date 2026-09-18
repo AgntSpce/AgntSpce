@@ -1282,11 +1282,6 @@
   /* selection highlight removed — keeps file/workspace icons unchanged */
 }
 
-.file-tree-item.selected .codicon,
-.file-tree-item.selected .codicon[class*='codicon-'] {
-  color: var(--text-primary) !important;
-}
-
 .file-tree-item.folder-selected {
   background: var(--bg-hover);
 }
@@ -1295,6 +1290,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Devicon brand mark for file rows (14px box, same slot as codicons). */
+.file-devicon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 /* ── Inline new file/folder row (VS Code style) ─ */

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { FileTreeNode } from '../types'
-import { getFileIconClass } from '../utils/fileIcons'
+import { getFileIconClass, getFileIconColor, getFileDevicon } from '../utils/fileIcons'
+import { assetUrl } from '../utils/assetUrl'
 
 export interface PendingCreate {
   type: 'file' | 'folder'
@@ -41,8 +42,13 @@ interface FileTreeProps {
 }
 
 function FileIcon({ name }: { name: string }) {
+  const devicon = getFileDevicon(name)
+  if (devicon) {
+    return <img className="file-devicon" src={assetUrl(`/img/devicon/${devicon}`)} alt="" draggable={false} />
+  }
   const icon = getFileIconClass(name)
-  return <i className={`codicon codicon-${icon}`} style={{ fontSize: 14, flexShrink: 0, color: 'var(--text-primary)' }} />
+  const color = getFileIconColor(name)
+  return <i className={`codicon codicon-${icon}`} style={{ fontSize: 14, flexShrink: 0, color: color ?? 'var(--text-primary)' }} />
 }
 
 export function FileTree({
