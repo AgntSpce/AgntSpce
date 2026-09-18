@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readClipboard: () => clipboard.readText(),
   writeClipboard: (text) => clipboard.writeText(text),
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
+  selectFile: () => ipcRenderer.invoke('select-file'),
   getDefaultPath: () => ipcRenderer.invoke('get-default-path'),
   getServerPort: () => ipcRenderer.invoke('get-server-port'),
   getServerAuthToken: () => ipcRenderer.invoke('get-server-auth-token'),

@@ -743,6 +743,32 @@
   letter-spacing: 0.4px;
 }
 
+/* ── Viewer empty-state actions (shared button look) ─ */
+.open-files-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.open-files-btn {
+  padding: 5px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    background var(--anim-duration) var(--anim-ease),
+    border-color var(--anim-duration) var(--anim-ease);
+}
+
+.open-files-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+}
+
 .add-btn {
   width: 22px;
   height: 22px;

@@ -37,6 +37,12 @@ interface Props {
   createFolder: (absolutePath: string) => Promise<any>
   renameFile: (oldPath: string, newPath: string) => Promise<any>
   deleteFile: (absolutePath: string) => Promise<any>
+  /** Section header text (default 'Workspace'). */
+  title?: string
+  /** Row icon: 'auto' keeps the folder/file logic, 'file' forces file icons. */
+  rowIcon?: 'auto' | 'file'
+  /** Hide the header + button (File Explorer section only). */
+  hideCreateButton?: boolean
 }
 
 function wsExpandKey(wsId: string) {
@@ -64,6 +70,7 @@ export default memo(function WorkspaceSidebar({
   onOpenCreateModal, showModal,
   expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile, onFileDeleted,
   getWorkspaceTree, getFileInfo, gitFilesByWorkspace, fileTreeRefreshTick, createFile, createFolder, renameFile, deleteFile,
+  title = 'Workspace', rowIcon = 'auto', hideCreateButton = false,
 }: Props) {
   const [showTrash, setShowTrash] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
@@ -148,10 +155,12 @@ export default memo(function WorkspaceSidebar({
       <div className="sidebar-top">
         {/* Header */}
         <div className="sidebar-header">
-          <h2>Workspace</h2>
-          <div className="sidebar-header-buttons">
-            <button className="add-btn" onClick={onOpenCreateModal} title="New workspace">+</button>
-          </div>
+          <h2>{title}</h2>
+          {!hideCreateButton && (
+            <div className="sidebar-header-buttons">
+              <button className="add-btn" onClick={onOpenCreateModal} title="New workspace">+</button>
+            </div>
+          )}
         </div>
 
         {/* Workspace list */}
@@ -177,7 +186,11 @@ export default memo(function WorkspaceSidebar({
                       style={{ fontSize: 12, width: 16 }}
                     />
                   </div>
-                  <i className={`codicon ${selectedFilePath ? 'codicon-file' : 'codicon-folder'} workspace-icon`} style={{ fontSize: 14, flexShrink: 0, color: 'var(--text-primary)' }} />
+                  {rowIcon === 'file' ? (
+                    <i className="codicon codicon-file workspace-icon" style={{ fontSize: 14, flexShrink: 0, color: 'var(--text-primary)' }} />
+                  ) : (
+                    <i className={`codicon ${selectedFilePath ? 'codicon-file' : 'codicon-folder'} workspace-icon`} style={{ fontSize: 14, flexShrink: 0, color: 'var(--text-primary)' }} />
+                  )}
                   <div
                     className={`workspace-tree-name${isActive ? ' active' : ''}`}
                     onClick={() => onSelect(ws.id)}

@@ -289,6 +289,7 @@ declare global {
       readClipboard: () => Promise<string>
       writeClipboard: (text: string) => void
       selectDirectory: () => Promise<string | null>
+      selectFile: () => Promise<string | null>
       getDefaultPath: () => Promise<string>
       getServerPort: () => Promise<number>
       getServerAuthToken: () => Promise<string>

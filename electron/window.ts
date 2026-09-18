@@ -480,6 +480,14 @@ export function registerIpcHandlers(rebuildMenuFn: () => void, serverAuthToken?:
     return result.canceled ? null : result.filePaths[0]
   })
 
+  ipcMain.handle('select-file', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      ...(mainWindow ? { parent: mainWindow } : {}),
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+
   ipcMain.handle('get-default-path', () => os.homedir())
 
   ipcMain.handle('get-server-port', () => SERVER_PORT)

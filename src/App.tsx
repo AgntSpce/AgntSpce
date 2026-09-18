@@ -252,6 +252,7 @@ function App() {
     try { return localStorage.getItem('agent-workspace-font-family') || "'JetBrains Mono', 'Fira Code', Menlo, monospace'" } catch { return "'JetBrains Mono', 'Fira Code', Menlo, monospace'" }
   })
   const [workspaceSidebarOpen, setWorkspaceSidebarOpen] = useState(true)
+  const [fileExplorerOpen, setFileExplorerOpen] = useState(false)
   const appBodyRef = useRef<HTMLDivElement>(null)
   const [leftWidth, setLeftWidth] = useState(() => {
     try {
@@ -547,6 +548,7 @@ function App() {
   const handleSelectWorkspace = useCallback((id: string) => {
     switchWorkspace(id)
     setWorkspaceSidebarOpen(true)
+    setFileExplorerOpen(false)
     setActiveView(null)
     setViewMode('agents')
     setSelectedFilePath(null)
@@ -1035,7 +1037,7 @@ function App() {
     const existingFile = openFiles.find(f => f.filePath === filePath)
     if (existingFile) {
       setActiveFileId(existingFile.id)
-      return
+      return true
     }
 
     try {
@@ -1052,14 +1054,15 @@ function App() {
         setOpenFiles(prev => [...prev, newFile])
         setActiveFileId(filePath)
         setFileContents(prev => ({ ...prev, [filePath]: res.content }))
+        return true
       }
     } catch (err) {
       console.error('Failed to read file:', err)
     }
+    return false
   }, [wsPath, openFiles, readFile, detectLanguage])
 
   const closeFile = useCallback((fileId: string) => {
-    const isLastFile = openFiles.length <= 1
     // Compute the next active file outside the updater — updaters must stay
     // pure (they run twice under StrictMode).
     setOpenFiles(prev => prev.filter(f => f.id !== fileId))
@@ -1088,9 +1091,8 @@ function App() {
       delete next[fileId]
       return next
     })
-    if (isLastFile) {
-      setViewMode('agents')
-    }
+    // Keep the current main view: closing the last tab lands on the viewer
+    // empty state (No files here + New/Open buttons) instead of agents.
     setSelectedFilePath(null)
   }, [activeFileId, openFiles])
 
@@ -1128,9 +1130,8 @@ function App() {
       for (const id of removedIds) delete next[id]
       return next
     })
-    if (remaining.length === 0) {
-      setViewMode('agents')
-    }
+    // Keep the current main view: if the viewer was open it now shows the
+    // empty state (No files here + New/Open buttons) instead of jumping away.
     setSelectedFilePath(null)
   }, [openFiles, activeFileId, refreshFileTrash])
 
@@ -1139,6 +1140,63 @@ function App() {
   const handleCloseFileViewer = useCallback(() => {
     setViewMode('agents')
   }, [])
+
+  // File Explorer empty-state: create a file at the active workspace root,
+  // then open it in the viewer.
+  const handleNewFileFromExplorer = useCallback(() => {
+    const root = wsPath?.replace(/\\/g, '/')
+    if (!root) {
+      alert('No workspace selected.')
+      return
+    }
+    showModal('New file name:', (name) => {
+      const trimmed = name.trim().replace(/\\/g, '/')
+      if (!trimmed) return
+      const dot = trimmed.lastIndexOf('.')
+      if (!(dot >= 0 && dot < trimmed.length - 1)) {
+        alert('Please add a file extension.')
+        return
+      }
+      createFile(`${root}/${trimmed}`).then((res: any) => {
+        if (res?.ok) {
+          setFileTreeRefreshTick(t => t + 1)
+          selectFile(trimmed)
+        } else {
+          alert(`Could not create "${trimmed}"${res?.error ? `: ${res.error}` : '.'}`)
+        }
+      })
+    })
+  }, [wsPath, showModal, createFile, selectFile])
+
+  // File viewer empty-state: open a file via the native system file picker
+  // (same Finder-style dialog as workspace creation), scoped to files
+  // inside the active workspace so they stay editable and savable.
+  const handleOpenFileByPath = useCallback(() => {
+    if (!wsPath) {
+      alert('No workspace selected.')
+      return
+    }
+    window.electronAPI?.selectFile?.().then((picked: string | null | undefined) => {
+      if (!picked) return
+      const root = wsPath.replace(/\\/g, '/')
+      const norm = picked.replace(/\\/g, '/')
+      const rel = norm === root ? '' : norm.startsWith(`${root}/`) ? norm.slice(root.length + 1) : null
+      if (!rel) {
+        alert('Please pick a file inside the active workspace.')
+        return
+      }
+      selectFile(rel).then(ok => {
+        if (!ok) alert(`Could not open "${rel}".`)
+      })
+    })
+  }, [wsPath, selectFile])
+
+  // Workspace select inside the File Explorer section: switch + expand the
+  // workspace but never leave the current main view (no agents jump).
+  const handleSelectWorkspaceFilesOnly = useCallback((id: string) => {
+    switchWorkspace(id)
+    expandFolder(`ws:${id}`)
+  }, [switchWorkspace, expandFolder])
 
   const handleFileContentChange = useCallback((value: string | undefined) => {
     if (!activeFileId || value === undefined) return
@@ -1269,7 +1327,9 @@ function App() {
                 onClick={() => {
                   if (activeView === 'git-review' || !workspaceSidebarOpen) {
                     setWorkspaceSidebarOpen(true)
+                    setFileExplorerOpen(false)
                     setActiveView(null)
+                    setViewMode('agents')
                   } else {
                     setWorkspaceSidebarOpen(false)
                   }
@@ -1285,12 +1345,29 @@ function App() {
                 </svg>
               </button>
               <button
+                className={`activity-bar-btn ${fileExplorerOpen ? 'active' : ''}`}
+                onClick={() => {
+                  if (fileExplorerOpen) {
+                    setFileExplorerOpen(false)
+                  } else {
+                    setFileExplorerOpen(true)
+                    setWorkspaceSidebarOpen(false)
+                    setActiveView(null)
+                    setViewMode('files')
+                  }
+                }}
+                title="File Explorer"
+              >
+                <i className="codicon codicon-file" style={{ fontSize: 24 }}></i>
+              </button>
+              <button
                 className={`activity-bar-btn ${activeView === 'git-review' ? 'active' : ''}`}
                 onClick={() => {
                   if (activeView === 'git-review') {
                     setActiveView(null)
                   } else {
                     setWorkspaceSidebarOpen(false)
+                    setFileExplorerOpen(false)
                     setActiveView('git-review')
                   }
                 }}
@@ -1332,8 +1409,8 @@ function App() {
               )}
             </div>
           </div>
-        <div className={`panel-left${leftDrag ? ' no-transition' : ''}`} style={{ width: (workspaceSidebarOpen || activeView === 'git-review') ? leftWidth : 0 }}>
-          {workspaceSidebarOpen && activeView !== 'git-review' && (
+        <div className={`panel-left${leftDrag ? ' no-transition' : ''}`} style={{ width: (workspaceSidebarOpen || activeView === 'git-review' || fileExplorerOpen) ? leftWidth : 0 }}>
+          {workspaceSidebarOpen && activeView !== 'git-review' && !fileExplorerOpen && (
             <WorkspaceSidebar
               workspaces={workspaces}
               sessions={sessions}
@@ -1384,8 +1461,43 @@ function App() {
               />
             </Suspense>
           )}
+          {fileExplorerOpen && (
+            <WorkspaceSidebar
+              workspaces={workspaces}
+              sessions={sessions}
+              activeWorkspace={activeWorkspace}
+              deletedWorkspaces={deletedWorkspaces}
+              onSelect={handleSelectWorkspaceFilesOnly}
+              onAdd={addWorkspace}
+              onEdit={editWorkspace}
+              onRemove={removeWorkspace}
+              onDelete={handleDeleteWorkspace}
+              onRestore={handleRestoreWorkspace}
+              onPermanentDelete={handlePermanentDelete}
+              showModal={showModal}
+              closeModal={closeModal}
+              onOpenCreateModal={handleCreateWorkspace}
+              expandedFolders={expandedFolders}
+              onToggleFolder={toggleFolder}
+              onExpandFolder={expandFolder}
+              selectedFilePath={selectedFilePath}
+              onSelectFile={selectFile}
+              onFileDeleted={handleExplorerFileDeleted}
+              getWorkspaceTree={getWorkspaceTree}
+              getFileInfo={getFileInfo}
+              gitFilesByWorkspace={gitFilesByWs}
+              fileTreeRefreshTick={fileTreeRefreshTick}
+              createFile={createFile}
+              createFolder={createFolder}
+              renameFile={renameFile}
+              deleteFile={deleteFile}
+              title="File Explorer"
+              rowIcon="file"
+              hideCreateButton
+            />
+          )}
         </div>
-        {(workspaceSidebarOpen || activeView === 'git-review') && <div className="resizer" onMouseDown={onResizerMouseDown('left')} />}
+        {(workspaceSidebarOpen || activeView === 'git-review' || fileExplorerOpen) && <div className="resizer" onMouseDown={onResizerMouseDown('left')} />}
         <main className={`main-content${(viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review') ? ' file-viewer' : ''}`}>
           {(viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review') && (
             <div className="editor-area">
@@ -1433,9 +1545,14 @@ function App() {
                 </>
               ) : (
                 <div className="editor-empty-state">
-                  <i className="codicon codicon-file" style={{ fontSize: 48, opacity: 0.3 }}></i>
-                  <p>No file open</p>
-                  <p className="editor-empty-hint">Select a file from the explorer to start editing</p>
+                  <div className="editor-empty-state-content">
+                    <i className="codicon codicon-file" style={{ fontSize: 48, opacity: 0.3 }}></i>
+                    <p>No files here</p>
+                    <div className="open-files-actions">
+                      <button className="open-files-btn" onClick={handleNewFileFromExplorer}>New File</button>
+                      <button className="open-files-btn" onClick={handleOpenFileByPath}>Open File</button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
