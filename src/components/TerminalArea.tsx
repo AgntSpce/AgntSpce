@@ -61,6 +61,18 @@ interface Props {
   onCloseConfirm?: (sessionId: string, confirmed: boolean) => void
 }
 
+// Fullscreen expand/compress glyph. Inline SVG (not a font glyph) so it
+// renders identically regardless of icon-font loading.
+function FullscreenIcon({ exit }: { exit: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: 'block' }}>
+      {exit
+        ? <path d="M5.5 3.5H3.5v2M8.5 3.5h2v2M10.5 8.5v2h-2M5.5 10.5h-2v-2" />
+        : <path d="M2 5V2h3M9 2h3v3M12 9v3H9M5 12H2V9" />}
+    </svg>
+  )
+}
+
 const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, writeData, hidden, onTerminalOutput, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace" }: {
   session: SessionState
   onInput: (sessionId: string, data: string) => void
@@ -633,7 +645,7 @@ export default memo(function TerminalArea({
                   <div className="shell-tab-list-header-actions">
                     <button className="shell-header-btn" onClick={() => onNewShell()} title="New terminal">+</button>
                     <button className={`shell-header-btn ${terminalFullscreen ? 'active' : ''}`} onClick={() => setTerminalFullscreen(o => !o)} title={terminalFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                      {terminalFullscreen ? '⊠' : '⊡'}
+                      {<FullscreenIcon exit={terminalFullscreen} />}
                     </button>
                     <button className="shell-header-btn" onClick={onToggleShell} title="Close terminal panel">✕</button>
                   </div>
@@ -739,7 +751,7 @@ export default memo(function TerminalArea({
                         <div className="shell-tab-list-header-actions">
                           <button className="shell-header-btn" onClick={() => onNewShell()} title="New terminal">+</button>
                           <button className={`shell-header-btn ${terminalFullscreen ? 'active' : ''}`} onClick={() => setTerminalFullscreen(o => !o)} title={terminalFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                            {terminalFullscreen ? '⊠' : '⊡'}
+                            {<FullscreenIcon exit={terminalFullscreen} />}
                           </button>
                           <button className="shell-header-btn" onClick={onToggleShell} title="Close terminal panel">✕</button>
                         </div>
@@ -948,7 +960,7 @@ export default memo(function TerminalArea({
                       <div className="shell-tab-list-header-actions">
                         <button className="shell-header-btn" onClick={() => onNewShell()} title="New terminal">+</button>
                         <button className={`shell-header-btn ${terminalFullscreen ? 'active' : ''}`} onClick={() => setTerminalFullscreen(o => !o)} title={terminalFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                          {terminalFullscreen ? '⊠' : '⊡'}
+                          {<FullscreenIcon exit={terminalFullscreen} />}
                         </button>
                         <button className="shell-header-btn" onClick={onToggleShell} title="Close terminal panel">✕</button>
                       </div>

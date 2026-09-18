@@ -5,15 +5,16 @@
 
 /* ── Theme Variables ────────────────────── */
 :root, [data-theme="dark"] {
-  --bg-primary: #1E1E1E;
-  --bg-surface: #252526;
-  --bg-elevated: #2D2D2D;
-  --bg-hover: #333333;
+  --bg-primary: #0E0E10;
+  --bg-surface: #161618;
+  --bg-elevated: #1D1D20;
+  --bg-hover: #26262A;
   --bg-active: #1A3A1A;
   --bg-accent: #22C55E10;
-  --bg-card: #252526;
-  --bg-modal: #2D2D2D;
-  --bg-panel: #333333;
+  --bg-card: #161618;
+  --bg-modal: #1D1D20;
+  --bg-panel: #26262A;
+  --bg-titlebar: #1A1A1E;
   --border: #3C3C3C;
   --border-light: #4A4A4A;
   --text-primary: #D4D4D4;
@@ -24,6 +25,7 @@
   --accent-bg: #22C55E12;
   --accent-border: #22C55E30;
   --accent-hover: #16A34A;
+  --accent-subtle: #22C55E22;
   --secondary: #3B82F6;
   --secondary-bg: #3B82F612;
   --secondary-border: #3B82F630;
@@ -36,6 +38,7 @@
   --danger: #EF4444;
   --danger-bg: #EF444410;
   --danger-border: #EF444430;
+  --danger-subtle: #EF44441F;
   --scrollbar-track: transparent;
   --scrollbar-thumb: #424242;
   --scrollbar-thumb-hover: #4F4F4F;
@@ -43,11 +46,11 @@
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.5);
   --shadow-lg: 0 8px 32px rgba(0,0,0,0.6);
-  --terminal-bg: #1E1E1E;
+  --terminal-bg: #0E0E10;
   --terminal-fg: #D4D4D4;
   --terminal-cursor: #D4D4D4;
   --terminal-selection: #22C55E30;
-  --terminal-black: #1E1E1E;
+  --terminal-black: #0E0E10;
   --terminal-red: #EF4444;
   --terminal-green: #22C55E;
   --terminal-yellow: #F59E0B;
@@ -76,6 +79,7 @@
   --bg-card: #FFFFFF;
   --bg-modal: #FFFFFF;
   --bg-panel: #F3F3F3;
+  --bg-titlebar: #FFFFFF;
   --border: #D4D4D4;
   --border-light: #C0C0C0;
   --text-primary: #1E1E1E;
@@ -86,6 +90,7 @@
   --accent-bg: #16A34A10;
   --accent-border: #16A34A30;
   --accent-hover: #15803D;
+  --accent-subtle: #16A34A1A;
   --secondary: #3B82F6;
   --secondary-bg: #3B82F610;
   --secondary-border: #3B82F630;
@@ -98,6 +103,7 @@
   --danger: #DC2626;
   --danger-bg: #DC262610;
   --danger-border: #DC262630;
+  --danger-subtle: #DC262614;
   --scrollbar-track: transparent;
   --scrollbar-thumb: #C0C0C0;
   --scrollbar-thumb-hover: #A0A0A0;
@@ -203,7 +209,7 @@
   align-items: center;
   flex-shrink: 0;
   -webkit-app-region: drag;
-  background: var(--bg-primary);
+  background: var(--bg-titlebar);
   border-bottom: 1px solid var(--border);
 }
 
@@ -336,7 +342,7 @@
   align-items: center;
   flex-shrink: 0;
   -webkit-app-region: drag;
-  background: var(--bg-primary);
+  background: var(--bg-titlebar);
   -webkit-user-select: none;
   user-select: none;
 }

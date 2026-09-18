@@ -66,9 +66,9 @@ export function CodeEditor({
         inherit: true,
         rules: [],
         colors: {
-          'editor.background': '#1E1E1E',
+          'editor.background': '#0E0E10',
           'editor.foreground': '#D4D4D4',
-          'editor.lineHighlightBackground': '#2A2D2E',
+          'editor.lineHighlightBackground': '#1D1D20',
           'editor.selectionBackground': '#22C55E30',
           'editorCursor.foreground': '#D4D4D4',
           'editorLineNumber.foreground': '#858585',

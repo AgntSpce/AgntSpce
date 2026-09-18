@@ -64,6 +64,24 @@ export default function GitDiffViewer({
     setChunk(parseDiff(diffContent))
   }, [diffContent])
 
+  const handleBeforeMount = (monaco: any) => {
+    // Mirrors CodeEditor's custom-dark so the diff viewer matches the app theme.
+    monaco.editor.defineTheme('custom-dark', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [],
+      colors: {
+        'editor.background': '#0E0E10',
+        'editor.foreground': '#D4D4D4',
+        'editor.lineHighlightBackground': '#1D1D20',
+        'editor.selectionBackground': '#22C55E30',
+        'editorCursor.foreground': '#D4D4D4',
+        'editorLineNumber.foreground': '#858585',
+        'editorLineNumber.activeForeground': '#C6C6C6',
+      },
+    })
+  }
+
   const handleEditorMount = (editorInstance: editor.IStandaloneDiffEditor, monaco: any) => {
     editorRef.current = editorInstance
     monacoRef.current = monaco
@@ -96,11 +114,12 @@ export default function GitDiffViewer({
       </div>
       <div className="git-diff-body" ref={containerRef}>
         <DiffEditor
-          theme={theme === 'dark' ? 'vs-dark' : 'vs'}
+          theme={theme === 'dark' ? 'custom-dark' : 'vs'}
           language={language}
           original={chunk.oldContent}
           modified={chunk.newContent}
           onMount={handleEditorMount}
+          beforeMount={handleBeforeMount}
           options={{
             readOnly: true,
             minimap: { enabled: false },

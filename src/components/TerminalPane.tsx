@@ -12,6 +12,18 @@ import { isAgentTypeId } from '../utils/agentTypes'
 import { createTerminalWriteScheduler, type TerminalWriteScheduler } from '../utils/terminalWriteScheduler'
 import { queuePanePtyResizeIfHeld, PANE_PTY_RESIZE_HOLD_FLUSH_EVENT } from '../utils/pane-manager/panePtyResizeHold'
 
+// Fullscreen expand/compress glyph. Inline SVG (not a font glyph) so it
+// renders identically regardless of icon-font loading.
+function FullscreenIcon({ exit }: { exit: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: 'block' }}>
+      {exit
+        ? <path d="M5.5 3.5H3.5v2M8.5 3.5h2v2M10.5 8.5v2h-2M5.5 10.5h-2v-2" />
+        : <path d="M2 5V2h3M9 2h3v3M12 9v3H9M5 12H2V9" />}
+    </svg>
+  )
+}
+
 interface Props {
   session: SessionState
   onInput: (sessionId: string, data: string) => void
@@ -677,7 +689,7 @@ function handleResizeDown(edge: 'left' | 'right' | 'top' | 'bottom', e: React.Mo
             className={`terminal-layout-btn ${layoutMode === 'focus' ? 'active' : ''}`}
             onClick={(e) => { e.stopPropagation(); onLayoutChange?.(layoutMode === 'focus' ? 'grid' : 'focus') }}
             title="Full screen"
-          >⊞</button>
+          ><FullscreenIcon exit={layoutMode === 'focus'} /></button>
         </span>
         {onClose && (
           <button className="terminal-close-btn" onClick={() => onClose(session.id)} title="Close">✕</button>
