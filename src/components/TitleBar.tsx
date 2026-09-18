@@ -147,9 +147,10 @@ export default function TitleBar({
 
   const agentActions = (
     <div className="title-bar-agent-actions">
-      <button className="new-terminal-btn" onMouseDown={e => e.nativeEvent.stopPropagation()} onClick={handleAddAgentClick}>+ Agent</button>
+      <button className="new-terminal-btn" onMouseDown={e => e.nativeEvent.stopPropagation()} onDoubleClick={e => e.stopPropagation()} onClick={handleAddAgentClick}>+ Agent</button>
       <button
         className={`shell-btn ${chatSidebarOpen ? 'active' : ''}`}
+        onDoubleClick={e => e.stopPropagation()}
         onClick={onToggleChatSidebar}
         title="Chat"
       >
