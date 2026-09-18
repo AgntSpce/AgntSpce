@@ -1127,7 +1127,15 @@ function App() {
 
   return (
     <div className="app">
-      <TitleBar getOrchestratorStats={getOrchestratorStats} />
+      <TitleBar
+        getOrchestratorStats={getOrchestratorStats}
+        onAddAgent={handleToggleNewAgentPicker}
+        onSelectAgent={handleSelectAgent}
+        agentsList={agentsList}
+        agentPickerTrigger={agentPickerTrigger}
+        onToggleChatSidebar={handleToggleChatSidebar}
+        chatSidebarOpen={chatSidebarOpen}
+      />
       <div className="app-body" ref={appBodyRef}>
           <div className="activity-bar">
             <div className="activity-bar-top">

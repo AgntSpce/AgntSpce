@@ -391,22 +391,20 @@ function FlexSplitNode({
 
 export default memo(function TerminalArea({
   sessions, shellSessions, onInput, onResize, onRestart, onResumeSession,
-  onStartAgent, onShowAgentModal, onNewAgent, onSelectAgent, onNewShell, onCloseTab, onActiveSessionChange,
+  onStartAgent, onShowAgentModal, onSelectAgent, onNewShell, onCloseTab, onActiveSessionChange,
   activeSessionId, writeBuffersRef, agentConfigs,
   focusMode, agentsList, bottomShellOpen, onToggleShell,
-  chatSidebarOpen, onToggleChatSidebar, onTerminalOutput,
+  onTerminalOutput,
   sessionCompressionModes = {},
   onSessionCompressionModeChange,
   pageViews, activeView, onViewChange, shellOnly,
   onTerminalResizerMouseDown, terminalHeight = 40, terminalDrag,
-  agentPickerTrigger = 0,
   fontSize = 16,
   fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace",
   pendingCloseSessionId = null,
   onCloseConfirm,
 }: Props) {
   const [activeGroupTab, setActiveGroupTab] = useState<string>('all')
-  const [showDropdown, setShowDropdown] = useState(false)
   const [showAgentDropdown, setShowAgentDropdown] = useState(false)
   const [activeShellId, setActiveShellId] = useState<string | null>(null)
   const [terminalFullscreen, setTerminalFullscreen] = useState(false)
@@ -501,22 +499,6 @@ export default memo(function TerminalArea({
       .map(t => ({ id: t.id, label: t.label, icon: t.icon, count: typeCounts[t.id] })),
   ]
 
-  function handleAddAgentClick() {
-    if (agentsList && agentsList.length > 0) {
-      setShowDropdown(o => !o)
-    } else {
-      onNewAgent()
-    }
-  }
-
-  const prevPickerTrigger = useRef(agentPickerTrigger)
-  useEffect(() => {
-    if (agentPickerTrigger !== prevPickerTrigger.current) {
-      prevPickerTrigger.current = agentPickerTrigger
-      handleAddAgentClick()
-    }
-  }, [agentPickerTrigger])
-
   const areaRef = useRef<HTMLDivElement>(null)
   // Track the pane the user is actually interacting with: clicking or typing
   // in a grid pane doesn't change tab selection, so without this the app's
@@ -565,13 +547,6 @@ export default memo(function TerminalArea({
     root.addEventListener('keydown', onKeyDown, true)
     return () => root.removeEventListener('keydown', onKeyDown, true)
   }, [onActiveSessionChange, activeSessionId])
-
-  function handleDropdownSelect(agentId: string) {
-    setShowDropdown(false)
-    onSelectAgent(agentId)
-  }
-
-  function handleDropdownClose() { setShowDropdown(false) }
 
   function handleShellClose(sessionId: string) {
     const isLast = shellSessions.length <= 1
@@ -737,21 +712,11 @@ export default memo(function TerminalArea({
                 )
               })}
             </div>
-            <div className="tab-bar-actions" style={{ position: 'relative' }}>
-              {focusMode && <span className="focus-indicator" title="Focus mode active (Cmd+Shift+F)">Focus</span>}
-              <button className="new-terminal-btn" onMouseDown={e => e.nativeEvent.stopPropagation()} onClick={handleAddAgentClick}>+ Agent</button>
-
-              <button className={`shell-btn ${chatSidebarOpen ? 'active' : ''}`} onClick={onToggleChatSidebar} title="Chat">
-                <i className="codicon codicon-comment-discussion" style={{ fontSize: 16 }}></i>
-              </button>
-              {showDropdown && agentsList && (
-                <AgentPicker
-                  agents={agentsList}
-                  onSelect={handleDropdownSelect}
-                  onClose={handleDropdownClose}
-                />
-              )}
-            </div>
+            {focusMode && (
+              <div className="tab-bar-actions" style={{ position: 'relative' }}>
+                <span className="focus-indicator" title="Focus mode active (Cmd+Shift+F)">Focus</span>
+              </div>
+            )}
           </div>
         )}
 

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { OrchestratorStats } from '../hooks/useSocket'
+import AgentPicker from './AgentPicker'
 
 function formatMemoryMB(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
@@ -100,7 +101,70 @@ function ResourceStats({ getOrchestratorStats }: { getOrchestratorStats?: () => 
   )
 }
 
-export default function TitleBar({ getOrchestratorStats }: { getOrchestratorStats?: () => Promise<OrchestratorStats> }) {
+interface TitleBarProps {
+  getOrchestratorStats?: () => Promise<OrchestratorStats>
+  onAddAgent?: () => void
+  onSelectAgent?: (agentId: string) => void
+  agentsList?: { id: string; name: string; icon: string }[]
+  agentPickerTrigger?: number
+  onToggleChatSidebar?: () => void
+  chatSidebarOpen?: boolean
+}
+
+export default function TitleBar({
+  getOrchestratorStats,
+  onAddAgent,
+  onSelectAgent,
+  agentsList,
+  agentPickerTrigger = 0,
+  onToggleChatSidebar,
+  chatSidebarOpen = false,
+}: TitleBarProps) {
+  const [showDropdown, setShowDropdown] = useState(false)
+  const prevPickerTrigger = useRef(agentPickerTrigger)
+
+  useEffect(() => {
+    if (agentPickerTrigger !== prevPickerTrigger.current) {
+      prevPickerTrigger.current = agentPickerTrigger
+      if (agentsList && agentsList.length > 0) {
+        setShowDropdown(o => !o)
+      }
+    }
+  }, [agentPickerTrigger, agentsList])
+
+  function handleAddAgentClick() {
+    // Single toggle path: App's handler bumps agentPickerTrigger, the effect
+    // above opens/closes the dropdown (view resets happen in App).
+    onAddAgent?.()
+  }
+
+  function handleDropdownSelect(agentId: string) {
+    setShowDropdown(false)
+    onSelectAgent?.(agentId)
+  }
+
+  function handleDropdownClose() { setShowDropdown(false) }
+
+  const agentActions = (
+    <div className="title-bar-agent-actions">
+      <button className="new-terminal-btn" onMouseDown={e => e.nativeEvent.stopPropagation()} onClick={handleAddAgentClick}>+ Agent</button>
+      <button
+        className={`shell-btn ${chatSidebarOpen ? 'active' : ''}`}
+        onClick={onToggleChatSidebar}
+        title="Chat"
+      >
+        <i className="codicon codicon-comment-discussion" style={{ fontSize: 15.2 }}></i>
+      </button>
+      {showDropdown && agentsList && (
+        <AgentPicker
+          agents={agentsList}
+          onSelect={handleDropdownSelect}
+          onClose={handleDropdownClose}
+        />
+      )}
+    </div>
+  )
+
   const isMac = navigator.platform?.startsWith('Mac')
 
   if (isMac) {
@@ -109,6 +173,7 @@ export default function TitleBar({ getOrchestratorStats }: { getOrchestratorStat
         <div className="macos-traffic-light-spacer" />
         <ResourceStats getOrchestratorStats={getOrchestratorStats} />
         <div className="macos-title-drag" />
+        {agentActions}
       </div>
     )
   }
@@ -131,6 +196,7 @@ export default function TitleBar({ getOrchestratorStats }: { getOrchestratorStat
       <div className="title-bar-drag" />
       <ResourceStats getOrchestratorStats={getOrchestratorStats} />
       <div className="title-bar-drag" />
+      {agentActions}
       <div className="title-bar-window-controls">
         <button className="title-bar-win-btn" onClick={() => window.electronAPI?.windowMinimize?.()} title="Minimize">
           <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="1" fill="currentColor"/></svg>
