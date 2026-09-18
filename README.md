@@ -1,5 +1,5 @@
 <h1 align="center">
-  <a href="[https://agntspce-website.vercel.app/]"><img src="img/logo.png" alt="AgntSpce" width="64" valign="middle" /></a> AgntSpce
+  <a href="[https://agntspce-website.vercel.app/]"><img src="public/img/logo.png" alt="AgntSpce" width="64" valign="middle" /></a> AgntSpce
 </h1>
 
 <p align="center">
@@ -23,7 +23,7 @@
 <h3 align="center"><a href="https://agntspce-website.vercel.app/download.html"><ins>Download</ins></a> &nbsp;&bull;&nbsp; <a href="https://agntspce-website.vercel.app/docs.html"><ins>Docs</ins></a></h3>
 
 <p align="center">
-  <img src="img/main.png" alt="AgntSpce desktop app running multiple AI coding agents in terminal panes" width="960" style="border-radius: 8px;" />
+  <img src="public/img/main.png" alt="AgntSpce desktop app running multiple AI coding agents in terminal panes" width="960" style="border-radius: 8px;" />
 </p>
 
 > **Windows users:** Switch to the [`forWindows`](https://github.com/AniketWathore/agntspce/tree/forWindows) branch for Windows builds. Note that Windows builds may have issues — please [raise an issue](https://github.com/AniketWathore/agntspce/issues) if you encounter any problems.
@@ -72,7 +72,7 @@ Run Claude Code, Opencode, Codex, and Gemini CLI side-by-side. Each agent gets i
 
 </td>
 <td width="50%">
-  <img src="img/parallel.png" alt="Multiple AI agents running in parallel" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/parallel.png" alt="Multiple AI agents running in parallel" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 <tr>
@@ -84,7 +84,7 @@ Create, switch, and organize workspaces with persistent state. Full CRUD with tr
 
 </td>
 <td width="50%">
-  <img src="img/workspace.png" alt="Workspace sidebar with CRUD operations" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/readme-workspace.png" alt="Workspace sidebar with CRUD operations" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 <tr>
@@ -96,7 +96,7 @@ Live terminal output streamed via Socket.IO into xterm.js panes. Status detectio
 
 </td>
 <td width="50%">
-  <img src="img/terminal.png" alt="Live terminal output in xterm.js panes" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/readme-terminal.png" alt="Live terminal output in xterm.js panes" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 <tr>
@@ -108,7 +108,7 @@ Built-in command line output compression powered by [RTK](https://github.com/rtk
 
 </td>
 <td width="50%">
-  <img src="img/agntspce output compression.png" alt="Command line output compression dashboard" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/agntspce output compression.png" alt="Command line output compression dashboard" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 <tr>
@@ -120,7 +120,7 @@ Semantic code search via MCP protocol — index and search your entire codebase 
 
 </td>
 <td width="50%">
-  <img src="img/agntspce search mcp.png" alt="Semantic code search MCP interface" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/agntspce search mcp.png" alt="Semantic code search MCP interface" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 <tr>
@@ -132,7 +132,7 @@ Automatic branch detection, git worktree support, and diff review — all from w
 
 </td>
 <td width="50%">
-  <img src="img/git review.png" alt="Git diff viewer and branch tracking" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/git review.png" alt="Git diff viewer and branch tracking" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 <tr>
@@ -144,7 +144,7 @@ Monaco-powered code editor with syntax highlighting, file tree, and editor tabs.
 
 </td>
 <td width="50%">
-  <img src="img/code editor.png" alt="Monaco code editor with file explorer" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
+  <img src="public/img/code editor.png" alt="Monaco code editor with file explorer" width="100%" style="border-radius: 4px; aspect-ratio: 16/9; object-fit: cover;" />
 </td>
 </tr>
 </table>
