@@ -25,7 +25,15 @@ function buildWindow(): BrowserWindow {
     minWidth: 800,
     minHeight: 600,
     title: 'AgntSpce',
-    ...(isMac ? { titleBarStyle: 'hidden' as const } : { frame: false }),
+    ...(isMac
+      ? {
+          titleBarStyle: 'hidden' as const,
+          // Vertically center the 14px traffic lights in the 33px custom
+          // title bar: y = 33 / 2 - 14 / 2 ≈ 10. x: 9 keeps the standard
+          // AppKit left offset (verified against NSWindow button frames).
+          trafficLightPosition: { x: 9, y: 10 },
+        }
+      : { frame: false }),
     webPreferences: {
       preload: path.join(app.getAppPath(), 'dist-electron/preload.js'),
       contextIsolation: true,
@@ -36,7 +44,23 @@ function buildWindow(): BrowserWindow {
   // Renderer hardening: never open new windows from web content, and block
   // navigation away from the app bundle (dev server in dev, file:// in prod).
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.webContents.on('will-navigate', (event, url) => {
+  if (isMac) {
+    // Re-pin the traffic lights on show and every geometry change: AppKit can
+    // re-layout the titlebar container (zoom, drag-resize, fullscreen exit,
+    // display/scale change) and drop the custom offset, which would leave the
+    // lights off-center or hanging outside the fixed 33px bar.
+    const pinTrafficLights = () => {
+      try {
+        if (!win.isDestroyed() && !win.isFullScreen()) {
+          win.setTrafficLightPosition({ x: 9, y: 10 })
+        }
+      } catch {}
+    }
+    win.once('ready-to-show', pinTrafficLights)
+    win.on('resize', pinTrafficLights)
+    win.on('leave-full-screen', pinTrafficLights)
+    screen.on('display-metrics-changed', pinTrafficLights)
+  }  win.webContents.on('will-navigate', (event, url) => {
     const devUrl = process.env.VITE_DEV_SERVER_URL
     const allowed = devUrl ? url.startsWith(devUrl) : url.startsWith('file://')
     if (!allowed) {
