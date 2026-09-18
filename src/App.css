@@ -3026,6 +3026,26 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+  align-items: center;
+}
+
+/* Center dashboard tab contents on screen */
+.dashboard-body > * {
+  width: 100%;
+  max-width: 1024px;
+}
+
+.dashboard-overview-card,
+.orch-stat-card {
+  text-align: center;
+}
+
+.dashboard-overview-card-header {
+  justify-content: center;
+}
+
+.dashboard-overview-change {
+  justify-content: center;
 }
 
 /* Dashboard Tab Navigation */
@@ -3034,7 +3054,7 @@
   align-items: center;
   gap: 4px;
   padding: 4px;
-  margin: 0 24px;
+  margin: 0 auto;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 10px;
