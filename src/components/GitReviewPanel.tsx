@@ -232,6 +232,17 @@ export default function GitReviewPanel({
       <div className="git-section-header">
         <span className="git-section-title">Untracked Files</span>
         {unstagedFiles.length > 0 && <span className="git-section-count">{unstagedFiles.length}</span>}
+        {unstagedFiles.length > 0 && (
+          <button
+            className="git-section-stage-all"
+            onClick={() => {
+              Promise.all(unstagedFiles.map(f => gitStageFile(worktreePath, f.filePath))).then(loadStatus)
+            }}
+            title="Add all changes to staging area"
+          >
+            +
+          </button>
+        )}
       </div>
       <div className="git-files-list">
         {unstagedFiles.length === 0 ? (

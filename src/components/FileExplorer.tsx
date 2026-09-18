@@ -1,7 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { FileTreeNode } from '../types'
 import { FileTree } from './FileTree'
 import { copyToClipboard } from '../utils/clipboard'
+
+// A file name counts as typed when it has a non-empty extension part:
+// 'notes.txt' yes, 'notes' or 'notes.' no. Leading-dot names (.gitignore,
+// .env) are allowed.
+function hasFileExtension(name: string): boolean {
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 && dot < name.length - 1
+}
 
 // Keep floating menus on-screen: clamp the click point so the ~220px-wide
 // menu never renders off the right/bottom edge (where items'd be unclickable).
@@ -23,6 +31,8 @@ interface FileExplorerProps {
   refreshSignal?: number
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   getFileInfo: (absolutePath: string) => Promise<any>
+  /** Shared git changed-files for this workspace (from App's poll — connected, not independent). */
+  gitStatusFiles?: { filePath: string; status: string }[]
   /** External creation trigger (workspace-level menu): consumed once per nonce. */
   createRequest?: { type: 'file' | 'folder'; nonce: number } | null
   onCreateRequestHandled?: (nonce: number) => void
@@ -46,6 +56,75 @@ function formatDateTime(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? 'unknown' : d.toLocaleString()
 }
 
+type ExplorerGitKind = 'added' | 'modified'
+
+function strongerGitKind(a: ExplorerGitKind | null, b: ExplorerGitKind | null): ExplorerGitKind | null {
+  if (a === 'added' || b === 'added') return 'added'
+  return a || b
+}
+
+// Resolve git colors for every visible tree path. `files` holds
+// repo-root-relative porcelain paths; tree paths are workspace-relative, so
+// resolution tries, in order: exact match, collapsed untracked-dir prefix
+// ('Sub/' colors everything beneath it), then path suffix (covers
+// workspaces rooted in a repo subfolder — suffixes keep at least one '/'
+// so bare filenames can't false-match across directories).
+function buildExplorerGitMap(
+  nodes: FileTreeNode[],
+  files: { path: string; kind: ExplorerGitKind }[],
+): Map<string, ExplorerGitKind> {
+  const exact = new Map<string, ExplorerGitKind>()
+  const suffix = new Map<string, ExplorerGitKind>()
+  const dirPrefixes: { prefix: string; kind: ExplorerGitKind }[] = []
+  const put = (map: Map<string, ExplorerGitKind>, p: string, kind: ExplorerGitKind) => {
+    map.set(p, strongerGitKind(map.get(p) ?? null, kind)!)
+  }
+  for (const { path, kind } of files) {
+    if (path.endsWith('/')) {
+      dirPrefixes.push({ prefix: path, kind })
+      continue
+    }
+    put(exact, path, kind)
+    const parts = path.split('/')
+    for (let i = 1; i < parts.length - 1; i++) {
+      put(suffix, parts.slice(i).join('/'), kind)
+    }
+  }
+
+  const norm = (p: string) => p.replace(/\\/g, '/')
+  const resolveFile = (raw: string): ExplorerGitKind | null => {
+    const p = norm(raw)
+    const hit = exact.get(p)
+    if (hit) return hit
+    for (const { prefix, kind } of dirPrefixes) {
+      if (p === prefix.slice(0, -1) || p.startsWith(prefix)) return kind
+    }
+    return suffix.get(p) ?? null
+  }
+
+  const out = new Map<string, ExplorerGitKind>()
+  const walk = (list: FileTreeNode[]): ExplorerGitKind | null => {
+    let acc: ExplorerGitKind | null = null
+    for (const n of list) {
+      let kind: ExplorerGitKind | null
+      if (n.type === 'directory') {
+        const below = walk(n.children || [])
+        const self = resolveFile(n.path)
+        kind = strongerGitKind(self, below)
+      } else {
+        kind = resolveFile(n.path)
+      }
+      if (kind) {
+        out.set(n.path, strongerGitKind(out.get(n.path) ?? null, kind)!)
+        acc = strongerGitKind(acc, kind)
+      }
+    }
+    return acc
+  }
+  walk(nodes)
+  return out
+}
+
 export function FileExplorer({
   workspacePath,
   selectedFilePath,
@@ -57,6 +136,7 @@ export function FileExplorer({
   refreshSignal,
   getWorkspaceTree,
   getFileInfo,
+  gitStatusFiles,
   createRequest = null,
   onCreateRequestHandled,
   createFile,
@@ -126,6 +206,35 @@ export function FileExplorer({
     loadTree()
   }, [loadTree, refreshSignal])
 
+  // Explorer row colors from App's shared git poll (same git truth as the
+  // badge count and git review). U/A -> 'added' (green), M -> 'modified'
+  // (yellow). Just-created paths are optimistically marked added so new
+  // files light up instantly instead of waiting for the next poll.
+  const gitFileKinds = useMemo(() => {
+    const rows: { path: string; kind: 'added' | 'modified' }[] = []
+    for (const f of gitStatusFiles || []) {
+      let rel = String(f.filePath || '').replace(/\\/g, '/')
+      if (!rel) continue
+      if (rel.length > 1 && rel.startsWith('"') && rel.endsWith('"')) {
+        rel = rel.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+      }
+      if (!rel) continue
+      const kind = (f.status === 'U' || f.status === 'A') ? 'added'
+        : f.status === 'M' ? 'modified'
+        : null
+      if (kind) rows.push({ path: rel, kind })
+    }
+    if (justCreated && !rows.some(r => r.path === justCreated || r.path === `${justCreated}/`)) {
+      rows.push({ path: justCreated, kind: 'added' })
+    }
+    return rows
+  }, [gitStatusFiles, justCreated])
+
+  const gitStatuses = useMemo(
+    () => buildExplorerGitMap(treeData, gitFileKinds),
+    [treeData, gitFileKinds],
+  )
+
   useEffect(() => {
     if (!infoPopup) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setInfoPopup(null) }
@@ -144,24 +253,51 @@ export function FileExplorer({
     setContextMenu(null)
   }, [])
 
-  // VS Code-style inline creation: commit the pending row (Enter/blur),
-  // clearing first so double-fires (Enter + blur) are no-ops.
-  const commitPending = useCallback(() => {
-    const p = pendingRef.current
-    if (!p) return
-    setPending(null)
-    const name = p.name.trim()
-    if (!name) return
-    const base = workspacePath.replace(/\\/g, '/') + (p.parentPath ? '/' + p.parentPath : '')
-    const run = p.type === 'file' ? createFile(`${base}/${name}`) : createFolder(`${base}/${name}`)
+  // VS Code-style inline creation: Enter submits (clearing first so
+  // double-fires are no-ops). A missing extension warns ONCE and keeps the
+  // box open for fixing; blur below stays silent so the alert can never loop.
+  const runCreate = useCallback((parentPath: string, name: string, type: 'file' | 'folder') => {
+    const base = workspacePath.replace(/\\/g, '/') + (parentPath ? '/' + parentPath : '')
+    const run = type === 'file' ? createFile(`${base}/${name}`) : createFolder(`${base}/${name}`)
     run.then((res: any) => {
       if (res?.ok) {
-        if (p.parentPath && !expandedFolders.has(p.parentPath)) onToggleFolder(p.parentPath)
-        flashCreated(p.parentPath ? `${p.parentPath}/${name}` : name)
+        if (parentPath && !expandedFolders.has(parentPath)) onToggleFolder(parentPath)
+        flashCreated(parentPath ? `${parentPath}/${name}` : name)
         loadTree()
       }
     })
   }, [workspacePath, createFile, createFolder, expandedFolders, onToggleFolder, loadTree, flashCreated])
+
+  const commitPending = useCallback(() => {
+    const p = pendingRef.current
+    if (!p) return
+    const name = p.name.trim()
+    if (!name) {
+      setPending(null)
+      return
+    }
+    if (p.type === 'file' && !hasFileExtension(name)) {
+      alert('Please add a file extension.')
+      return
+    }
+    setPending(null)
+    runCreate(p.parentPath, name, p.type)
+  }, [runCreate])
+
+  // Focus loss: valid names still create, but an invalid name just stays
+  // open silently — alerting here would re-trigger itself via focus theft.
+  const blurPending = useCallback(() => {
+    const p = pendingRef.current
+    if (!p) return
+    const name = p.name.trim()
+    if (!name) {
+      setPending(null)
+      return
+    }
+    if (p.type === 'file' && !hasFileExtension(name)) return
+    setPending(null)
+    runCreate(p.parentPath, name, p.type)
+  }, [runCreate])
 
   const cancelPending = useCallback(() => {
     setPending(null)
@@ -306,11 +442,13 @@ export function FileExplorer({
           onSelectFolder={onSelectFolder}
           onContextMenu={handleTreeContextMenu}
           highlightPath={justCreated}
+          gitStatuses={gitStatuses}
           renaming={renaming ? {
             path: renaming.path,
             name: renaming.name,
             onNameChange: (name: string) => setRenaming(prev => (prev ? { ...prev, name } : prev)),
             onCommit: commitRename,
+            onBlur: commitRename,
             onCancel: cancelRename,
           } : null}
           pending={pending ? {
@@ -319,6 +457,7 @@ export function FileExplorer({
             name: pending.name,
             onNameChange: (name: string) => setPending(prev => (prev ? { ...prev, name } : prev)),
             onCommit: commitPending,
+            onBlur: blurPending,
             onCancel: cancelPending,
           } : null}
         />

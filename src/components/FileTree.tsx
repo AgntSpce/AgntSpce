@@ -9,7 +9,10 @@ export interface PendingCreate {
   parentPath: string
   name: string
   onNameChange: (name: string) => void
+  /** Explicit submit (Enter): may show the extension warning. */
   onCommit: () => void
+  /** Focus loss: must stay silent (an alert() would steal focus and loop). */
+  onBlur: () => void
   onCancel: () => void
 }
 
@@ -20,6 +23,8 @@ export interface PendingRename {
   onNameChange: (name: string) => void
   /** Name is passed explicitly from the input (ground truth at commit time). */
   onCommit: (name: string) => void
+  /** Focus loss: must stay silent (an alert() would steal focus and loop). */
+  onBlur: (name: string) => void
   onCancel: () => void
 }
 
@@ -39,6 +44,8 @@ interface FileTreeProps {
   /** Relative path of the row to flash with the just-created glow. */
   highlightPath?: string | null
   renaming?: PendingRename | null
+  /** Explorer git colors, independent of git review: rel path -> added/modified. */
+  gitStatuses?: Map<string, 'added' | 'modified'>
 }
 
 function FileIcon({ name }: { name: string }) {
@@ -65,6 +72,7 @@ export function FileTree({
   pending = null,
   highlightPath = null,
   renaming = null,
+  gitStatuses,
 }: FileTreeProps) {
   // Merge the in-progress creation row into this level (when it belongs
   // here) using the same ordering as the backend: folders first, then
@@ -111,6 +119,7 @@ export function FileTree({
             pending={pending}
             highlightPath={highlightPath}
             renaming={renaming}
+            gitStatuses={gitStatuses}
             depth={depth}
           />
         )
@@ -167,7 +176,7 @@ function PendingRow({ depth, pending }: { depth: number; pending: PendingCreate 
             if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); pending.onCommit() }
             else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); pending.onCancel() }
           }}
-          onBlur={() => pending.onCommit()}
+          onBlur={() => pending.onBlur()}
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
         />
@@ -201,6 +210,10 @@ function RenameInput({ renaming }: { renaming: PendingRename }) {
     renaming.onCommit(inputRef.current?.value ?? renaming.name)
   }
 
+  const blurFromDom = () => {
+    renaming.onBlur(inputRef.current?.value ?? renaming.name)
+  }
+
   return (
     <input
       ref={inputRef}
@@ -210,11 +223,11 @@ function RenameInput({ renaming }: { renaming: PendingRename }) {
       spellCheck={false}
       autoComplete="off"
       onChange={(e) => renaming.onNameChange(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commitFromDom() }
-        else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renaming.onCancel() }
-      }}
-      onBlur={() => commitFromDom()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commitFromDom() }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); renaming.onCancel() }
+          }}
+          onBlur={() => blurFromDom()}
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
     />
@@ -234,6 +247,7 @@ function TreeNode({
   highlightPath,
   renaming,
   depth,
+  gitStatuses,
 }: {
   node: FileTreeNode
   expandedFolders: Set<string>
@@ -247,11 +261,14 @@ function TreeNode({
   highlightPath?: string | null
   renaming?: PendingRename | null
   depth: number
+  gitStatuses?: Map<string, 'added' | 'modified'>
 }) {
   const isDirectory = node.type === 'directory'
   const isExpanded = expandedFolders.has(node.path)
   const isSelected = selectedFilePath === node.path
   const isFolderSelected = isDirectory && selectedFolderPath === node.path
+  const gitKind = gitStatuses?.get(node.path)
+  const gitClass = gitKind === 'added' ? ' explorer-git-added' : gitKind === 'modified' ? ' explorer-git-modified' : ''
 
   const handleClick = useCallback(() => {
     if (isDirectory) {
@@ -275,7 +292,7 @@ function TreeNode({
   return (
     <div className="file-tree-node">
       <div
-        className={`file-tree-item ${isSelected ? 'selected' : ''}${isFolderSelected ? ' folder-selected' : ''}${highlightPath === node.path ? ' just-created' : ''}`}
+        className={`file-tree-item ${isSelected ? 'selected' : ''}${isFolderSelected ? ' folder-selected' : ''}${highlightPath === node.path ? ' just-created' : ''}${gitClass}`}
         style={{ paddingLeft: depth * 16 + 8 }}
         onClick={handleClick}
         onContextMenu={handleContextMenu}
@@ -318,6 +335,7 @@ function TreeNode({
             pending={pending}
             highlightPath={highlightPath}
             renaming={renaming}
+            gitStatuses={gitStatuses}
             depth={depth + 1}
           />
         </div>

@@ -36,6 +36,9 @@ export function CodeEditor({
 }: CodeEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
+  // Latest save handler for the mount-time Monaco action below.
+  const onSaveRef = useRef(onSave)
+  onSaveRef.current = onSave
   const isUpdatingPositionRef = useRef(false)
 
   const handleEditorDidMount: OnMount = useCallback((editorInstance, monaco) => {
@@ -46,8 +49,11 @@ export function CodeEditor({
       id: 'save-file',
       label: 'Save File',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      // The mount-time action must call through a ref: onSave closes over
+      // the current file content, so calling it directly would silently
+      // save stale (mount-time) content and drop the user's edits.
       run: () => {
-        onSave()
+        onSaveRef.current()
       },
     })
 
@@ -56,7 +62,7 @@ export function CodeEditor({
         onScrollChange(e.position.lineNumber, e.position.column)
       }
     })
-  }, [onSave, onScrollChange])
+  }, [onScrollChange])
 
   const handleBeforeMount = useCallback(
     (monaco: any) => {

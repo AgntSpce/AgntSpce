@@ -1329,6 +1329,16 @@
   white-space: nowrap;
 }
 
+/* Explorer git colors (independent of git review): new files/folders green,
+   modified files/folders yellow. Label only, so language icons keep working. */
+.file-tree-item.explorer-git-added .file-tree-label {
+  color: #3fb950;
+}
+
+.file-tree-item.explorer-git-modified .file-tree-label {
+  color: #d29922;
+}
+
 /* Devicon brand mark for file rows (14px box, same slot as codicons). */
 .file-devicon {
   width: 14px;
@@ -8765,6 +8775,30 @@
 }
 
 .git-file-stage:hover {
+  background: rgba(76,175,80,0.15);
+  color: #6FDB79;
+}
+
+/* Header-level "stage all" + button (always visible, same green language). */
+.git-section-stage-all {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: #4CAF50;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+.git-section-stage-all:hover {
   background: rgba(76,175,80,0.15);
   color: #6FDB79;
 }

@@ -448,17 +448,35 @@ function App() {
 
   const wsPath = activeWorkspace?.repository?.path
 
+  // Single shared git poll for the whole app: per-workspace changed files
+  // feed both the activity badge count and the explorer row colors, so every
+  // surface reflects the same git truth (connected, not independent polls).
+  const [gitFilesByWs, setGitFilesByWs] = useState<Record<string, { filePath: string; status: string }[]>>({})
   useEffect(() => {
-    if (!wsPath) { setGitChangeCount(0); return }
     let active = true
     const poll = async () => {
-      const s = await getGitFullStatus(wsPath)
-      if (active && s) setGitChangeCount(prev => (prev === s.total ? prev : s.total))
+      const entries = await Promise.all(workspaces.map(async (w) => {
+        const p = w.repository?.path
+        if (!p) return [w.id, []] as const
+        try {
+          const s = await getGitFullStatus(p)
+          const files = (s?.files || []).map((f: any) => ({ filePath: f.filePath, status: f.status }))
+          return [w.id, files] as const
+        } catch {
+          return [w.id, []] as const
+        }
+      }))
+      if (!active) return
+      const next: Record<string, { filePath: string; status: string }[]> = {}
+      for (const [id, files] of entries) next[id] = files
+      setGitFilesByWs(next)
+      const activeFiles = entries.find(([id]) => id === activeWorkspace?.id)?.[1] || []
+      setGitChangeCount(prev => (prev === activeFiles.length ? prev : activeFiles.length))
     }
     poll()
     const id = setInterval(poll, 5000)
     return () => { active = false; clearInterval(id) }
-  }, [wsPath, getGitFullStatus])
+  }, [workspaces, activeWorkspace?.id, getGitFullStatus])
 
   const agentSessions = useMemo(
     () => Object.values(sessions).filter(s => AGENT_TYPE_SET.has(s.type)).slice(0, 12),
@@ -695,7 +713,7 @@ function App() {
         case 'show-git-review': ref.handleToggleView('git-review'); break
         case 'show-settings': ref.handleToggleView('settings'); break
         case 'show-shortcuts': alert(
-          '⌘A — New Agent\n⌘S — Shell Panel\n⌘N — New Workspace\n⌘O — Open Workspace\n⌘T — New Window\n' +
+          '⌘A — New Agent\n⌘S — Shell Panel (Save File in file viewer)\n⌘N — New Workspace\n⌘O — Open Workspace\n⌘T — New Window\n' +
           '⌘B — Chat Sidebar\n⌘E — Workspace Sidebar\n⌘F — Focus Mode\n' +
           '⌘D — Dashboard\n⌘G — Git Review\n⌘J — Settings\n⌘K — Command Palette\n' +
           '⌘Tab / ⌘⇧Tab — Cycle Tabs\n⌘1-9 — Go to Tab'
@@ -709,8 +727,9 @@ function App() {
   // Latest session state for the keydown handler — reading through a ref lets
   // the listener stay bound for the app lifetime instead of being removed and
   // re-added on every status flip (which also re-rendered the whole tree).
-  const shortcutDepsRef = useRef({ activeSessionId, agentSessions, viewMode, activeView })
-  shortcutDepsRef.current = { activeSessionId, agentSessions, viewMode, activeView }
+  const isFileViewerOpen = (viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review')
+  const shortcutDepsRef = useRef({ activeSessionId, agentSessions, viewMode, activeView, isFileViewerOpen, saveFile: null as null | (() => void) })
+  shortcutDepsRef.current = { activeSessionId, agentSessions, viewMode, activeView, isFileViewerOpen, saveFile: null }
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -740,6 +759,14 @@ function App() {
 
       const match = shortcuts.find(s => eventMatches(e, s.combo))
       if (match) {
+        // In the file viewer Cmd+S saves the open file instead of toggling
+        // the shell panel. Skip when Monaco already handled it
+        // (defaultPrevented) so the file isn't written twice.
+        if (match.id === 'new-shell' && shortcutDepsRef.current.isFileViewerOpen && !e.defaultPrevented) {
+          e.preventDefault()
+          shortcutDepsRef.current.saveFile?.()
+          return
+        }
         // Don't hijack editing verbs (select-all / save / find) while the
         // user is typing in an input, textarea, Monaco editor or xterm.
         const target = e.target as HTMLElement | null
@@ -1064,6 +1091,10 @@ function App() {
     }
   }, [activeFileId, wsPath, fileContents, writeFile])
 
+  // Publish the latest viewer state for the app-lifetime keydown handler.
+  shortcutDepsRef.current.saveFile = handleSaveFile
+  shortcutDepsRef.current.isFileViewerOpen = isFileViewerOpen
+
   const handleEditorScrollChange = useCallback((line: number, column: number) => {
     if (!activeFileId) return
     const prev = scrollPositionsRef.current[activeFileId]
@@ -1240,6 +1271,7 @@ function App() {
               onSelectFile={selectFile}
               getWorkspaceTree={getWorkspaceTree}
               getFileInfo={getFileInfo}
+              gitFilesByWorkspace={gitFilesByWs}
               createFile={createFile}
               createFolder={createFolder}
               renameFile={renameFile}

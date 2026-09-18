@@ -30,6 +30,7 @@ interface Props {
   onSelectFile: (path: string) => void
   getWorkspaceTree: (worktreePath: string) => Promise<any>
   getFileInfo: (absolutePath: string) => Promise<any>
+  gitFilesByWorkspace?: Record<string, { filePath: string; status: string }[]>
   createFile: (absolutePath: string) => Promise<any>
   createFolder: (absolutePath: string) => Promise<any>
   renameFile: (oldPath: string, newPath: string) => Promise<any>
@@ -38,6 +39,13 @@ interface Props {
 
 function wsExpandKey(wsId: string) {
   return `ws:${wsId}`
+}
+
+// A file name counts as typed when it has a non-empty extension part.
+// Leading-dot names (.gitignore, .env) are allowed.
+function hasFileExtension(name: string): boolean {
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 && dot < name.length - 1
 }
 
 // Keep the floating menu on-screen (mirrors FileExplorer's helper).
@@ -53,7 +61,7 @@ export default memo(function WorkspaceSidebar({
   onSelect, onEdit, onDelete, onRestore, onPermanentDelete,
   onOpenCreateModal, showModal,
   expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile,
-  getWorkspaceTree, getFileInfo, createFile, createFolder, renameFile, deleteFile,
+  getWorkspaceTree, getFileInfo, gitFilesByWorkspace, createFile, createFolder, renameFile, deleteFile,
 }: Props) {
   const [showTrash, setShowTrash] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
@@ -82,6 +90,10 @@ export default memo(function WorkspaceSidebar({
     showModal('New file name:', (name) => {
       const trimmed = name.trim()
       if (!trimmed) return
+      if (!hasFileExtension(trimmed)) {
+        alert('Please add a file extension.')
+        return
+      }
       if (selectedFolder) onExpandFolder(selectedFolder)
       onExpandFolder(wsExpandKey(ws.id))
       const base = selectedFolder ? wsPath.replace(/\\/g, '/') + '/' + selectedFolder.replace(/\\/g, '/') : wsPath.replace(/\\/g, '/')
@@ -232,6 +244,7 @@ export default memo(function WorkspaceSidebar({
                       refreshSignal={refreshSignal}
                       getWorkspaceTree={getWorkspaceTree}
                       getFileInfo={getFileInfo}
+                      gitStatusFiles={gitFilesByWorkspace?.[ws.id] ?? []}
                       createRequest={createRequests[ws.id] ?? null}
                       onCreateRequestHandled={(nonce) => handleCreateRequestHandled(ws.id, nonce)}
                       createFile={createFile}
