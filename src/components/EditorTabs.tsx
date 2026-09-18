@@ -5,7 +5,7 @@ interface EditorTabsProps {
   activeFileId: string | null
   onSelectFile: (id: string) => void
   onCloseFile: (id: string) => void
-  onNewAssistant?: () => void
+  onCloseViewer?: () => void
 }
 
 export function EditorTabs({
@@ -13,7 +13,7 @@ export function EditorTabs({
   activeFileId,
   onSelectFile,
   onCloseFile,
-  onNewAssistant,
+  onCloseViewer,
 }: EditorTabsProps) {
   if (openFiles.length === 0) return null
 
@@ -45,10 +45,10 @@ export function EditorTabs({
           </div>
         ))}
       </div>
-      {onNewAssistant && (
+      {onCloseViewer && (
         <div className="editor-tabs-actions">
-          <button className="editor-tab-assistant-btn" onClick={onNewAssistant} title="Chat Assistant">
-            <i className="codicon codicon-comment-discussion" style={{ fontSize: 16 }}></i>
+          <button className="editor-tab-viewer-btn" onClick={onCloseViewer} title="Close file viewer (open files are kept)">
+            <i className="codicon codicon-close" style={{ fontSize: 16 }}></i>
           </button>
         </div>
       )}

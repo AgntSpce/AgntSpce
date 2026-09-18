@@ -1519,7 +1519,8 @@
   border-left: 1px solid var(--border);
 }
 
-.editor-tab-assistant-btn {
+.editor-tab-assistant-btn,
+.editor-tab-viewer-btn {
   width: 28px;
   height: 28px;
   display: flex;
@@ -1537,14 +1538,16 @@
     transform var(--anim-duration-fast) var(--anim-ease);
 }
 
-.editor-tab-assistant-btn:hover {
+.editor-tab-assistant-btn:hover,
+.editor-tab-viewer-btn:hover {
   background: var(--border);
   color: var(--text-primary);
   border-color: var(--border-light);
   transform: scale(1.05);
 }
 
-.editor-tab-assistant-btn:active {
+.editor-tab-assistant-btn:active,
+.editor-tab-viewer-btn:active {
   transform: scale(0.9);
   transition-duration: 50ms;
 }

@@ -1022,6 +1022,12 @@ function App() {
     setSelectedFilePath(null)
   }, [activeFileId, openFiles])
 
+  // Hide the file viewer and show the agents section. Open files (and their
+  // dirty state) are kept — reopening any file returns to the viewer.
+  const handleCloseFileViewer = useCallback(() => {
+    setViewMode('agents')
+  }, [])
+
   const handleFileContentChange = useCallback((value: string | undefined) => {
     if (!activeFileId || value === undefined) return
     setFileContents(prev => ({ ...prev, [activeFileId]: value }))
@@ -1270,7 +1276,7 @@ function App() {
                       }
                     }}
                     onCloseFile={closeFile}
-                    onNewAssistant={() => { handleToggleChatSidebar() }}
+                    onCloseViewer={handleCloseFileViewer}
                   />
                   {activeFile?.isDiff ? (
                     <GitDiffViewer
