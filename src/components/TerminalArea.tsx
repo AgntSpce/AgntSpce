@@ -61,13 +61,6 @@ interface Props {
   onCloseConfirm?: (sessionId: string, confirmed: boolean) => void
 }
 
-const AGENT_TYPES = [
-  { id: 'claude', label: 'Claude Code', icon: '🤖' },
-  { id: 'opencode', label: 'Opencode', icon: '🔧' },
-  { id: 'codex', label: 'Codex', icon: '⚡' },
-  { id: 'gemini', label: 'Gemini CLI', icon: '✨' },
-]
-
 const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, writeData, hidden, onTerminalOutput, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace" }: {
   session: SessionState
   onInput: (sessionId: string, data: string) => void
@@ -397,7 +390,7 @@ export default memo(function TerminalArea({
   onTerminalOutput,
   sessionCompressionModes = {},
   onSessionCompressionModeChange,
-  pageViews, activeView, onViewChange, shellOnly,
+  pageViews, activeView, shellOnly,
   onTerminalResizerMouseDown, terminalHeight = 40, terminalDrag,
   fontSize = 16,
   fontFamily = "'JetBrains Mono', 'Fira Code', Menlo, monospace",
@@ -413,14 +406,6 @@ export default memo(function TerminalArea({
   const prevShellCount = useRef(shellSessions.length)
   const [isFlexDragging, setIsFlexDragging] = useState(false)
   const [layoutTree, setLayoutTree] = useState<LayoutNode | null>(null)
-
-  const typeCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const s of sessions) {
-      counts[s.type] = (counts[s.type] || 0) + 1
-    }
-    return counts
-  }, [sessions])
 
   const filteredSessions = useMemo(() => {
     if (activeGroupTab === 'all') return sessions
@@ -491,13 +476,6 @@ export default memo(function TerminalArea({
   const showAgents = !(terminalFullscreen && bottomShellOpen)
 
   const activePage = activeView && pageViews?.find(p => p.id === activeView)
-
-  const groupTabs = [
-    { id: 'all', label: 'All', icon: '⊞', count: sessions.length },
-    ...AGENT_TYPES
-      .filter(t => typeCounts[t.id] > 0)
-      .map(t => ({ id: t.id, label: t.label, icon: t.icon, count: typeCounts[t.id] })),
-  ]
 
   const areaRef = useRef<HTMLDivElement>(null)
   // Track the pane the user is actually interacting with: clicking or typing
@@ -690,33 +668,12 @@ export default memo(function TerminalArea({
         minHeight: 0,
         pointerEvents: activePage ? 'none' : 'auto',
       }}>
-        {!shellOnly && !activePage && (
+        {!shellOnly && !activePage && focusMode && (
           <div className="tab-bar">
-            <div className="tab-bar-tabs">
-              {groupTabs.map(tab => {
-                const isActive = tab.id === activeGroupTab && !activeView
-                return (
-                  <div
-                    key={tab.id}
-                    className={`tab-item ${isActive ? 'active' : ''}`}
-                    onClick={() => { onViewChange(null); setActiveGroupTab(tab.id); if (terminalFullscreen) setTerminalFullscreen(false) }}
-                  >
-                    {tab.icon === '⊞' ? (
-                      <span className="tab-icon">{tab.icon}</span>
-                    ) : (
-                      <img className="tab-icon-img" src={getAgentColorImage(tab.id)} alt={tab.label} />
-                    )}
-                    {tab.icon === '⊞' && <span className="tab-label">{tab.label}</span>}
-                    <span className="tab-count">{tab.count}</span>
-                  </div>
-                )
-              })}
+            <div className="tab-bar-tabs" />
+            <div className="tab-bar-actions" style={{ position: 'relative' }}>
+              <span className="focus-indicator" title="Focus mode active (Cmd+Shift+F)">Focus</span>
             </div>
-            {focusMode && (
-              <div className="tab-bar-actions" style={{ position: 'relative' }}>
-                <span className="focus-indicator" title="Focus mode active (Cmd+Shift+F)">Focus</span>
-              </div>
-            )}
           </div>
         )}
 
