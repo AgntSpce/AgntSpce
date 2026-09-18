@@ -229,6 +229,7 @@ const DEVICON_EXT_MAP: Record<string, string> = {
   ipynb: 'jupyter.svg',
   tf: 'terraform.svg', tfvars: 'terraform.svg',
   bzl: 'bazel.svg',
+  txt: 'txt.svg', text: 'txt.svg',
   gitignore: 'git.svg', gitattributes: 'git.svg',
   gitmodules: 'git.svg', gitkeep: 'git.svg',
 }
