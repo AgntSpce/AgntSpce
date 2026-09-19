@@ -31,6 +31,8 @@ interface Props {
   showModal: (title: string, onSubmit: (value: string) => void, defaultValue?: string) => void
   closeModal: () => void
   onOpenCreateModal: () => void
+  onOpenFolderDirect?: () => void
+  onCloneDirect?: () => void
   expandedFolders?: Set<string>
   onToggleFolder?: (path: string) => void
   onExpandFolder?: (path: string) => void
@@ -130,6 +132,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onOpenCreateTaskModal,
   selectedTaskId,
   onSelectTask,
+  onOpenFolderDirect,
+  onCloneDirect,
 }: {
   workspaces: WorkspaceInfo[]
   sessions: Record<string, SessionState>
@@ -159,6 +163,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   selectedTaskId?: string | null
   /** Called when a task row is clicked. */
   onSelectTask?: (id: string) => void
+  onOpenFolderDirect?: () => void
+  onCloneDirect?: () => void
 }) {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [showTrash, setShowTrash] = useState(false)
@@ -192,100 +198,106 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
       <div className="sidebar-top">
         <div className="sidebar-header">
           <h2>Workspace</h2>
-          <div className="sidebar-header-buttons">
-            <button className="add-btn" onClick={onOpenCreateModal} title="New workspace">+</button>
-          </div>
         </div>
 
         <div className="workspace-list orca-workspace-list">
-          {workspaces.map(ws => {
-            const isActive = activeWorkspace?.id === ws.id
+          {(activeWorkspace ? [activeWorkspace] : []).map(ws => {
             const branch = branchByWorkspace.get(ws.id) || ''
             return (
-              <div key={ws.id} className={`orca-ws-card${isActive ? ' active' : ''}`}>
-                <div className="orca-ws-main">
-                  <div className="orca-ws-gutter">
-                    <i className="codicon codicon-folder orca-ws-gutter-folder" />
-                  </div>
-                  <div className="orca-ws-text" onClick={() => onSelect(ws.id)} title={ws.name}>
-                    <div className="orca-ws-title-row">
-                      <span className="orca-ws-title">{ws.name}</span>
-                      <span className="workspace-tree-actions" onClick={e => e.stopPropagation()}>
-                        <button
-                          className="workspace-tree-dots"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setMenuOpenId(menuOpenId === ws.id ? null : ws.id)
-                          }}
-                          title="Options"
-                        >⋮</button>
-                        {menuOpenId === ws.id && (
-                          <div className="workspace-tree-menu" onClick={e => e.stopPropagation()}>
-                            <button
-                              className="workspace-tree-menu-item"
-                              onClick={() => {
-                                closeMenu()
-                                showModal('Rename workspace:', (name) => {
-                                  onEdit(ws.id, name, ws.repository?.path || '')
-                                }, ws.name)
-                              }}
-                            >Rename</button>
-                            <button
-                              className="workspace-tree-menu-item danger"
-                              onClick={() => {
-                                closeMenu()
-                                if (confirm(`Delete workspace "${ws.name}"?`)) onDelete(ws.id)
-                              }}
-                            >Delete</button>
-                          </div>
-                        )}
-                      </span>
+              <div key={ws.id} className="orca-ws-card active orca-ws-card-centered">
+                <div className="orca-ws-centered" onClick={() => onSelect(ws.id)} title={ws.name}>
+                  <span className="orca-ws-title orca-ws-title-large">{ws.name}</span>
+                  {branch && (
+                    <div className="orca-ws-meta orca-ws-meta-centered">
+                      <i className="codicon codicon-git-branch" />
+                      <span className="orca-ws-branch">{branch}</span>
                     </div>
-                    {branch && (
-                      <div className="orca-ws-meta">
-                        <i className="codicon codicon-git-branch" />
-                        <span className="orca-ws-branch">{branch}</span>
-                      </div>
-                    )}
-                  </div>
+                  )}
                 </div>
+                <span className="workspace-tree-actions workspace-tree-actions-centered" onClick={e => e.stopPropagation()}>
+                  <button
+                    className="workspace-tree-dots"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setMenuOpenId(menuOpenId === ws.id ? null : ws.id)
+                    }}
+                    title="Options"
+                  >⋮</button>
+                  {menuOpenId === ws.id && (
+                    <div className="workspace-tree-menu" onClick={e => e.stopPropagation()}>
+                      <button
+                        className="workspace-tree-menu-item"
+                        onClick={() => {
+                          closeMenu()
+                          showModal('Rename workspace:', (name) => {
+                            onEdit(ws.id, name, ws.repository?.path || '')
+                          }, ws.name)
+                        }}
+                      >Rename</button>
+                      <button
+                        className="workspace-tree-menu-item danger"
+                        onClick={() => {
+                          closeMenu()
+                          if (confirm(`Delete workspace "${ws.name}"?`)) onDelete(ws.id)
+                        }}
+                      >Delete</button>
+                    </div>
+                  )}
+                </span>
+                {(taskGroups || []).length === 0 && (
+                  <div className="sidebar-empty sidebar-tasks-empty sidebar-tasks-empty-top sidebar-tasks-empty-inline">
+                    <p>No tasks here</p>
+                    <button className="sidebar-create-btn primary" onClick={() => onOpenCreateTaskModal?.()}>
+                      Add a Task
+                    </button>
+                  </div>
+                )}
               </div>
             )
           })}
 
-          {workspaces.length === 0 && (
-            <div className="sidebar-empty">
-              No workspaces yet. Click + to create one.
+          {!activeWorkspace && (
+            <div className="sidebar-empty sidebar-create-workspace">
+              <p className="sidebar-empty-title">No folder opened</p>
+              <p className="sidebar-empty-desc">Open a folder or clone a repository. One window, one workspace.</p>
+              <div className="sidebar-create-actions">
+                <button className="sidebar-create-btn primary" onClick={onOpenFolderDirect || onOpenCreateModal}>
+                  <i className="codicon codicon-folder-opened" style={{ marginRight: 6 }}></i>
+                  Open Folder
+                </button>
+                <button className="sidebar-create-btn" onClick={onCloneDirect || onOpenCreateModal}>
+                  <i className="codicon codicon-source-control" style={{ marginRight: 6 }}></i>
+                  Clone from GitHub
+                </button>
+              </div>
+              <div className="sidebar-create-hint">
+                Local Folder · Clone from Git
+              </div>
             </div>
           )}
         </div>
 
         {/* ── v2 Tasks: one shared worktree per task, N agents ── */}
-        <div className="sidebar-header tasks-header">
-          <h2>Tasks</h2>
-          <div className="sidebar-header-buttons">
-            <button className="add-btn" onClick={() => onOpenCreateTaskModal?.()} title="New task">+</button>
+        {activeWorkspace && (taskGroups || []).length > 0 && (
+          <div className="workspace-tasks-top">
+            <div className="sidebar-header tasks-header">
+              <h2>Tasks</h2>
+            </div>
+            <div className="task-list">
+              {(taskGroups || []).map(t => (
+                <div
+                  key={t.id}
+                  className={`task-row${selectedTaskId === t.id ? ' active' : ''}`}
+                  onClick={() => onSelectTask?.(t.id)}
+                  title={t.userGoal || t.title}
+                >
+                  <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
+                  <span className="task-row-title">{t.title}</span>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-
-        <div className="task-list">
-          {(taskGroups || []).map(t => (
-            <div
-              key={t.id}
-              className={`task-row${selectedTaskId === t.id ? ' active' : ''}`}
-              onClick={() => onSelectTask?.(t.id)}
-              title={t.userGoal || t.title}
-            >
-              <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
-              <span className="task-row-title">{t.title}</span>
-            </div>
-          ))}
-          {(taskGroups || []).length === 0 && (
-            <div className="sidebar-empty">
-              No tasks yet. Click + to create one.
-            </div>
-          )}
-        </div>
+        )}
 
         {deletedWorkspaces.length > 0 && (
           <div className="workspace-trash">
@@ -322,6 +334,7 @@ export default memo(function WorkspaceSidebar({
   getWorkspaceTree, getFileInfo, gitFilesByWorkspace, fileTreeRefreshTick, createFile, createFolder, renameFile, deleteFile,
   title = 'Workspace', rowIcon = 'auto', hideCreateButton = false,
   taskGroups, onOpenCreateTaskModal, selectedTaskId, onSelectTask,
+  onOpenFolderDirect, onCloneDirect,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -344,6 +357,8 @@ export default memo(function WorkspaceSidebar({
         onOpenCreateTaskModal={onOpenCreateTaskModal}
         selectedTaskId={selectedTaskId}
         onSelectTask={onSelectTask}
+        onOpenFolderDirect={onOpenFolderDirect}
+        onCloneDirect={onCloneDirect}
       />
     )
   }

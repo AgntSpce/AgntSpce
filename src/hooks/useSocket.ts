@@ -99,7 +99,7 @@ interface UseSocketReturn {
   setSessionCompressionMode: (sessionId: string, mode: CompressionMode) => void
   onSessionCompressionModeChange: (cb: (sessionId: string, mode: CompressionMode) => void) => () => void
   requestFilterStats: () => void
-  createWorkspaceFromGit: (gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }) => Promise<any>
+  createWorkspaceFromGit: (gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }, basePath?: string) => Promise<any>
   updateWorkspaceConfig: (workspaceId: string, updates: any) => Promise<any>
   addWorktree: (workspaceId: string) => Promise<any>
   removeWorktree: (workspaceId: string, worktreeId: string) => Promise<any>
@@ -683,8 +683,8 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('start-parallel-task', config, 600000)
   }, [emitAck])
 
-  const createWorkspaceFromGit = useCallback((gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }): Promise<any> => {
-    return emitAck('create-workspace-from-git', { gitUrl, name, setupScript: scripts?.setupScript, teardownScript: scripts?.teardownScript }, 600000)
+  const createWorkspaceFromGit = useCallback((gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }, basePath?: string): Promise<any> => {
+    return emitAck('create-workspace-from-git', { gitUrl, name, setupScript: scripts?.setupScript, teardownScript: scripts?.teardownScript, basePath }, 600000)
   }, [emitAck])
 
   const updateWorkspaceConfig = useCallback((workspaceId: string, updates: any): Promise<any> => {

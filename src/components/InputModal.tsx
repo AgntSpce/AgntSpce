@@ -31,7 +31,7 @@ export default function InputModal({ open, title, defaultValue, onSubmit, onCanc
   if (!open) return null
 
   function handleSubmit() {
-    if (value.trim()) onSubmit(value.trim())
+    onSubmit(value)
   }
 
   return (

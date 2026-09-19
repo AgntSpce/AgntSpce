@@ -25,7 +25,7 @@ const CodeEditor = lazy(() => import('./components/CodeEditor').then(m => ({ def
 import { useSocket } from './hooks/useSocket'
 import useSocketEvent from './hooks/useSocketEvent'
 
-import type { TerminalOutput, AgentConfig, AgentStartConfig, SessionState, OpenFile } from './types'
+import type { TerminalOutput, AgentConfig, AgentStartConfig, SessionState, OpenFile, WorkspaceInfo } from './types'
 import '@vscode/codicons/dist/codicon.css'
 import './App.css'
 import { assetUrl } from './utils/assetUrl'
@@ -151,7 +151,7 @@ const NOOP = () => {}
 
 function App() {
   const {
-    sessions, workspaces, activeWorkspace,
+    sessions, workspaces, activeWorkspace: _globalActiveWorkspace,
     onTerminalOutput, sendTerminalInput, sendTerminalResize,
     restartSession, resumeSession, switchWorkspace, createWorkspace,
     deleteWorkspace, listDeletedWorkspaces, restoreWorkspace, permanentDeleteWorkspace,
@@ -173,6 +173,32 @@ function App() {
     getOrchestratorStats, sessionStartedAt,
     sessionCompressionModes, setSessionCompressionMode,
   } = useSocket()
+  // Per-window workspace: one window, one workspace. New windows start blank
+  // (sessionStorage is per-window) even if other windows have workspaces.
+  const [windowWorkspaceId, setWindowWorkspaceId] = useState<string | null>(() => {
+    try { return sessionStorage.getItem('agntspce-window-workspace') } catch { return null }
+  })
+  useEffect(() => {
+    try {
+      if (windowWorkspaceId) sessionStorage.setItem('agntspce-window-workspace', windowWorkspaceId)
+      else sessionStorage.removeItem('agntspce-window-workspace')
+    } catch {}
+  }, [windowWorkspaceId])
+  void _globalActiveWorkspace
+  const [pendingWorkspace, setPendingWorkspace] = useState<WorkspaceInfo | null>(null)
+  const activeWorkspace = useMemo(() => {
+    if (windowWorkspaceId) {
+      const found = workspaces.find(w => w.id === windowWorkspaceId)
+      if (found) return found
+      if (pendingWorkspace && pendingWorkspace.id === windowWorkspaceId) return pendingWorkspace
+    }
+    return null
+  }, [workspaces, windowWorkspaceId, pendingWorkspace])
+  useEffect(() => {
+    if (activeWorkspace && pendingWorkspace && pendingWorkspace.id === activeWorkspace.id) {
+      setPendingWorkspace(null)
+    }
+  }, [activeWorkspace, pendingWorkspace])
   const tokensSaved = useMemo(() => {
     const orig = executionHistory.reduce((s: number, e: any) => s + (e.totalOriginalTokens || 0), 0)
     const filt = executionHistory.reduce((s: number, e: any) => s + (e.totalFilteredTokens || 0), 0)
@@ -180,7 +206,6 @@ function App() {
   }, [executionHistory])
   const writeBuffersRef = useRef<Record<string, string>>({})
   const MAX_BUFFER_BYTES = 16384
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null)
   const [modal, setModal] = useState<ModalState | null>(null)
   const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([])
   const [agentModalSession, setAgentModalSession] = useState<string | null>(null)
@@ -464,18 +489,38 @@ function App() {
     prevSessionRef.current = sessions
   }, [sessions])
 
+  // Per-window: do not auto-follow global activeWorkspace — new windows stay blank
+  // until the user opens a folder in that window. The window's choice lives
+  // in sessionStorage (per-window).
   useEffect(() => {
-    if (activeWorkspace?.id && activeWorkspaceId !== activeWorkspace.id) {
-      setActiveWorkspaceId(activeWorkspace.id)
-    }
-  }, [activeWorkspace])
+    // If this window has no selection yet and global has one, keep blank.
+    // Only sync windowWorkspaceId when user explicitly picks (via handlers below).
+  }, [])
 
   const editWorkspace = useCallback((id: string, name: string, _path: string) => {
     updateWorkspaceConfig(id, { name }).then(() => refreshWorkspaces())
   }, [updateWorkspaceConfig, refreshWorkspaces])
 
   const addWorkspace = useCallback((name: string, path: string, scripts?: { setupScript?: string; teardownScript?: string }) => {
+    const normalizedPath = path.replace(/\\/g, '/')
+    const existingByPath = workspaces.find(w => (w.repository?.path || '').replace(/\\/g, '/') === normalizedPath)
+    if (existingByPath) {
+      setPendingWorkspace(null)
+      setWindowWorkspaceId(existingByPath.id)
+      switchWorkspace(existingByPath.id)
+      return
+    }
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    const existingById = workspaces.find(w => w.id === id)
+    if (existingById) {
+      setPendingWorkspace(null)
+      setWindowWorkspaceId(existingById.id)
+      switchWorkspace(existingById.id)
+      return
+    }
+    const pending = { id, name, workspaceType: 'single-repo', repository: { path, type: 'generic' } } as WorkspaceInfo
+    setPendingWorkspace(pending)
+    setWindowWorkspaceId(id)
     createWorkspace({
       id,
       name,
@@ -487,19 +532,35 @@ function App() {
     }).then((res: any) => {
       if (res?.ok) {
         switchWorkspace(id)
+      } else {
+        // If backend says ID exists, it may have been created elsewhere; try to open it
+        const fallback = workspaces.find(w => w.id === id)
+        if (fallback) {
+          setPendingWorkspace(null)
+          setWindowWorkspaceId(fallback.id)
+          switchWorkspace(fallback.id)
+        } else {
+          setPendingWorkspace(null)
+          setWindowWorkspaceId(null)
+          alert(res?.error || 'Failed to create workspace')
+        }
       }
+    }).catch((e: any) => {
+      setPendingWorkspace(null)
+      setWindowWorkspaceId(null)
+      alert(e?.message || 'Failed to create workspace')
     })
-  }, [createWorkspace, switchWorkspace])
+  }, [createWorkspace, switchWorkspace, workspaces])
 
   const removeWorkspace = useCallback((id: string) => {
     const wsSessions = Object.entries(sessions)
       .filter(([, s]) => s.repositoryName === id || s.id.startsWith(id))
       .map(([sid]) => sid)
     if (wsSessions.length > 0) closeTab(wsSessions)
-    if (activeWorkspaceId === id) {
-      setActiveWorkspaceId(workspaces.length > 1 ? workspaces.find(w => w.id !== id)?.id ?? null : null)
+    if (windowWorkspaceId === id) {
+      setWindowWorkspaceId(null)
     }
-  }, [sessions, closeTab, activeWorkspaceId, workspaces])
+  }, [sessions, closeTab, windowWorkspaceId])
 
   const wsPath = activeWorkspace?.repository?.path
 
@@ -582,16 +643,109 @@ function App() {
   }, [])
 
   const handleCreateWorkspace = useCallback(() => {
+    if (activeWorkspace) {
+      alert('This window already has a workspace.\nUse File → New Window to open another project.')
+      return
+    }
     setCreateWorkspaceModalOpen(true)
-  }, [])
+  }, [activeWorkspace])
+
+  const handleOpenFolderDirect = useCallback(async () => {
+    if (activeWorkspace) {
+      alert('This window already has a workspace.\nUse File → New Window to open another project.')
+      return
+    }
+    try {
+      const selected = await window.electronAPI?.selectDirectory()
+      if (!selected) return
+      const defaultName = selected.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'Workspace'
+      showModal('Workspace name:', (name) => {
+        const finalName = name.trim() || defaultName
+        addWorkspace(finalName, selected)
+      }, defaultName)
+    } catch {}
+  }, [activeWorkspace, addWorkspace, showModal])
+
+  const handleCloneDirect = useCallback(async () => {
+    if (activeWorkspace) {
+      alert('This window already has a workspace.\nUse File → New Window to open another project.')
+      return
+    }
+    try {
+      const baseFolder = await window.electronAPI?.selectDirectory()
+      if (!baseFolder) return
+      showModal('Enter GitHub URL:', async (gitUrl) => {
+        const url = gitUrl.trim()
+        if (!url) return
+        const repoName = url.split('/').filter(Boolean).pop()?.replace(/\.git$/, '') || 'repo'
+        const id = repoName.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+        const clonePath = baseFolder.replace(/\\/g, '/').replace(/\/$/, '') + '/' + repoName
+        const normalizedClone = clonePath.replace(/\\/g, '/')
+        const existingByPath = workspaces.find(w => (w.repository?.path || '').replace(/\\/g, '/') === normalizedClone)
+        if (existingByPath) {
+          setPendingWorkspace(null)
+          setWindowWorkspaceId(existingByPath.id)
+          switchWorkspace(existingByPath.id)
+          return
+        }
+        const existingById = workspaces.find(w => w.id === id)
+        if (existingById) {
+          setPendingWorkspace(null)
+          setWindowWorkspaceId(existingById.id)
+          switchWorkspace(existingById.id)
+          return
+        }
+        setPendingWorkspace({ id, name: repoName, workspaceType: 'single-repo', repository: { path: clonePath, type: 'git' } } as WorkspaceInfo)
+        setWindowWorkspaceId(id)
+        try {
+          const res = await createWorkspaceFromGit(url, undefined, undefined, baseFolder)
+          if (res?.ok) {
+            setWindowWorkspaceId(res.workspace.id)
+            switchWorkspace(res.workspace.id)
+          } else {
+            // If backend says already exists, open the existing one
+            const fallback = workspaces.find(w => w.id === id)
+            if (fallback) {
+              setPendingWorkspace(null)
+              setWindowWorkspaceId(fallback.id)
+              switchWorkspace(fallback.id)
+            } else {
+              setPendingWorkspace(null)
+              setWindowWorkspaceId(null)
+              alert(res?.error || 'Failed to clone repository')
+            }
+          }
+        } catch (e: any) {
+          const msg = e?.message || ''
+          if (msg.includes('already exists')) {
+            const fallback = workspaces.find(w => w.id === id)
+            if (fallback) {
+              setPendingWorkspace(null)
+              setWindowWorkspaceId(fallback.id)
+              switchWorkspace(fallback.id)
+              return
+            }
+          }
+          setPendingWorkspace(null)
+          setWindowWorkspaceId(null)
+          alert(e?.message || 'Failed to clone repository')
+        }
+      })
+    } catch {}
+  }, [activeWorkspace, createWorkspaceFromGit, switchWorkspace, showModal, workspaces])
 
   async function handleCreateWorkspaceLocal(name: string, path: string, scripts?: { setupScript?: string; teardownScript?: string }) {
     addWorkspace(name, path, scripts)
   }
 
   async function handleCreateWorkspaceFromGit(gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }) {
+    if (activeWorkspace) {
+      alert('This window already has a workspace.\nUse File → New Window to open another project.')
+      throw new Error('Window already has a workspace')
+    }
     const res = await createWorkspaceFromGit(gitUrl, name, scripts)
     if (res?.ok) {
+      setWindowWorkspaceId(res.workspace.id)
       switchWorkspace(res.workspace.id)
     } else {
       throw new Error(res?.error || 'Failed to clone repository')
@@ -599,6 +753,7 @@ function App() {
   }
 
   const handleSelectWorkspace = useCallback((id: string) => {
+    setWindowWorkspaceId(id)
     switchWorkspace(id)
     setWorkspaceSidebarOpen(true)
     setFileExplorerOpen(false)
@@ -616,11 +771,15 @@ function App() {
   }, [])
 
   const handleLoadWorkspace = useCallback(async () => {
+    if (activeWorkspace) {
+      alert('This window already has a workspace.\nUse File → New Window to open another project.')
+      return
+    }
     const result = await window.electronAPI?.importWorkspace()
     if (result?.workspace) {
       handleSelectWorkspace(result.workspace.id)
     }
-  }, [handleSelectWorkspace])
+  }, [handleSelectWorkspace, activeWorkspace])
 
   function dismissNotification(id: string) {
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n))
@@ -1480,6 +1639,8 @@ function App() {
               showModal={showModal}
               closeModal={closeModal}
               onOpenCreateModal={handleCreateWorkspace}
+              onOpenFolderDirect={handleOpenFolderDirect}
+              onCloneDirect={handleCloneDirect}
               activeSessionId={activeSessionId}
               onSelectSession={setActiveSessionId}
               promptHistory={promptHistory}
@@ -1551,65 +1712,86 @@ function App() {
         </div>
         {(workspaceSidebarOpen || activeView === 'git-review' || fileExplorerOpen) && <div className="resizer" onMouseDown={onResizerMouseDown('left')} />}
         <main className={`main-content${(viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review') ? ' file-viewer' : ''}`}>
-          {(viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review') && (
-            <div className="editor-area">
-              {openFiles.length > 0 ? (
-                <>
-                  <EditorTabs
-                    openFiles={openFiles}
-                    activeFileId={activeFileId}
-                    onSelectFile={(id) => {
-                      setActiveFileId(id)
-                      if (!openFiles.find(f => f.id === id)?.isDiff) {
-                        setSelectedFilePath(id)
-                      }
-                    }}
-                    onCloseFile={closeFile}
-                    onCloseViewer={handleCloseFileViewer}
-                  />
-                  {activeFile?.isDiff ? (
-                    <GitDiffViewer
-                      key={activeFile.id}
-                      diffContent={gitDiffContents[activeFile.id] || ''}
-                      filePath={activeFile.filePath}
-                      gitStatus={activeFile.gitStatus || ''}
-                      theme={theme}
-                      language={activeFile.language}
-                    />
-                  ) : activeFile ? (
-                    <Suspense fallback={<div className="editor-suspense-fallback" />}>
-                      <CodeEditor
-                        key={activeFile.id}
-                        filePath={activeFile.filePath}
-                        content={activeFileContent}
-                        language={activeFile.language}
-                        isDirty={isActiveFileDirty}
-                        theme={theme}
-                        fontSize={fontSize}
-                        fontFamily={fontFamily}
-                        scrollPosition={editorScrollPositions[activeFile.id] || null}
-                        onContentChange={handleFileContentChange}
-                        onSave={handleSaveFile}
-                        onScrollChange={handleEditorScrollChange}
+          {!activeWorkspace ? (
+            <div className="welcome-page">
+              <div className="welcome-page-content">
+                <img src={assetUrl('/img/logo.png')} alt="AgntSpce" width="64" height="64" style={{ objectFit: 'contain', opacity: 0.9 }} />
+                <h2>No folder opened</h2>
+                <p>One window, one workspace. Open a folder or clone a repository to get started.</p>
+                <div className="welcome-actions">
+                  <button className="welcome-btn primary" onClick={handleOpenFolderDirect}>
+                    <i className="codicon codicon-folder-opened" style={{ marginRight: 6 }}></i>
+                    Open Folder
+                  </button>
+                  <button className="welcome-btn" onClick={handleCloneDirect}>
+                    <i className="codicon codicon-source-control" style={{ marginRight: 6 }}></i>
+                    Clone from GitHub
+                  </button>
+                </div>
+                <p className="welcome-hint">Local Folder · Clone from Git — shown in the Workspace section</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              {(viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review') && (
+                <div className="editor-area">
+                  {openFiles.length > 0 ? (
+                    <>
+                      <EditorTabs
+                        openFiles={openFiles}
+                        activeFileId={activeFileId}
+                        onSelectFile={(id) => {
+                          setActiveFileId(id)
+                          if (!openFiles.find(f => f.id === id)?.isDiff) {
+                            setSelectedFilePath(id)
+                          }
+                        }}
+                        onCloseFile={closeFile}
+                        onCloseViewer={handleCloseFileViewer}
                       />
-                    </Suspense>
-                  ) : null}
-                </>
-              ) : (
-                <div className="editor-empty-state">
-                  <div className="editor-empty-state-content">
-                    <i className="codicon codicon-file" style={{ fontSize: 48, opacity: 0.3 }}></i>
-                    <p>No files here</p>
-                    <div className="open-files-actions">
-                      <button className="open-files-btn" onClick={handleNewFileFromExplorer}>New File</button>
-                      <button className="open-files-btn" onClick={handleOpenFileByPath}>Open File</button>
+                      {activeFile?.isDiff ? (
+                        <GitDiffViewer
+                          key={activeFile.id}
+                          diffContent={gitDiffContents[activeFile.id] || ''}
+                          filePath={activeFile.filePath}
+                          gitStatus={activeFile.gitStatus || ''}
+                          theme={theme}
+                          language={activeFile.language}
+                        />
+                      ) : activeFile ? (
+                        <Suspense fallback={<div className="editor-suspense-fallback" />}>
+                          <CodeEditor
+                            key={activeFile.id}
+                            filePath={activeFile.filePath}
+                            content={activeFileContent}
+                            language={activeFile.language}
+                            isDirty={isActiveFileDirty}
+                            theme={theme}
+                            fontSize={fontSize}
+                            fontFamily={fontFamily}
+                            scrollPosition={editorScrollPositions[activeFile.id] || null}
+                            onContentChange={handleFileContentChange}
+                            onSave={handleSaveFile}
+                            onScrollChange={handleEditorScrollChange}
+                          />
+                        </Suspense>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="editor-empty-state">
+                      <div className="editor-empty-state-content">
+                        <i className="codicon codicon-file" style={{ fontSize: 48, opacity: 0.3 }}></i>
+                        <p>No files here</p>
+                        <div className="open-files-actions">
+                          <button className="open-files-btn" onClick={handleNewFileFromExplorer}>New File</button>
+                          <button className="open-files-btn" onClick={handleOpenFileByPath}>Open File</button>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-          <TerminalArea
+              <TerminalArea
             sessions={agentSessions}
             shellSessions={shellSessions}
             onInput={sendTerminalInput}
@@ -1648,6 +1830,8 @@ function App() {
             pendingCloseSessionId={pendingCloseSessionId}
             onCloseConfirm={handleCloseConfirm}
           />
+            </>
+          )}
         </main>
         <div className="resizer" style={{ opacity: chatSidebarOpen ? 1 : 0, pointerEvents: chatSidebarOpen ? 'auto' : 'none' }} onMouseDown={onResizerMouseDown('right')} />
         <div className={`panel-right${rightDrag ? ' no-transition' : ''}`} style={{ width: chatSidebarOpen ? chatWidth : 0 }}>

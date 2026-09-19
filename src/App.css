@@ -10402,3 +10402,138 @@
   overflow-y: auto;
 }
 
+/* ── Welcome (blank window) ───────────────── */
+.welcome-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 32px;
+  background: var(--bg-primary);
+}
+.welcome-page-content {
+  text-align: center;
+  max-width: 520px;
+}
+.welcome-page-content h2 {
+  margin: 16px 0 8px;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.welcome-page-content p {
+  margin: 0 0 18px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.welcome-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+.welcome-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.welcome-btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.welcome-btn:hover {
+  background: var(--bg-hover);
+}
+.welcome-btn.primary:hover {
+  filter: brightness(1.05);
+}
+.welcome-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ── Sidebar blank workspace ──────────────── */
+.sidebar-create-workspace {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 16px 12px;
+  text-align: center;
+}
+.sidebar-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+.sidebar-empty-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 0;
+}
+.sidebar-create-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.sidebar-create-btn {
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sidebar-create-btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.sidebar-create-btn:hover {
+  background: var(--bg-hover);
+}
+.sidebar-create-btn.primary:hover {
+  filter: brightness(1.05);
+}
+.sidebar-create-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.workspace-center-header {
+  text-align: center;
+  padding: 18px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+.workspace-center-header h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.workspace-center-tasks-empty p {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.workspace-center-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+

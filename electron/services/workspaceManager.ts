@@ -261,10 +261,10 @@ export class WorkspaceManager {
     } catch {}
   }
 
-  async cloneFromGitUrl(gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }): Promise<Workspace> {
+  async cloneFromGitUrl(gitUrl: string, name?: string, scripts?: { setupScript?: string; teardownScript?: string }, basePath?: string): Promise<Workspace> {
     const repoName = name || path.basename(gitUrl).replace(/\.git$/, '')
     const id = repoName.toLowerCase().replace(/[^a-z0-9]+/g, '-')
-    const cloneDir = path.join(os.homedir(), 'AgntSpce', repoName)
+    const cloneDir = basePath ? path.join(basePath, repoName) : path.join(os.homedir(), 'AgntSpce', repoName)
     const wsDir = path.join(CONFIG_DIR, 'workspaces', `${id}.json`)
 
     if (this.workspaces.has(id)) throw new Error(`Workspace "${repoName}" already exists (${id})`)

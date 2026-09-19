@@ -42,9 +42,9 @@ export function registerWorkspaceHandlers(ctx: ServerContext, socket: Socket): v
     }
   })
 
-  socket.on('create-workspace-from-git', async (data: { gitUrl: string, name?: string, setupScript?: string, teardownScript?: string }, callback?: Function) => {
+  socket.on('create-workspace-from-git', async (data: { gitUrl: string, name?: string, setupScript?: string, teardownScript?: string, basePath?: string }, callback?: Function) => {
     try {
-      const ws = await ctx.workspaceManager.cloneFromGitUrl(data.gitUrl, data.name, { setupScript: data.setupScript, teardownScript: data.teardownScript })
+      const ws = await ctx.workspaceManager.cloneFromGitUrl(data.gitUrl, data.name, { setupScript: data.setupScript, teardownScript: data.teardownScript }, data.basePath)
       if (callback) callback({ ok: true, workspace: ws })
       ctx.io.emit('workspaces-list', ctx.workspaceManager.listWorkspaces())
     } catch (error: any) {
