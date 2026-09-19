@@ -170,3 +170,332 @@
   font-family: var(--font-sans);
   font-weight: 500;
 }
+
+/* ── Orca workspace section ───────────────────────────────────────
+   Port of Orca's WorktreeCard + compact agent list (CompactAgentRow /
+   AgentStateDot): 20px status gutter, 13px/20px title, 11px branch meta,
+   24px single-line agent rows (glyph → logo → prompt — secondary → time). */
+
+.orca-workspace-sidebar .sidebar-header {
+  padding: 11px 12px 8px 14px;
+}
+
+.orca-workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.orca-ws-card {
+  border-radius: 8px;
+  padding: 3px 4px 4px 0;
+  min-width: 0;
+}
+
+.orca-ws-card.active {
+  background: var(--bg-elevated);
+}
+
+.orca-ws-main {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+}
+
+/* Left status lane (Orca's WorktreeCardStatusSlot equivalent). */
+.orca-ws-gutter {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 20px;
+  margin-right: 4px;
+  padding-top: 3px;
+  flex-shrink: 0;
+}
+
+.orca-ws-gutter-folder {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.orca-ws-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.orca-ws-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.orca-ws-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--text-primary);
+}
+
+.orca-ws-card:not(.active) .orca-ws-title {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.orca-ws-text:hover .orca-ws-title {
+  color: var(--text-primary);
+}
+
+.orca-ws-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.orca-ws-meta .codicon {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.orca-ws-branch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Inline agent list under each workspace card */
+.orca-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  margin-left: 24px;
+}
+
+.orca-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  min-height: 40px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--text-muted);
+}
+
+.orca-agent-row:hover {
+  background: var(--bg-hover);
+}
+
+.orca-agent-row.focused {
+  background: var(--bg-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* State glyph slot: sm = 10px box (row default), md = 12px (card gutter). */
+.orca-agent-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+}
+
+.orca-agent-dot-md {
+  width: 12px;
+  height: 12px;
+}
+
+.orca-agent-spinner {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--warning);
+  border-top-color: transparent;
+  animation: orca-agent-spin 1s steps(12, end) infinite;
+}
+
+.orca-agent-dot-md .orca-agent-spinner {
+  width: 8px;
+  height: 8px;
+  border-width: 2px;
+}
+
+@keyframes orca-agent-spin {
+  to { transform: rotate(360deg); }
+}
+
+.orca-agent-done-dot {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 70%, transparent);
+}
+
+.orca-agent-dot-md .orca-agent-done-dot {
+  width: 8px;
+  height: 8px;
+}
+
+.orca-agent-dot-waiting {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+}
+
+.orca-agent-dot-md.orca-agent-dot-waiting {
+  width: 12px;
+  height: 12px;
+}
+
+.orca-agent-question {
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--warning);
+}
+
+.orca-agent-dot-md .orca-agent-question {
+  font-size: 9px;
+}
+
+.orca-agent-alert-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.orca-agent-idle-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.45;
+}
+
+.orca-agent-exited {
+  font-size: 10px;
+  color: var(--danger);
+}
+
+.orca-agent-dot-md .orca-agent-exited {
+  font-size: 12px;
+}
+
+/* Agent product logo (16px) + emoji fallback. */
+.orca-agent-logo,
+.orca-agent-logo-fallback {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  object-fit: contain;
+  align-self: center;
+}
+
+.orca-agent-logo-fallback {
+  font-size: 14px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* Stacked heading: prompt snippet on top, identity/tool below. */
+.orca-agent-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+
+.orca-agent-primary,
+.orca-agent-primary-focused {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.25;
+  /* Short prompt heading with a fade-out tail. */
+  -webkit-mask-image: linear-gradient(90deg, #000 82%, transparent 99%);
+  mask-image: linear-gradient(90deg, #000 82%, transparent 99%);
+}
+
+.orca-agent-primary {
+  color: var(--text-secondary);
+}
+
+.orca-agent-primary-focused,
+.orca-agent-row.focused .orca-agent-primary {
+  color: var(--text-primary);
+}
+
+.orca-agent-secondary {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--text-dim);
+}
+
+.orca-agent-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.orca-agents-empty {
+  margin: 8px 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.orca-kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orca-agent-spinner {
+    animation: none;
+    border-top-color: var(--warning);
+  }
+}

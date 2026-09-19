@@ -5,6 +5,8 @@ import TerminalArea from './components/TerminalArea'
 import InputModal from './components/InputModal'
 import AgentModal from './components/AgentModal'
 import CreateWorkspaceModal from './components/CreateWorkspaceModal'
+import CreateTaskModal from './components/CreateTaskModal'
+import TaskChat from './components/TaskChat'
 import Settings from './components/Settings'
 import StatusBar from './components/StatusBar'
 import TitleBar from './components/TitleBar'
@@ -158,6 +160,9 @@ function App() {
     getGitFileDiff, getGitLog, getGitBranches, getGitCommitFiles,
     getGitFullStatus, gitStageFile, gitUnstageFile, gitCommit, gitPull, gitPush, gitFetch,
     setUserSettings, updateWorkspaceConfig, refreshWorkspaces,
+    taskGroups, listTaskGroups, createTaskGroup, onTaskGroupsChanged,
+    getTaskDetail, launchTask, closeTask, taskFollowup,
+    mergeTask, confirmTaskMerge,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
@@ -165,7 +170,7 @@ function App() {
     onChatStreamChunk, onChatResponse, onChatError, onChatThreads,
     executionHistory,
     filterStats, commandHistory, searchEvents, promptHistory,
-    getOrchestratorStats,
+    getOrchestratorStats, sessionStartedAt,
     sessionCompressionModes, setSessionCompressionMode,
   } = useSocket()
   const tokensSaved = useMemo(() => {
@@ -193,6 +198,8 @@ function App() {
     return (localStorage.getItem('agent-workspace-theme') as 'dark' | 'light') || 'dark'
   })
   const [createWorkspaceModalOpen, setCreateWorkspaceModalOpen] = useState(false)
+  const [createTaskModalOpen, setCreateTaskModalOpen] = useState(false)
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [commanderOpen, setCommanderOpen] = useState(false)
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false)
   const [pendingCloseSessionId, setPendingCloseSessionId] = useState<string | null>(null)
@@ -315,6 +322,52 @@ function App() {
   }, [listDeletedWorkspaces])
 
   useEffect(() => { refreshDeleted() }, [])
+
+  // v2 Tasks: reload the active workspace's task groups whenever the
+  // workspace changes or the backend reports a change.
+  useEffect(() => {
+    if (activeWorkspace?.id) listTaskGroups(activeWorkspace.id).catch(() => {})
+  }, [activeWorkspace?.id, listTaskGroups])
+
+  useSocketEvent<{ workspaceId: string }>(onTaskGroupsChanged, (data) => {
+    if (!data?.workspaceId || data.workspaceId === activeWorkspace?.id) {
+      listTaskGroups(activeWorkspace?.id).catch(() => {})
+    }
+  }, [onTaskGroupsChanged, activeWorkspace?.id, listTaskGroups])
+
+  const handleCreateTaskGroup = useCallback(async (input: { title: string; userGoal: string; worktreeMode: 'worktree' | 'in-repo'; agents: { agentId: string; model?: string }[]; repoPath?: string }) => {
+    const res = await createTaskGroup({ ...input, workspaceId: activeWorkspace?.id })
+    if (res?.ok) listTaskGroups(activeWorkspace?.id).catch(() => {})
+    return res ?? { ok: false, error: 'No response from server' }
+  }, [createTaskGroup, activeWorkspace?.id, listTaskGroups])
+
+  // Mixed-repo workspaces carry per-terminal repositories; offer them as
+  // pinned-repo choices. Single-repo workspaces hide the picker.
+  const taskRepoChoices = useMemo(() => {
+    const out: { name: string; path: string }[] = []
+    const seen = new Set<string>()
+    const push = (name: string, path: string) => {
+      if (!path || seen.has(path)) return
+      seen.add(path)
+      out.push({ name, path })
+    }
+    const terms = (activeWorkspace as any)?.terminals
+    const list = Array.isArray(terms) ? terms : []
+    for (const t of list) {
+      if (t?.repository?.path) push(t.repository.name || t.repository.path, t.repository.path)
+    }
+    if (activeWorkspace?.repository?.path) push(activeWorkspace.name || activeWorkspace.repository.path, activeWorkspace.repository.path)
+    return out.length > 1 ? out : []
+  }, [activeWorkspace])
+
+  const tasksApi = useMemo(() => ({
+    getDetail: getTaskDetail,
+    launchTask,
+    closeTask,
+    taskFollowup,
+    mergeTask,
+    confirmTaskMerge,
+  }), [getTaskDetail, launchTask, closeTask, taskFollowup, mergeTask, confirmTaskMerge])
 
   useEffect(() => {
     localStorage.setItem('agent-workspace-theme', theme)
@@ -597,6 +650,7 @@ function App() {
     { id: 'close-agent', category: 'Terminals', label: 'Close Active Agent', description: 'Confirm inside the pane, then close the active agent session', combo: 'cmd+r', action: () => { requestCloseActiveAgent() } },
     { id: 'new-shell', category: 'Terminals', label: 'New Shell Terminal', description: 'Open a shell terminal', combo: 'cmd+s', action: () => { handleToggleBottomShell() } },
     { id: 'new-workspace', category: 'Workspaces', label: 'Create Workspace', description: 'Create a new workspace', combo: 'cmd+n', action: () => { setCreateWorkspaceModalOpen(true) } },
+    { id: 'new-task', category: 'Tasks', label: 'Create Task', description: 'Create a multi-agent task in this workspace', action: () => { setCreateTaskModalOpen(true) } },
     { id: 'load-workspace', category: 'Workspaces', label: 'Open Workspace', description: 'Load a workspace file', combo: 'cmd+o', action: () => { handleLoadWorkspace() } },
     { id: 'new-window', category: 'Terminals', label: 'New Window', description: 'Open a new app window', combo: 'cmd+t', action: () => { window.electronAPI?.newWindow?.() } },
     { id: 'focus-mode', category: 'View', label: 'Toggle Focus Mode', description: 'Dim inactive terminals', combo: 'cmd+f', action: () => { setFocusMode(o => !o) } },
@@ -1426,20 +1480,18 @@ function App() {
               showModal={showModal}
               closeModal={closeModal}
               onOpenCreateModal={handleCreateWorkspace}
-              expandedFolders={expandedFolders}
-              onToggleFolder={toggleFolder}
-              onExpandFolder={expandFolder}
-              selectedFilePath={selectedFilePath}
-              onSelectFile={selectFile}
-              onFileDeleted={handleExplorerFileDeleted}
-              getWorkspaceTree={getWorkspaceTree}
-              getFileInfo={getFileInfo}
-              gitFilesByWorkspace={gitFilesByWs}
-              fileTreeRefreshTick={fileTreeRefreshTick}
-              createFile={createFile}
-              createFolder={createFolder}
-              renameFile={renameFile}
-              deleteFile={deleteFile}
+              activeSessionId={activeSessionId}
+              onSelectSession={setActiveSessionId}
+              promptHistory={promptHistory}
+              executionHistory={executionHistory}
+              commandHistory={commandHistory}
+              agentConfigs={agentConfigs}
+              sessionBuffersRef={writeBuffersRef}
+              appBootTime={sessionStartedAt}
+              taskGroups={taskGroups}
+              onOpenCreateTaskModal={() => setCreateTaskModalOpen(true)}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={setSelectedTaskId}
             />
           )}
           {activeView === 'git-review' && (
@@ -1616,6 +1668,22 @@ function App() {
         onCreateLocal={handleCreateWorkspaceLocal}
         onCreateFromGit={handleCreateWorkspaceFromGit}
       />
+      <CreateTaskModal
+        open={createTaskModalOpen}
+        onClose={() => setCreateTaskModalOpen(false)}
+        onCreate={handleCreateTaskGroup}
+        agentConfigs={agentConfigs}
+        repoName={activeWorkspace?.name || ''}
+        repoPath={activeWorkspace?.repository?.path || ''}
+        availableRepos={taskRepoChoices}
+      />
+      {selectedTaskId && (
+        <TaskChat
+          taskGroupId={selectedTaskId}
+          tasksApi={tasksApi}
+          onClose={() => setSelectedTaskId(null)}
+        />
+      )}
       <InputModal
         open={modal?.open || false}
         title={modal?.title || ''}

@@ -668,6 +668,10 @@ export class SessionManager extends EventEmitter {
     // Expose the session id so bin/agntspce.mjs can attribute wrapper token
     // stats to the real session instead of a catch-all "system" bucket.
     env.AGNTSPCE_SESSION_ID = sessionId
+    // v2 Tasks: task/subtask identity for agntspce-collab (inherited by the
+    // agent CLI and every child process of this PTY).
+    if (config.taskGroupId) env.AGNTSPCE_TASK_ID = config.taskGroupId
+    if (config.subtaskId) env.AGNTSPCE_SUBTASK_ID = config.subtaskId
 
     // Inject RTK session token and binary path.
     // AGNTSPCE_RTK_SESSION is verified by the RTK binary's activation gate.
@@ -906,7 +910,7 @@ export class SessionManager extends EventEmitter {
     this.sessions.set(sessionId, session)
 
     if (this.orchestrator) {
-      this.orchestrator.registerSession(sessionId, ptyProcess.pid, config.worktreeId, config.type)
+      this.orchestrator.registerSession(sessionId, ptyProcess.pid, config.worktreeId, config.type, config.taskGroupId ?? null, config.subtaskId ?? null)
     }
 
     session.processMonitor = setInterval(() => {
@@ -1298,6 +1302,70 @@ export class SessionManager extends EventEmitter {
     }
 
     return { sessionIds, groupId }
+  }
+
+  // ── v2 Tasks: one subtask agent sharing the task's worktree ──
+  // Mirrors createParallelTask's shell-settle delay and sibling exclusion so
+  // subtasks never trip the legacy flat-task claim check against each other.
+  async spawnTaskSubtask(input: {
+    taskGroupId: string
+    subtaskId: string
+    agentId: string
+    model?: string
+    reasoning?: string
+    verbosity?: string
+    prompt: string
+    cwd: string
+    worktreeId?: string
+    scopeFiles?: string[]
+    siblingSessionIds?: string[]
+  }): Promise<string> {
+    const sessionId = `task-${input.taskGroupId.replace(/-/g, '').slice(0, 8)}-${input.subtaskId.replace(/-/g, '').slice(0, 8)}-${Date.now().toString(36)}`
+    await this.createSession(sessionId, {
+      command: getDefaultShell(),
+      args: buildShellArgs(`cd ${shq(input.cwd)}`),
+      cwd: input.cwd,
+      type: input.agentId,
+      worktreeId: input.worktreeId ?? input.taskGroupId,
+      taskGroupId: input.taskGroupId,
+      subtaskId: input.subtaskId,
+    })
+    const session = this.sessions.get(sessionId)
+    if (session) {
+      session.sessionGroupId = `task-${input.taskGroupId}`
+      session.status = 'waiting'
+      try { this.io.emit('status-change', { sessionId, status: 'waiting' }) } catch {}
+    }
+    const scopeFiles = Array.isArray(input.scopeFiles) ? input.scopeFiles : []
+    const siblings = Array.isArray(input.siblingSessionIds) ? input.siblingSessionIds : []
+    setTimeout(() => {
+      try {
+        this.startAgentWithConfig(sessionId, {
+          agentId: input.agentId,
+          mode: 'fresh',
+          flags: [],
+          model: input.model,
+          reasoning: input.reasoning,
+          verbosity: input.verbosity,
+          declaredFiles: scopeFiles,
+          excludeSessionIds: siblings,
+          prompt: input.prompt,
+        })
+      } catch {}
+    }, 500)
+    return sessionId
+  }
+
+  /** Kill graph for a finished/abandoned task: closes every subtask PTY.
+   *  Unknown ids are skipped; returns the number actually closed. */
+  closeTaskSessions(sessionIds: string[]): number {
+    let closed = 0
+    for (const id of sessionIds) {
+      try {
+        if (this.closeSession(id)) closed++
+      } catch {}
+    }
+    return closed
   }
 
   startAgentWithConfig(sessionId: string, config: any) {

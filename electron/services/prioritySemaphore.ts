@@ -36,6 +36,39 @@ export class PrioritySemaphore {
     })
   }
 
+  async tryAcquire(count: number, timeoutMs = 30000, priority = 1): Promise<(() => void)[]> {
+    // Reserve a whole block of slots (e.g. every subtask agent of one Task)
+    // or fail fast: partial reservations are released so a Task never
+    // trickles agents in one-by-one behind a saturated semaphore.
+    if (count <= 0) return []
+    const releases: (() => void)[] = []
+    const deadline = Date.now() + timeoutMs
+    try {
+      for (let i = 0; i < count; i++) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) {
+          throw new Error(`Could not reserve ${count} slots within ${timeoutMs}ms (${releases.length} acquired)`)
+        }
+        releases.push(await this.acquireWithTimeout(priority, remaining))
+      }
+      return releases
+    } catch (err) {
+      for (const release of releases) {
+        try { release() } catch {}
+      }
+      throw new Error(
+        `Could not reserve ${count} slots within ${timeoutMs}ms (${releases.length} acquired)`,
+        { cause: err }
+      )
+    }
+  }
+
+  private acquireWithTimeout(priority: number, timeoutMs: number): Promise<() => void> {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+    return this.acquire(priority, ctrl.signal).finally(() => clearTimeout(timer))
+  }
+
   private release(): void {
     this.inUse--
     this.pump()

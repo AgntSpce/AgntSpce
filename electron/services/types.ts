@@ -44,6 +44,10 @@ export interface SessionConfig {
   repositoryName?: string
   repositoryType?: string
   timeoutMs?: number
+  /** v2 Tasks: links the PTY to a task group + subtask; exported as
+   *  AGNTSPCE_TASK_ID / AGNTSPCE_SUBTASK_ID for the collab CLI. */
+  taskGroupId?: string | null
+  subtaskId?: string | null
 }
 
 export interface CwdState {

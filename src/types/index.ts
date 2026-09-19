@@ -179,6 +179,70 @@ export interface OpenFile {
 
 export type ProviderType = 'openai' | 'anthropic' | 'google' | 'deepseek' | 'openai-compatible'
 
+// ── v2 Tasks system (creation UI; planner/spawn arrive in later steps) ──
+
+export interface TaskGroupInfo {
+  id: string
+  workspaceId: string | null
+  repoPath: string
+  title: string
+  userGoal: string
+  status: string
+  worktreeMode: 'worktree' | 'in-repo'
+  branchName: string | null
+  worktreePath: string | null
+  baseSha: string | null
+  createdAt: number
+  completedAt: number | null
+}
+
+export interface SubTaskInfo {
+  id: string
+  taskGroupId: string
+  agentId: string
+  model: string | null
+  reasoning: string | null
+  verbosity: string | null
+  title: string
+  assignmentPrompt: string
+  scopeFiles: string[]
+  status: string
+  sessionId: string | null
+  lastEventAt: number | null
+  createdAt: number
+  completedAt: number | null
+}
+
+export interface TaskAgentSelection {
+  agentId: string
+  model?: string
+  reasoning?: string
+  verbosity?: string
+}
+
+export interface CreateTaskGroupInput {
+  workspaceId?: string
+  repoPath?: string
+  title: string
+  userGoal: string
+  worktreeMode: 'worktree' | 'in-repo'
+  agents: TaskAgentSelection[]
+}
+
+export interface TaskWarningInfo {
+  type: string
+  message: string
+  at: number
+}
+
+export interface TaskDetailData {
+  group: TaskGroupInfo
+  subtasks: SubTaskInfo[]
+  summary: { taskId: string; summary: string; keyFiles: string[]; statusLine: string; updatedAt: number }
+  warnings: TaskWarningInfo[]
+  resources: { taskGroupId: string; cpuPercent: number; memoryMB: number; sessionCount: number } | null
+}
+
 export interface ChatAttachment {
   name: string
   mediaType: string

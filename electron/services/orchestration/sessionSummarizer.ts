@@ -154,4 +154,57 @@ export class SessionSummarizer {
       default: return task.status
     }
   }
+
+  // ── v2 TaskGroup summaries (TaskChat + merge previews) ──
+
+  summarizeTaskGroup(taskGroupId: string): TaskSummary {
+    const group = this.db.prepare('SELECT * FROM task_groups WHERE id = ?').get(taskGroupId) as
+      | { id: string; title: string; status: string; branch_name: string | null; completed_at: number | null }
+      | undefined
+    if (!group) throw new Error(`TaskGroup ${taskGroupId} not found`)
+
+    const subs = this.db.prepare(
+      'SELECT agent_id, status, scope_files FROM subtasks WHERE task_group_id = ? ORDER BY created_at ASC'
+    ).all(taskGroupId) as { agent_id: string; status: string; scope_files: string }[]
+
+    const parts: string[] = []
+    parts.push(`[${group.status}] ${group.title}`)
+    if (subs.length > 0) {
+      parts.push(`agents: ${subs.map(s => `${s.agent_id}(${s.status})`).join(', ')}`)
+    }
+    const keyFiles: string[] = []
+    for (const s of subs) {
+      try {
+        for (const f of JSON.parse(s.scope_files || '[]')) {
+          if (typeof f === 'string' && !keyFiles.includes(f)) keyFiles.push(f)
+        }
+      } catch {}
+    }
+    if (keyFiles.length > 0) {
+      parts.push(`files: ${keyFiles.slice(0, 5).join(', ')}${keyFiles.length > 5 ? '...' : ''}`)
+    }
+
+    const dones = this.db.prepare(
+      `SELECT agent_id, payload FROM collab_events
+       WHERE task_group_id = ? AND kind = 'done' ORDER BY created_at DESC LIMIT 5`
+    ).all(taskGroupId) as { agent_id: string; payload: string }[]
+    for (const d of dones.slice(0, 2)) {
+      try {
+        const msg = (JSON.parse(d.payload || '{}') as { message?: string }).message
+        if (msg) parts.push(`${d.agent_id} done: ${msg.slice(0, 100)}`)
+      } catch {}
+    }
+
+    if (group.status === 'done' && group.completed_at) {
+      parts.push(`completed: ${new Date(group.completed_at).toISOString().slice(0, 10)}`)
+    }
+
+    return {
+      taskId: taskGroupId,
+      summary: parts.slice(0, 5).join(' | ').slice(0, MAX_SUMMARY_LENGTH),
+      keyFiles: keyFiles.slice(0, 5),
+      statusLine: `Task ${group.status}${group.branch_name ? ` on ${group.branch_name}` : ''}`,
+      updatedAt: Date.now(),
+    }
+  }
 }

@@ -9,6 +9,7 @@ interface SessionRecord {
   ptyPid: number
   worktreeId: string
   agentId: string
+  taskGroupId: string | null
   startedAt: number
   restartCount: number
   lastHealthCheck: number
@@ -58,13 +59,42 @@ export class AgentOrchestrator {
     return this.concurrencyLimiter.acquire(priority, signal)
   }
 
-  registerSession(sessionId: string, ptyPid: number, worktreeId: string, agentId: string): void {
+  /** Reserve a whole block of slots for one Task's subtasks (fail-fast,
+   *  partial reservations released) — see PrioritySemaphore.tryAcquire. */
+  async tryAcquireSlots(count: number, timeoutMs = 30000): Promise<(() => void)[]> {
+    return this.concurrencyLimiter.tryAcquire(count, timeoutMs)
+  }
+
+  /** Aggregate live resource usage by task group (Orca WorktreeMemory-style
+   *  bucketing). Sessions without a task link are grouped under 'adhoc'. */
+  getTaskResourceUsage(): { taskGroupId: string; cpuPercent: number; memoryMB: number; sessionCount: number }[] {
+    const usage = this.resourceTracker.getAllUsage()
+    const byTask = new Map<string, { cpuPercent: number; memoryMB: number; sessionCount: number }>()
+    for (const u of usage) {
+      const rec = this.sessions.get(u.sessionId)
+      const key = rec?.taskGroupId ?? 'adhoc'
+      const bucket = byTask.get(key) ?? { cpuPercent: 0, memoryMB: 0, sessionCount: 0 }
+      bucket.cpuPercent += u.cpuPercent || 0
+      bucket.memoryMB += u.subtreeMemoryMB ?? u.memoryMB ?? 0
+      bucket.sessionCount += 1
+      byTask.set(key, bucket)
+    }
+    return [...byTask.entries()].map(([taskGroupId, b]) => ({
+      taskGroupId,
+      cpuPercent: Math.round(b.cpuPercent * 10) / 10,
+      memoryMB: Math.round(b.memoryMB * 10) / 10,
+      sessionCount: b.sessionCount,
+    }))
+  }
+
+  registerSession(sessionId: string, ptyPid: number, worktreeId: string, agentId: string, taskGroupId?: string | null, subtaskId?: string | null): void {
     this.resourceTracker.registerSession(sessionId, ptyPid)
     this.sessions.set(sessionId, {
       id: sessionId,
       ptyPid,
       worktreeId,
       agentId,
+      taskGroupId: taskGroupId ?? null,
       startedAt: Date.now(),
       restartCount: 0,
       lastHealthCheck: Date.now(),
@@ -84,6 +114,8 @@ export class AgentOrchestrator {
         sessionType: agentId,
         agentId,
         taskId: existingTaskId,
+        taskGroupId: taskGroupId ?? existing?.taskGroupId ?? null,
+        subtaskId: subtaskId ?? existing?.subtaskId ?? null,
         worktreeId: worktreeId || null,
         status: 'idle',
       })

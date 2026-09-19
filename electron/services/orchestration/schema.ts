@@ -143,6 +143,64 @@ export function createSchema(db: Database.Database): void {
       status_line TEXT NOT NULL DEFAULT '',
       updated_at INTEGER NOT NULL
     );
+
+    -- v2 Tasks system: user-facing Task (1 Task = 1 worktree + 1 branch + N agents).
+    -- The legacy flat 'tasks' table stays untouched for one release (read-only).
+    CREATE TABLE IF NOT EXISTS task_groups (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT,
+      repo_path TEXT NOT NULL,
+      title TEXT NOT NULL,
+      user_goal TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'planning',
+      worktree_mode TEXT NOT NULL DEFAULT 'worktree',
+      branch_name TEXT,
+      worktree_path TEXT,
+      base_sha TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_groups_workspace ON task_groups(workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_task_groups_status ON task_groups(status);
+
+    CREATE TABLE IF NOT EXISTS subtasks (
+      id TEXT PRIMARY KEY,
+      task_group_id TEXT NOT NULL REFERENCES task_groups(id),
+      agent_id TEXT NOT NULL,
+      model TEXT,
+      reasoning TEXT,
+      verbosity TEXT,
+      title TEXT NOT NULL DEFAULT '',
+      assignment_prompt TEXT NOT NULL DEFAULT '',
+      scope_files TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'pending',
+      session_id TEXT,
+      last_event_at INTEGER,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_subtasks_group ON subtasks(task_group_id);
+    CREATE INDEX IF NOT EXISTS idx_subtasks_status ON subtasks(status);
+
+    -- Collaboration write path: agents write via the agntspce-collab CLI shim,
+    -- COLLAB.md is regenerated from these rows (read-only view for agents).
+    -- 'file' is a first-class column (not just JSON) so claim lookups filter
+    -- in SQL instead of scanning a row window client-side.
+    CREATE TABLE IF NOT EXISTS collab_events (
+      id TEXT PRIMARY KEY,
+      task_group_id TEXT NOT NULL REFERENCES task_groups(id),
+      subtask_id TEXT NOT NULL REFERENCES subtasks(id),
+      agent_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}',
+      file TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_collab_events_group ON collab_events(task_group_id);
+    CREATE INDEX IF NOT EXISTS idx_collab_events_kind ON collab_events(kind);
+    CREATE INDEX IF NOT EXISTS idx_collab_events_created ON collab_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_collab_events_file ON collab_events(task_group_id, file, kind);
   `)
 }
 
@@ -158,4 +216,26 @@ export function migrateSchema(db: Database.Database): void {
   if (!msgColumns.some(c => c.name === 'deliver_only_when_idle')) {
     db.exec(`ALTER TABLE messages ADD COLUMN deliver_only_when_idle INTEGER NOT NULL DEFAULT 0`)
   }
+
+  // v2 Tasks system: sessions can link to a task group + subtask (in addition
+  // to the legacy task_id FK, which stays for compat).
+  const sessionColumns = db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]
+  if (!sessionColumns.some(c => c.name === 'task_group_id')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN task_group_id TEXT`)
+  }
+  if (!sessionColumns.some(c => c.name === 'subtask_id')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN subtask_id TEXT`)
+  }
+
+  // v2 collab_events.file column (added after step 1 shipped): backfill from
+  // the JSON payload so claim lookups can filter in SQL.
+  try {
+    const collabColumns = db.prepare(`PRAGMA table_info(collab_events)`).all() as { name: string }[]
+    if (collabColumns.length > 0 && !collabColumns.some(c => c.name === 'file')) {
+      db.exec(`ALTER TABLE collab_events ADD COLUMN file TEXT`)
+      db.exec(`UPDATE collab_events SET file = json_extract(payload, '$.file')
+               WHERE kind IN ('claim', 'release') AND file IS NULL`)
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_collab_events_file ON collab_events(task_group_id, file, kind)`)
+  } catch {}
 }

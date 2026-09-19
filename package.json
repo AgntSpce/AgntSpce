@@ -14,6 +14,7 @@
     "postinstall": "node bin/copy-rtk.js && node scripts/download-semble.js && node bin/compile-wrappers.mjs && npx electron-rebuild -f -w better-sqlite3",
     "lint": "oxlint",
     "test": "vitest run",
+    "test:node": "bash scripts/test-node.sh",
     "preview": "vite preview",
     "electron:dev": "vite",
     "electron:build": "npm run build && electron-builder",

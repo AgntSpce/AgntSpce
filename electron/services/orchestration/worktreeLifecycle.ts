@@ -226,6 +226,191 @@ export class WorktreeLifecycle {
     return `worktree/${id}`
   }
 
+  // ── v2 Tasks system (1 Task = 1 worktree under <repo>/.agntspce/tasks/) ──
+  // Kept additive: the legacy worktree/<id> flow above stays for the old
+  // coordinator path until sessionManager migrates off worktreeHelper.
+
+  getTaskBaseDir(): string {
+    return path.join(this.repoPath, '.agntspce', 'tasks')
+  }
+
+  getTaskWorktreePath(taskId: string): string {
+    return path.join(this.getTaskBaseDir(), taskId)
+  }
+
+  static sanitizeTaskSlug(title: string): string {
+    const slug = title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'task'
+    return slug
+  }
+
+  buildTaskBranchName(taskId: string, slug: string): string {
+    const short = taskId.replace(/-/g, '').slice(0, 8)
+    return `task/${slug}-${short}`
+  }
+
+  private branchExists(branchName: string): boolean {
+    try {
+      this.execGit(['rev-parse', '--verify', branchName])
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  deduplicateBranchName(base: string): string {
+    if (!this.branchExists(base)) return base
+    for (let i = 2; i < 100; i++) {
+      const candidate = `${base}-${i}`
+      if (!this.branchExists(candidate)) return candidate
+    }
+    throw new Error(`Could not find a free branch name for base: ${base}`)
+  }
+
+  private listWorktreePaths(): Map<string, string> {
+    // Returns map of worktree path -> branch (from `git worktree list --porcelain`).
+    const out = new Map<string, string>()
+    try {
+      const raw = this.execGit(['worktree', 'list', '--porcelain'])
+      let currentPath = ''
+      for (const line of raw.split('\n')) {
+        if (line.startsWith('worktree ')) currentPath = line.slice('worktree '.length).trim()
+        else if (line.startsWith('branch ') && currentPath) {
+          out.set(currentPath, line.slice('branch '.length).trim().replace('refs/heads/', ''))
+          currentPath = ''
+        } else if (line === '' ) currentPath = ''
+      }
+    } catch {}
+    return out
+  }
+
+  private pruneWorktrees(): void {
+    try {
+      this.execGit(['worktree', 'prune'])
+    } catch {}
+  }
+
+  createTaskWorktree(taskId: string, slug: string, sourceRef: string): WorktreeResult {
+    const cleanSlug = WorktreeLifecycle.sanitizeTaskSlug(slug)
+    const branchName = this.deduplicateBranchName(this.buildTaskBranchName(taskId, cleanSlug))
+    const worktreePath = this.getTaskWorktreePath(taskId)
+
+    fs.mkdirSync(this.getTaskBaseDir(), { recursive: true })
+    this.ensureTasksIgnored()
+
+    if (fs.existsSync(worktreePath)) {
+      // Adopt the existing path if git already tracks it (race/retry safe).
+      const tracked = this.listWorktreePaths().get(path.resolve(worktreePath))
+      if (tracked) {
+        const branchPoint = this.execGit(['rev-parse', sourceRef])
+        return { worktreePath, branchName: tracked, branchPoint }
+      }
+      throw new Error(`Task worktree path already exists: ${worktreePath}`)
+    }
+
+    const branchPoint = this.execGit(['rev-parse', sourceRef])
+    this.pruneWorktrees()
+
+    try {
+      this.execGit(['worktree', 'add', '-b', branchName, worktreePath, branchPoint])
+    } catch (err: any) {
+      const msg = (err as Error)?.message || ''
+      if (/already exists|already used|already checked out/i.test(msg)) {
+        const tracked = this.listWorktreePaths().get(path.resolve(worktreePath))
+        if (tracked) return { worktreePath, branchName: tracked, branchPoint }
+      }
+      throw err
+    }
+
+    return { worktreePath, branchName, branchPoint }
+  }
+
+  removeTaskWorktree(taskId: string, integrationBranch?: string): void {
+    const worktreePath = this.getTaskWorktreePath(taskId)
+    let branchName: string | null = null
+    try {
+      branchName = this.execGit(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath)
+    } catch {}
+
+    if (fs.existsSync(worktreePath)) {
+      try {
+        this.execGit(['worktree', 'remove', worktreePath])
+      } catch {
+        try {
+          this.execGit(['worktree', 'remove', '--force', worktreePath])
+        } catch {}
+      }
+      // `worktree remove` deletes the directory; rmSync clears any leftovers
+      // if git left the path behind without registering an error.
+      try { fs.rmSync(worktreePath, { recursive: true, force: true }) } catch {}
+    }
+
+    if (branchName && branchName !== 'HEAD') {
+      this.deleteTaskBranchIfMerged(branchName, integrationBranch)
+    }
+    this.pruneWorktrees()
+  }
+
+  private deleteTaskBranchIfMerged(branchName: string, integrationBranch?: string): void {
+    if (!integrationBranch) return
+    try {
+      this.execGit(['merge-base', '--is-ancestor', branchName, integrationBranch])
+      this.execGit(['branch', '-D', branchName])
+    } catch {
+      // Unmerged (or missing) — keep it so the work survives.
+    }
+  }
+
+  taskWorktreeExists(taskId: string): boolean {
+    return fs.existsSync(this.getTaskWorktreePath(taskId))
+  }
+
+  /** Keep task worktrees out of `git status`: the worktree dir contains a
+   *  `.git` pointer file, which git otherwise reports as an embedded repo.
+   *  Appends `.agntspce/` (whole dir is machine-local state: db, logs, tasks)
+   *  to the repo's .gitignore when no covering pattern exists. Idempotent. */
+  ensureTasksIgnored(): void {
+    const gitignorePath = path.join(this.repoPath, '.gitignore')
+    let content = ''
+    try {
+      content = fs.readFileSync(gitignorePath, 'utf-8')
+    } catch {
+      content = ''
+    }
+    const covered = content.split('\n').some(line => {
+      const t = line.trim()
+      return t === '.agntspce/' || t === '.agntspce' || t === '/.agntspce/' || t === '/.agntspce'
+    })
+    if (covered) return
+    const prefix = content.length > 0 && !content.endsWith('\n') ? '\n' : ''
+    const suffix = '\n'
+    fs.writeFileSync(gitignorePath, `${content}${prefix}.agntspce/${suffix}`, 'utf-8')
+  }
+
+  // v2 in-repo mode: same branch semantics as task worktrees but checked out
+  // in the main repo instead of a detached worktree. Named distinctly from the
+  // legacy createInRepoBranch/cleanupInRepoTaskBranch (worktree/<id> naming),
+  // which stay untouched for the old coordinator path.
+  createTaskBranchInRepo(branchName: string, sourceRef: string): void {
+    try {
+      this.execGit(['branch', '-D', branchName])
+    } catch {}
+    this.execGit(['branch', branchName, sourceRef])
+    this.execGit(['checkout', branchName])
+  }
+
+  cleanupTaskBranchInRepo(branchName: string, integrationBranch: string): void {
+    try {
+      this.execGit(['checkout', integrationBranch])
+    } catch {}
+    try {
+      this.execGit(['branch', '-D', branchName])
+    } catch {}
+  }
+
   cleanupScratchWorktrees(): void {
     if (!fs.existsSync(this.baseDir)) return
     for (const entry of fs.readdirSync(this.baseDir, { withFileTypes: true })) {

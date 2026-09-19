@@ -35,6 +35,8 @@ export interface SessionRow {
   session_type: string
   agent_id: string | null
   task_id: string | null
+  task_group_id: string | null
+  subtask_id: string | null
   status: string
   branch: string | null
   worktree_id: string | null
@@ -114,12 +116,104 @@ export interface TaskOverview {
   failureCount: number
 }
 
+export interface TaskGroupRow {
+  id: string
+  workspace_id: string | null
+  repo_path: string
+  title: string
+  user_goal: string
+  status: 'planning' | 'active' | 'paused' | 'merging' | 'done' | 'abandoned'
+  worktree_mode: 'worktree' | 'in-repo'
+  branch_name: string | null
+  worktree_path: string | null
+  base_sha: string | null
+  created_at: number
+  completed_at: number | null
+}
+
+export interface TaskGroupOverview {
+  id: string
+  workspaceId: string | null
+  repoPath: string
+  title: string
+  userGoal: string
+  status: string
+  worktreeMode: 'worktree' | 'in-repo'
+  branchName: string | null
+  worktreePath: string | null
+  baseSha: string | null
+  createdAt: number
+  completedAt: number | null
+}
+
+export interface SubTaskRow {
+  id: string
+  task_group_id: string
+  agent_id: string
+  model: string | null
+  reasoning: string | null
+  verbosity: string | null
+  title: string
+  assignment_prompt: string
+  scope_files: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  session_id: string | null
+  last_event_at: number | null
+  created_at: number
+  completed_at: number | null
+}
+
+export interface SubTaskOverview {
+  id: string
+  taskGroupId: string
+  agentId: string
+  model: string | null
+  reasoning: string | null
+  verbosity: string | null
+  title: string
+  assignmentPrompt: string
+  scopeFiles: string[]
+  status: string
+  sessionId: string | null
+  lastEventAt: number | null
+  createdAt: number
+  completedAt: number | null
+}
+
+export type CollabEventKind = 'progress' | 'claim' | 'release' | 'request' | 'done'
+
+export interface CollabEventRow {
+  id: string
+  task_group_id: string
+  subtask_id: string
+  agent_id: string
+  kind: CollabEventKind
+  payload: string
+  file: string | null
+  created_at: number
+  expires_at: number | null
+}
+
+export interface CollabEvent {
+  id: string
+  taskGroupId: string
+  subtaskId: string
+  agentId: string
+  kind: CollabEventKind
+  payload: Record<string, unknown>
+  file: string | null
+  createdAt: number
+  expiresAt: number | null
+}
+
 export interface SessionOverview {
   id: string
   workspaceId: string | null
   sessionType: string
   agentId: string | null
   taskId: string | null
+  taskGroupId: string | null
+  subtaskId: string | null
   status: string
   branch: string | null
   worktreeId: string | null
@@ -593,6 +687,286 @@ export class StateManager {
     return this.getTask(taskId)
   }
 
+  // ── TaskGroup / SubTask / Collab (v2 Tasks system) ──
+  // The legacy flat `tasks` table above stays untouched; all new Task
+  // orchestration goes through these tables. agent_id columns here are raw
+  // CLI agent strings (no agents-FK) so UI-launched sessions never violate FKs.
+
+  createTaskGroup(input: {
+    workspaceId?: string | null
+    repoPath: string
+    title: string
+    userGoal?: string
+    worktreeMode?: 'worktree' | 'in-repo'
+  }): TaskGroupOverview {
+    const id = uuid()
+    const now = Date.now()
+    this.db.prepare(
+      `INSERT INTO task_groups (id, workspace_id, repo_path, title, user_goal, status, worktree_mode, created_at)
+       VALUES (?, ?, ?, ?, ?, 'planning', ?, ?)`
+    ).run(
+      id,
+      input.workspaceId ?? null,
+      input.repoPath,
+      input.title,
+      input.userGoal ?? '',
+      input.worktreeMode ?? 'worktree',
+      now
+    )
+    return this.getTaskGroup(id)!
+  }
+
+  getTaskGroup(id: string): TaskGroupOverview | null {
+    const row = this.db.prepare('SELECT * FROM task_groups WHERE id = ?').get(id) as TaskGroupRow | undefined
+    if (!row) return null
+    return this.rowToTaskGroup(row)
+  }
+
+  listTaskGroups(workspaceId?: string): TaskGroupOverview[] {
+    const rows = workspaceId
+      ? (this.db.prepare('SELECT * FROM task_groups WHERE workspace_id = ? ORDER BY created_at ASC').all(workspaceId) as TaskGroupRow[])
+      : (this.db.prepare('SELECT * FROM task_groups ORDER BY created_at ASC').all() as TaskGroupRow[])
+    return rows.map(r => this.rowToTaskGroup(r))
+  }
+
+  updateTaskGroup(id: string, updates: {
+    status?: TaskGroupRow['status']
+    branchName?: string | null
+    worktreePath?: string | null
+    baseSha?: string | null
+    completedAt?: number | null
+  }): TaskGroupOverview | null {
+    const group = this.getTaskGroup(id)
+    if (!group) return null
+    const next = {
+      status: updates.status ?? group.status,
+      branch_name: updates.branchName !== undefined ? updates.branchName : group.branchName,
+      worktree_path: updates.worktreePath !== undefined ? updates.worktreePath : group.worktreePath,
+      base_sha: updates.baseSha !== undefined ? updates.baseSha : group.baseSha,
+      completed_at: updates.completedAt !== undefined ? updates.completedAt : group.completedAt,
+    }
+    if (next.status === 'done' && next.completed_at == null) next.completed_at = Date.now()
+    this.db.prepare(
+      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ? WHERE id = ?'
+    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, id)
+    return this.getTaskGroup(id)
+  }
+
+  private rowToTaskGroup(row: TaskGroupRow): TaskGroupOverview {
+    return {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      repoPath: row.repo_path,
+      title: row.title,
+      userGoal: row.user_goal,
+      status: row.status,
+      worktreeMode: row.worktree_mode,
+      branchName: row.branch_name,
+      worktreePath: row.worktree_path,
+      baseSha: row.base_sha,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+    }
+  }
+
+  addSubTask(input: {
+    taskGroupId: string
+    agentId: string
+    model?: string | null
+    reasoning?: string | null
+    verbosity?: string | null
+    title?: string
+    assignmentPrompt?: string
+    scopeFiles?: string[]
+  }): SubTaskOverview {
+    const group = this.getTaskGroup(input.taskGroupId)
+    if (!group) throw new CoordinatorError('NOT_FOUND', `TaskGroup ${input.taskGroupId} not found`)
+    const id = uuid()
+    const now = Date.now()
+    this.db.prepare(
+      `INSERT INTO subtasks (id, task_group_id, agent_id, model, reasoning, verbosity, title, assignment_prompt, scope_files, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    ).run(
+      id,
+      input.taskGroupId,
+      input.agentId,
+      input.model ?? null,
+      input.reasoning ?? null,
+      input.verbosity ?? null,
+      input.title ?? '',
+      input.assignmentPrompt ?? '',
+      JSON.stringify(input.scopeFiles ?? []),
+      now
+    )
+    return this.getSubTask(id)!
+  }
+
+  getSubTask(id: string): SubTaskOverview | null {
+    const row = this.db.prepare('SELECT * FROM subtasks WHERE id = ?').get(id) as SubTaskRow | undefined
+    if (!row) return null
+    return this.rowToSubTask(row)
+  }
+
+  listSubTasks(taskGroupId: string): SubTaskOverview[] {
+    const rows = this.db.prepare('SELECT * FROM subtasks WHERE task_group_id = ? ORDER BY created_at ASC').all(taskGroupId) as SubTaskRow[]
+    return rows.map(r => this.rowToSubTask(r))
+  }
+
+  updateSubTaskStatus(id: string, status: SubTaskRow['status'], sessionId?: string | null): SubTaskOverview | null {
+    const sub = this.getSubTask(id)
+    if (!sub) return null
+    const completedAt = status === 'done' || status === 'failed' ? Date.now() : null
+    if (sessionId !== undefined) {
+      this.db.prepare('UPDATE subtasks SET status = ?, session_id = ?, completed_at = ? WHERE id = ?').run(status, sessionId, completedAt, id)
+    } else {
+      this.db.prepare('UPDATE subtasks SET status = ?, completed_at = ? WHERE id = ?').run(status, completedAt, id)
+    }
+    return this.getSubTask(id)
+  }
+
+  /** Replan update: replaces a subtask's assignment (title/scope/prompt)
+   *  without touching its status/session linkage. */
+  updateSubTaskPlan(id: string, plan: { title?: string; scopeFiles?: string[]; assignmentPrompt?: string }): SubTaskOverview | null {
+    const sub = this.getSubTask(id)
+    if (!sub) return null
+    this.db.prepare('UPDATE subtasks SET title = ?, scope_files = ?, assignment_prompt = ? WHERE id = ?').run(
+      plan.title ?? sub.title,
+      JSON.stringify(plan.scopeFiles ?? sub.scopeFiles),
+      plan.assignmentPrompt ?? sub.assignmentPrompt,
+      id
+    )
+    return this.getSubTask(id)
+  }
+
+  private rowToSubTask(row: SubTaskRow): SubTaskOverview {
+    return {
+      id: row.id,
+      taskGroupId: row.task_group_id,
+      agentId: row.agent_id,
+      model: row.model,
+      reasoning: row.reasoning,
+      verbosity: row.verbosity,
+      title: row.title,
+      assignmentPrompt: row.assignment_prompt,
+      scopeFiles: JSON.parse(row.scope_files || '[]'),
+      status: row.status,
+      sessionId: row.session_id,
+      lastEventAt: row.last_event_at,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+    }
+  }
+
+  // ── Collab events (CLI-shim write path; COLLAB.md is rendered from these) ──
+
+  appendCollabEvent(input: {
+    taskGroupId: string
+    subtaskId: string
+    agentId: string
+    kind: CollabEventKind
+    payload?: Record<string, unknown>
+    ttlMs?: number | null
+  }): CollabEvent {
+    const id = uuid()
+    const now = Date.now()
+    const expiresAt = input.ttlMs ? now + input.ttlMs : null
+    const payload = input.payload ?? {}
+    // Claim/release rows carry their file as a first-class column so holder
+    // lookups filter in SQL (no client-side row window to fall out of).
+    const file = (input.kind === 'claim' || input.kind === 'release')
+      && typeof payload.file === 'string' ? payload.file : null
+    this.db.prepare(
+      'INSERT INTO collab_events (id, task_group_id, subtask_id, agent_id, kind, payload, file, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, input.taskGroupId, input.subtaskId, input.agentId, input.kind, JSON.stringify(payload), file, now, expiresAt)
+    this.db.prepare('UPDATE subtasks SET last_event_at = ? WHERE id = ?').run(now, input.subtaskId)
+    return this.getCollabEvent(id)!
+  }
+
+  getCollabEvent(id: string): CollabEvent | null {
+    const row = this.db.prepare('SELECT * FROM collab_events WHERE id = ?').get(id) as CollabEventRow | undefined
+    if (!row) return null
+    return this.rowToCollabEvent(row)
+  }
+
+  getCollabEvents(taskGroupId: string, since = 0): CollabEvent[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM collab_events WHERE task_group_id = ? AND created_at > ? ORDER BY created_at ASC, rowid ASC'
+    ).all(taskGroupId, since) as CollabEventRow[]
+    return rows.map(r => this.rowToCollabEvent(r))
+  }
+
+  private rowToCollabEvent(row: CollabEventRow): CollabEvent {
+    let payload: Record<string, unknown> = {}
+    try { payload = JSON.parse(row.payload || '{}') } catch {}
+    return {
+      id: row.id,
+      taskGroupId: row.task_group_id,
+      subtaskId: row.subtask_id,
+      agentId: row.agent_id,
+      kind: row.kind,
+      payload,
+      file: row.file ?? (typeof payload.file === 'string' ? payload.file : null),
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    }
+  }
+
+  // ── File claims (real DB rows with TTL, not a text convention) ──
+  // A claim is active when its row has no matching later release AND has not
+  // expired. Expired claims are treated as released (crash-safe).
+
+  claimFile(taskGroupId: string, file: string, subtaskId: string, agentId: string, ttlMs = 90000): CollabEvent {
+    const holder = this.getFileClaimHolder(taskGroupId, file)
+    if (holder && holder.subtaskId !== subtaskId) {
+      throw new CoordinatorError('CLAIMED', `File ${file} is claimed by ${holder.agentId}`, {
+        file,
+        holderSubtaskId: holder.subtaskId,
+        holderAgentId: holder.agentId,
+        expiresAt: holder.expiresAt,
+      })
+    }
+    this.pruneExpiredClaims(taskGroupId)
+    return this.appendCollabEvent({ taskGroupId, subtaskId, agentId, kind: 'claim', payload: { file }, ttlMs })
+  }
+
+  releaseFile(taskGroupId: string, file: string, subtaskId: string, agentId: string): CollabEvent {
+    // Only the current holder may release. Releasing an unheld file is an
+    // idempotent no-op (still logged for audit); releasing someone else's
+    // claim is rejected instead of trusting the caller to behave.
+    const holder = this.getFileClaimHolder(taskGroupId, file)
+    if (holder && holder.subtaskId !== subtaskId) {
+      throw new CoordinatorError('NOT_HOLDER', `File ${file} is claimed by ${holder.agentId}`, {
+        file,
+        holderSubtaskId: holder.subtaskId,
+        holderAgentId: holder.agentId,
+      })
+    }
+    return this.appendCollabEvent({ taskGroupId, subtaskId, agentId, kind: 'release', payload: { file } })
+  }
+
+  getFileClaimHolder(taskGroupId: string, file: string): { subtaskId: string; agentId: string; expiresAt: number | null } | null {
+    const now = Date.now()
+    // Filter by file in SQL (indexed column) and take the single latest
+    // event: a release means unheld, an unexpired claim means held. No row
+    // window — the answer is exact no matter how long the task has run.
+    const row = this.db.prepare(
+      `SELECT subtask_id, agent_id, kind, expires_at FROM collab_events
+       WHERE task_group_id = ? AND file = ? AND kind IN ('claim', 'release')
+       ORDER BY rowid DESC LIMIT 1`
+    ).get(taskGroupId, file) as { subtask_id: string; agent_id: string; kind: string; expires_at: number | null } | undefined
+    if (!row || row.kind === 'release') return null
+    if (row.expires_at != null && row.expires_at <= now) return null
+    return { subtaskId: row.subtask_id, agentId: row.agent_id, expiresAt: row.expires_at }
+  }
+
+  private pruneExpiredClaims(taskGroupId: string): void {
+    try {
+      this.db.prepare(
+        "DELETE FROM collab_events WHERE task_group_id = ? AND kind = 'claim' AND expires_at IS NOT NULL AND expires_at <= ?"
+      ).run(taskGroupId, Date.now())
+    } catch {}
+  }
+
   // ── Session CRUD (unified store, Phase 0.2) ──
 
   // agent_id FKs reference registered orchestrator agents only. UI-launched
@@ -610,6 +984,8 @@ export class StateManager {
     sessionType: string
     agentId?: string | null
     taskId?: string | null
+    taskGroupId?: string | null
+    subtaskId?: string | null
     status?: string
     branch?: string | null
     worktreeId?: string | null
@@ -620,12 +996,14 @@ export class StateManager {
     const existing = this.db.prepare('SELECT id FROM sessions WHERE id = ?').get(session.id) as { id: string } | undefined
     if (existing) {
       this.db.prepare(
-        'UPDATE sessions SET workspace_id = ?, session_type = ?, agent_id = ?, task_id = ?, status = ?, branch = ?, worktree_id = ?, last_activity = ? WHERE id = ?'
+        'UPDATE sessions SET workspace_id = ?, session_type = ?, agent_id = ?, task_id = ?, task_group_id = ?, subtask_id = ?, status = ?, branch = ?, worktree_id = ?, last_activity = ? WHERE id = ?'
       ).run(
         session.workspaceId ?? null,
         session.sessionType,
         agentRef,
         session.taskId ?? null,
+        session.taskGroupId ?? null,
+        session.subtaskId ?? null,
         session.status ?? 'idle',
         session.branch ?? null,
         session.worktreeId ?? null,
@@ -634,13 +1012,15 @@ export class StateManager {
       )
     } else {
       this.db.prepare(
-        'INSERT INTO sessions (id, workspace_id, session_type, agent_id, task_id, status, branch, worktree_id, created_at, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO sessions (id, workspace_id, session_type, agent_id, task_id, task_group_id, subtask_id, status, branch, worktree_id, created_at, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         session.id,
         session.workspaceId ?? null,
         session.sessionType,
         agentRef,
         session.taskId ?? null,
+        session.taskGroupId ?? null,
+        session.subtaskId ?? null,
         session.status ?? 'idle',
         session.branch ?? null,
         session.worktreeId ?? null,
@@ -684,6 +1064,8 @@ export class StateManager {
       sessionType: row.session_type,
       agentId: row.agent_id,
       taskId: row.task_id,
+      taskGroupId: row.task_group_id ?? null,
+      subtaskId: row.subtask_id ?? null,
       status: row.status,
       branch: row.branch,
       worktreeId: row.worktree_id,

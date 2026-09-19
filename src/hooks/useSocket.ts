@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { io, Socket } from 'socket.io-client'
-import type { WorkspaceInfo, SessionState, TerminalOutput, StatusChange, BranchChange, WorkspaceChange, AgentConfig, AgentStartConfig, FilterEvent, FilterStats, CommandEvent, ExecutionEvent, ChatModelInfo, ChatThread, ChatAttachment } from '../types'
+import type { WorkspaceInfo, SessionState, TerminalOutput, StatusChange, BranchChange, WorkspaceChange, AgentConfig, AgentStartConfig, FilterEvent, FilterStats, CommandEvent, ExecutionEvent, ChatModelInfo, ChatThread, ChatAttachment, TaskGroupInfo, CreateTaskGroupInput } from '../types'
 import { SERVER_URL, getServerAuthToken, apiHeaders } from '../utils/serverAuth'
 
 export type CompressionMode = 'lite' | 'medium' | 'extreme'
@@ -69,6 +69,17 @@ interface UseSocketReturn {
   restoreWorkspace: (workspaceId: string) => Promise<boolean>
   permanentDeleteWorkspace: (workspaceId: string) => Promise<boolean>
   refreshWorkspaces: () => void
+  taskGroups: TaskGroupInfo[]
+  listTaskGroups: (workspaceId?: string) => Promise<TaskGroupInfo[]>
+  createTaskGroup: (input: CreateTaskGroupInput) => Promise<{ ok: boolean; taskGroup?: TaskGroupInfo; error?: string }>
+  onTaskGroupsChanged: (cb: (data: { workspaceId: string }) => void) => () => void
+  getTaskDetail: (taskGroupId: string) => Promise<any>
+  launchTask: (taskGroupId: string) => Promise<any>
+  closeTask: (taskGroupId: string, abandon?: boolean) => Promise<any>
+  taskFollowup: (taskGroupId: string, message: string) => Promise<any>
+  previewTaskMerge: (taskGroupId: string) => Promise<any>
+  mergeTask: (taskGroupId: string, autoResolve?: boolean) => Promise<any>
+  confirmTaskMerge: (taskGroupId: string) => Promise<any>
   closeTab: (sessionIds: string[]) => void
   startAgent: (sessionId: string, config: AgentStartConfig) => void
   fetchAgentConfigs: () => Promise<AgentConfig[]>
@@ -154,6 +165,7 @@ export function useSocket(): UseSocketReturn {
   const [sessions, setSessions] = useState<Record<string, SessionState>>({})
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceInfo | null>(null)
+  const [taskGroups, setTaskGroups] = useState<TaskGroupInfo[]>([])
   const [filterStats, setFilterStats] = useState<FilterStats>({
     totalOriginalBytes: 0, totalFilteredBytes: 0,
     totalOriginalTokens: 0, totalFilteredTokens: 0,
@@ -172,6 +184,7 @@ export function useSocket(): UseSocketReturn {
   const statusChangeCbs = useRef<((data: StatusChange) => void)[]>([])
   const branchChangeCbs = useRef<((data: BranchChange) => void)[]>([])
   const workspaceChangedCbs = useRef<((data: WorkspaceChange) => void)[]>([])
+  const taskGroupsChangedCbs = useRef<((data: { workspaceId: string }) => void)[]>([])
   const filterEventCbs = useRef<((data: FilterEvent) => void)[]>([])
   const sessionUnhealthyCbs = useRef<((data: { sessionId: string, reason: string, usage?: any }) => void)[]>([])
   // Pending terminal output per session, accumulated as chunks. Joining happens
@@ -380,6 +393,10 @@ socket.emit('get-cumulative-stats', {})
 
     socket.on('workspaces-list', (data: WorkspaceInfo[]) => {
       setWorkspaces(data)
+    })
+
+    socket.on('task-groups-changed', (data: { workspaceId: string }) => {
+      taskGroupsChangedCbs.current.forEach(cb => cb(data))
     })
 
     socket.on('session-created', ({ sessionId, sessions: newSessions }: { sessionId: string, sessions: Record<string, SessionState> }) => {
@@ -672,6 +689,54 @@ socket.emit('get-cumulative-stats', {})
 
   const updateWorkspaceConfig = useCallback((workspaceId: string, updates: any): Promise<any> => {
     return emitAck('update-workspace-config', { workspaceId, updates })
+  }, [emitAck])
+
+  const listTaskGroups = useCallback(async (workspaceId?: string): Promise<TaskGroupInfo[]> => {
+    const res = await emitAck('list-task-groups', { workspaceId })
+    if (res?.ok) {
+      setTaskGroups(res.taskGroups || [])
+      return res.taskGroups || []
+    }
+    return []
+  }, [emitAck])
+
+  const createTaskGroup = useCallback((input: CreateTaskGroupInput): Promise<{ ok: boolean; taskGroup?: TaskGroupInfo; error?: string }> => {
+    return emitAck('create-task-group', input)
+  }, [emitAck])
+
+  const onTaskGroupsChanged = useCallback((cb: (data: { workspaceId: string }) => void) => {
+    taskGroupsChangedCbs.current.push(cb)
+    return () => {
+      taskGroupsChangedCbs.current = taskGroupsChangedCbs.current.filter(c => c !== cb)
+    }
+  }, [])
+
+  const getTaskDetail = useCallback((taskGroupId: string): Promise<any> => {
+    return emitAck('get-task-detail', { taskGroupId })
+  }, [emitAck])
+
+  const launchTask = useCallback((taskGroupId: string): Promise<any> => {
+    return emitAck('launch-task', { taskGroupId }, 600000)
+  }, [emitAck])
+
+  const closeTask = useCallback((taskGroupId: string, abandon?: boolean): Promise<any> => {
+    return emitAck('close-task', { taskGroupId, abandon })
+  }, [emitAck])
+
+  const taskFollowup = useCallback((taskGroupId: string, message: string): Promise<any> => {
+    return emitAck('task-followup', { taskGroupId, message }, 600000)
+  }, [emitAck])
+
+  const previewTaskMerge = useCallback((taskGroupId: string): Promise<any> => {
+    return emitAck('preview-task-merge', { taskGroupId }, 300000)
+  }, [emitAck])
+
+  const mergeTask = useCallback((taskGroupId: string, autoResolve = true): Promise<any> => {
+    return emitAck('merge-task', { taskGroupId, autoResolve }, 900000)
+  }, [emitAck])
+
+  const confirmTaskMerge = useCallback((taskGroupId: string): Promise<any> => {
+    return emitAck('confirm-task-merge', { taskGroupId }, 300000)
   }, [emitAck])
 
   const emit = useCallback((event: string, ...args: any[]) => {
@@ -1016,6 +1081,17 @@ socket.emit('get-cumulative-stats', {})
     restoreWorkspace,
     permanentDeleteWorkspace,
     refreshWorkspaces,
+    taskGroups,
+    listTaskGroups,
+    createTaskGroup,
+    onTaskGroupsChanged,
+    getTaskDetail,
+    launchTask,
+    closeTask,
+    taskFollowup,
+    previewTaskMerge,
+    mergeTask,
+    confirmTaskMerge,
     closeTab,
     startAgent,
     fetchAgentConfigs,

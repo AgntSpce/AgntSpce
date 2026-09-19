@@ -4592,6 +4592,328 @@
   margin-bottom: 16px;
 }
 
+/* ── Create Task Modal (v2 Tasks) ──────────────── */
+.create-task-modal {
+  min-width: 460px;
+  max-width: 560px;
+}
+
+.create-task-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.create-task-fields label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.create-task-goal {
+  resize: vertical;
+  min-height: 76px;
+  font-family: inherit;
+}
+
+.task-agent-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-agent-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.task-agent-select {
+  flex: 1.2;
+  min-width: 0;
+}
+
+.task-model-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-remove-agent {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.task-remove-agent:hover:not(:disabled) {
+  color: var(--danger, #ff453a);
+  border-color: var(--danger, #ff453a);
+}
+
+.task-remove-agent:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.task-add-agent {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.task-add-agent:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.task-mode-toggle {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-mode-toggle .tab-btn {
+  flex: 1;
+}
+
+/* ── Tasks section in the workspace sidebar ──────────────── */
+.tasks-header {
+  margin-top: 12px;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.task-row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.task-row.active {
+  background: var(--bg-active, rgba(255, 255, 255, 0.09));
+}
+
+.task-status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.task-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── TaskChat (v2 Tasks) ──────────────── */
+.task-chat-modal {
+  min-width: 480px;
+  max-width: 600px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.task-chat-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-chat-header .modal-title {
+  margin: 0;
+}
+
+.task-chat-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.task-chat-close:hover {
+  color: var(--text-primary);
+}
+
+.task-chat-resources {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.task-chat-summary {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.task-chat-warnings {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-chat-warning {
+  font-size: 12px;
+  color: var(--warning, #ff9f0a);
+}
+
+.task-chat-subtasks {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.task-chat-subtask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.task-chat-subtask-agent {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.task-chat-subtask-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.task-chat-subtask-status {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.task-chat-subtask-status.running {
+  color: var(--success, #34c759);
+  border-color: var(--success, #34c759);
+}
+
+.task-chat-subtask-status.done {
+  opacity: 0.6;
+}
+
+.task-chat-stale {
+  font-size: 11px;
+  color: var(--warning, #ff9f0a);
+}
+
+.task-chat-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.modal-btn-danger {
+  background: transparent;
+  border: 1px solid var(--danger, #ff453a);
+  color: var(--danger, #ff453a);
+}
+
+.modal-btn-danger:hover:not(:disabled) {
+  background: var(--danger, #ff453a);
+  color: #fff;
+}
+
+.task-chat-followup {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: flex-end;
+}
+
+.task-chat-followup .text-input {
+  flex: 1;
+  resize: vertical;
+  font-family: inherit;
+}
+
+/* ── Merge confirm (v2 Tasks) ──────────────── */
+.task-chat-confirm {
+  margin-top: 12px;
+  border: 1px solid var(--warning, #ff9f0a);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.task-chat-confirm-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.task-chat-confirm-files {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.task-chat-confirm-diff {
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 4px;
+}
+
 .preset-script-input {
   resize: vertical;
   font-family: var(--font-mono, ui-monospace, monospace);
