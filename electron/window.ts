@@ -18,6 +18,17 @@ function sendMenuAction(action: string, data?: any) {
   mainWindow?.webContents.send('menu-action', action, data)
 }
 
+function loadApp(win: BrowserWindow, blank: boolean): void {
+  if (isDev) {
+    const base = process.env.VITE_DEV_SERVER_URL!
+    win.loadURL(blank ? `${base}${base.includes('?') ? '&' : '?'}blank=1` : base)
+  } else if (blank) {
+    win.loadFile(path.join(app.getAppPath(), 'dist/index.html'), { query: { blank: '1' } })
+  } else {
+    win.loadFile(path.join(app.getAppPath(), 'dist/index.html'))
+  }
+}
+
 function buildWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1400,
@@ -70,16 +81,14 @@ function buildWindow(): BrowserWindow {
   })
 
   win.maximize()
-  if (isDev) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL!)
-  } else {
-    win.loadFile(path.join(app.getAppPath(), 'dist/index.html'))
-  }
   return win
 }
 
 function createNewWindow() {
   const win = buildWindow()
+  // Secondary windows always start blank (?blank=1); only the first window
+  // of an app launch restores the last workspace.
+  loadApp(win, true)
   win.on('close', () => { if (mainWindow === win) mainWindow = null })
 }
 
@@ -409,6 +418,7 @@ export function rebuildMenu() {
 export function createWindow() {
   rebuildMenu()
   mainWindow = buildWindow()
+  loadApp(mainWindow, false)
 
   let feedbackShown = false
   mainWindow.on('close', (e) => {

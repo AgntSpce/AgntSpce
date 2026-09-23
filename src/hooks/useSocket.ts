@@ -80,6 +80,9 @@ interface UseSocketReturn {
   previewTaskMerge: (taskGroupId: string) => Promise<any>
   mergeTask: (taskGroupId: string, autoResolve?: boolean) => Promise<any>
   confirmTaskMerge: (taskGroupId: string) => Promise<any>
+  groupSessions: (sessionIds: string[], title?: string) => Promise<any>
+  joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
+  ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
   closeTab: (sessionIds: string[]) => void
   startAgent: (sessionId: string, config: AgentStartConfig) => void
   fetchAgentConfigs: () => Promise<AgentConfig[]>
@@ -739,6 +742,18 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('confirm-task-merge', { taskGroupId }, 300000)
   }, [emitAck])
 
+  const groupSessions = useCallback((sessionIds: string[], title?: string): Promise<any> => {
+    return emitAck('group-sessions', { sessionIds, title }, 120000)
+  }, [emitAck])
+
+  const joinGroup = useCallback((taskGroupId: string, sessionId: string): Promise<any> => {
+    return emitAck('join-group', { taskGroupId, sessionId })
+  }, [emitAck])
+
+  const ungroupSession = useCallback((taskGroupId: string, sessionId: string): Promise<any> => {
+    return emitAck('ungroup-session', { taskGroupId, sessionId })
+  }, [emitAck])
+
   const emit = useCallback((event: string, ...args: any[]) => {
     socketRef.current?.emit(event, ...args)
   }, [])
@@ -1092,6 +1107,9 @@ socket.emit('get-cumulative-stats', {})
     previewTaskMerge,
     mergeTask,
     confirmTaskMerge,
+    groupSessions,
+    joinGroup,
+    ungroupSession,
     closeTab,
     startAgent,
     fetchAgentConfigs,

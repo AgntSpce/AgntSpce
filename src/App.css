@@ -4732,6 +4732,80 @@
   white-space: nowrap;
 }
 
+/* ── Open group banner ──────────────── */
+.group-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.group-banner-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-banner-count {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.group-banner-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.group-banner-btn + .group-banner-btn {
+  margin-left: 0;
+}
+
+.group-banner-btn.danger {
+  color: var(--danger, #ff453a);
+  border-color: var(--danger, #ff453a);
+}
+
+/* ── Sidebar agent rows (drag to group) ──────────────── */
+.agent-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+}
+
+.agent-row-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.agent-row-item:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.agent-row-item.active {
+  background: var(--bg-active, rgba(255, 255, 255, 0.09));
+}
+
+.agent-row-item:active {
+  cursor: grabbing;
+}
+
 /* ── TaskChat (v2 Tasks) ──────────────── */
 .task-chat-modal {
   min-width: 480px;
@@ -4879,6 +4953,95 @@
   flex: 1;
   resize: vertical;
   font-family: inherit;
+}
+
+/* ── Task wizard ──────────────── */
+.task-wizard-steps {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.task-wizard-step {
+  flex: 1;
+  font-size: 11px;
+  text-align: center;
+  padding: 6px 4px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+.task-wizard-step.active {
+  color: var(--accent);
+  background: var(--bg-active, rgba(255, 255, 255, 0.09));
+  font-weight: 600;
+}
+.task-wizard-step.done {
+  color: var(--text-primary);
+}
+.task-agent-logo {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+.task-agent-logo.sm {
+  width: 18px;
+  height: 18px;
+}
+.task-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.task-progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.task-progress-item.active {
+  color: var(--text-primary);
+}
+.task-progress-item.done {
+  color: var(--success, #34c759);
+}
+.task-progress-item.error {
+  color: var(--danger, #ff453a);
+}
+.task-progress-glyph {
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.task-progress-detail {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.task-assignments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.task-assignment-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.task-assignment-agent {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.task-assignment-title {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Merge confirm (v2 Tasks) ──────────────── */

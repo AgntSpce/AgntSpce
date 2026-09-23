@@ -200,7 +200,11 @@ export function createSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_collab_events_group ON collab_events(task_group_id);
     CREATE INDEX IF NOT EXISTS idx_collab_events_kind ON collab_events(kind);
     CREATE INDEX IF NOT EXISTS idx_collab_events_created ON collab_events(created_at);
-    CREATE INDEX IF NOT EXISTS idx_collab_events_file ON collab_events(task_group_id, file, kind);
+    -- NOTE: idx_collab_events_file lives in ensureCollabFileColumn (called by
+    -- migrateSchema), NOT here. db.exec runs this whole batch as one script:
+    -- on a pre-migration DB the CREATE TABLE is a no-op but the index build
+    -- references the missing file column and aborts schema creation with
+    -- "no such column: file" before migrations ever run.
   `)
 }
 
@@ -229,13 +233,26 @@ export function migrateSchema(db: Database.Database): void {
 
   // v2 collab_events.file column (added after step 1 shipped): backfill from
   // the JSON payload so claim lookups can filter in SQL.
+  ensureCollabFileColumn(db)
+}
+
+/** Ensure the first-class `file` column exists (repairs pre-migration DBs).
+ *  Returns true when the column is present afterwards. Loud on failure —
+ *  a silent skip here surfaces later as "no such column: file". */
+export function ensureCollabFileColumn(db: Database.Database): boolean {
   try {
     const collabColumns = db.prepare(`PRAGMA table_info(collab_events)`).all() as { name: string }[]
     if (collabColumns.length > 0 && !collabColumns.some(c => c.name === 'file')) {
       db.exec(`ALTER TABLE collab_events ADD COLUMN file TEXT`)
       db.exec(`UPDATE collab_events SET file = json_extract(payload, '$.file')
                WHERE kind IN ('claim', 'release') AND file IS NULL`)
+      console.log('[schema] backfilled collab_events.file')
     }
     db.exec(`CREATE INDEX IF NOT EXISTS idx_collab_events_file ON collab_events(task_group_id, file, kind)`)
-  } catch {}
+    const after = db.prepare(`PRAGMA table_info(collab_events)`).all() as { name: string }[]
+    return after.length === 0 || after.some(c => c.name === 'file')
+  } catch (e: any) {
+    console.error('[schema] collab_events.file repair failed:', e?.message || e)
+    return false
+  }
 }

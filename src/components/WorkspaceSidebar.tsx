@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, memo } from 'react'
 import type { WorkspaceInfo, SessionState, ExecutionEvent, AgentConfig, CommandEvent, TaskGroupInfo } from '../types'
 import { FileExplorer } from './FileExplorer'
 import { AGENT_TYPE_SET } from '../utils/agentTypes'
+import { getAgentColorImage } from '../agentImages'
 import './WorkspaceSidebar.css'
 
 interface PromptHistoryEntry {
@@ -78,6 +79,12 @@ interface Props {
   selectedTaskId?: string | null
   /** Called when a task row is clicked. */
   onSelectTask?: (id: string) => void
+  /** Group dropped sessions into a shared task. */
+  onGroupSessions?: (sessionIds: string[]) => void
+  /** Join a session to an existing task group. */
+  onJoinGroup?: (taskGroupId: string, sessionId: string) => void
+  /** Quick-create an empty task group (title only), then open it. */
+  onCreateTask?: (title: string) => void
 }
 
 // ── Workspace helpers ────────────────────────────────────────────────────
@@ -128,12 +135,16 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onPermanentDelete,
   onOpenCreateModal,
   showModal,
+  activeSessionId,
+  onSelectSession,
   taskGroups,
-  onOpenCreateTaskModal,
   selectedTaskId,
   onSelectTask,
   onOpenFolderDirect,
   onCloneDirect,
+  onGroupSessions,
+  onJoinGroup,
+  onCreateTask,
 }: {
   workspaces: WorkspaceInfo[]
   sessions: Record<string, SessionState>
@@ -165,6 +176,12 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onSelectTask?: (id: string) => void
   onOpenFolderDirect?: () => void
   onCloneDirect?: () => void
+  /** Group dropped sessions into a shared task. */
+  onGroupSessions?: (sessionIds: string[]) => void
+  /** Join a session to an existing task group. */
+  onJoinGroup?: (taskGroupId: string, sessionId: string) => void
+  /** Quick-create an empty task group (title only), then open it. */
+  onCreateTask?: (title: string) => void
 }) {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [showTrash, setShowTrash] = useState(false)
@@ -244,14 +261,62 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                     </div>
                   )}
                 </span>
-                {(taskGroups || []).length === 0 && (
-                  <div className="sidebar-empty sidebar-tasks-empty sidebar-tasks-empty-top sidebar-tasks-empty-inline">
-                    <p>No tasks here</p>
-                    <button className="sidebar-create-btn primary" onClick={() => onOpenCreateTaskModal?.()}>
-                      Add a Task
-                    </button>
+                {/* Agents + Add a Task live inside the card, right under the name */}
+                <div className="workspace-agents-top workspace-agents-inline">
+                  <div className="sidebar-header tasks-header">
+                    <h2>Agents</h2>
                   </div>
-                )}
+                  <div
+                    className="agent-row-list"
+                    onDragOver={e => e.preventDefault()}
+                    onDrop={e => {
+                      e.preventDefault()
+                      const dragged = e.dataTransfer.getData('text/agntspce-session')
+                      if (dragged) onGroupSessions?.([dragged])
+                    }}
+                  >
+                    {Object.values(sessions)
+                      .filter(s => AGENT_TYPE_SET.has(s.type))
+                      .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+                      .map(s => (
+                        <div
+                          key={s.id}
+                          className={`agent-row-item${activeSessionId === s.id ? ' active' : ''}`}
+                          draggable
+                          onDragStart={e => {
+                            e.dataTransfer.setData('text/agntspce-session', s.id)
+                            e.dataTransfer.effectAllowed = 'link'
+                          }}
+                          onDragOver={e => e.preventDefault()}
+                          onDrop={e => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            const dragged = e.dataTransfer.getData('text/agntspce-session')
+                            if (dragged && dragged !== s.id) onGroupSessions?.([dragged, s.id])
+                          }}
+                          onClick={() => onSelectSession?.(s.id)}
+                          title={`${s.type} · ${s.id.slice(-4)} — drag onto another agent to group`}
+                        >
+                          <img
+                            className="task-agent-logo"
+                            src={getAgentColorImage(s.type)}
+                            alt={s.type}
+                            draggable={false}
+                            onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                          />
+                          <span className="task-row-title">{s.type}</span>
+                        </div>
+                      ))}
+                  </div>
+                  <button
+                    className="sidebar-create-btn primary sidebar-add-task-btn"
+                    onClick={() => showModal('Task name:', (name) => {
+                      if (name.trim()) onCreateTask?.(name.trim())
+                    })}
+                  >
+                    Add a Task
+                  </button>
+                </div>
               </div>
             )
           })}
@@ -289,7 +354,13 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                   key={t.id}
                   className={`task-row${selectedTaskId === t.id ? ' active' : ''}`}
                   onClick={() => onSelectTask?.(t.id)}
-                  title={t.userGoal || t.title}
+                  title={`${t.userGoal || t.title} — drop an agent here to join`}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={e => {
+                    e.preventDefault()
+                    const dragged = e.dataTransfer.getData('text/agntspce-session')
+                    if (dragged) onJoinGroup?.(t.id, dragged)
+                  }}
                 >
                   <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
                   <span className="task-row-title">{t.title}</span>
@@ -333,8 +404,10 @@ export default memo(function WorkspaceSidebar({
   expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile, onFileDeleted,
   getWorkspaceTree, getFileInfo, gitFilesByWorkspace, fileTreeRefreshTick, createFile, createFolder, renameFile, deleteFile,
   title = 'Workspace', rowIcon = 'auto', hideCreateButton = false,
-  taskGroups, onOpenCreateTaskModal, selectedTaskId, onSelectTask,
+  taskGroups, selectedTaskId, onSelectTask,
   onOpenFolderDirect, onCloneDirect,
+  activeSessionId, onSelectSession, onGroupSessions, onJoinGroup,
+  onCreateTask,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -354,11 +427,15 @@ export default memo(function WorkspaceSidebar({
         onOpenCreateModal={onOpenCreateModal}
         showModal={showModal}
         taskGroups={taskGroups}
-        onOpenCreateTaskModal={onOpenCreateTaskModal}
         selectedTaskId={selectedTaskId}
         onSelectTask={onSelectTask}
         onOpenFolderDirect={onOpenFolderDirect}
         onCloneDirect={onCloneDirect}
+        activeSessionId={activeSessionId}
+        onSelectSession={onSelectSession}
+        onGroupSessions={onGroupSessions}
+        onJoinGroup={onJoinGroup}
+        onCreateTask={onCreateTask}
       />
     )
   }

@@ -3,8 +3,10 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import Database from 'better-sqlite3'
 import { StateManager } from '../orchestration/stateManager'
 import { WorktreeLifecycle } from '../orchestration/worktreeLifecycle'
+import { ensureCollabFileColumn } from '../orchestration/schema'
 
 const tmpDirs: string[] = []
 
@@ -145,6 +147,30 @@ describe('v2 task worktrees', () => {
     const branches = execFileSync('git', ['branch', '--list', res.branchName], { cwd: repo, encoding: 'utf-8' }).trim()
     expect(branches).toContain(res.branchName)
     execFileSync('git', ['branch', '-D', res.branchName], { cwd: repo })
+  })
+
+  it('repairs pre-migration collab_events tables missing the file column', () => {
+    const dir = tmpDir()
+    const dbPath = path.join(dir, 'legacy.db')
+    // Simulate a DB written before the file-column migration shipped.
+    const raw = new Database(dbPath)
+    raw.exec(`CREATE TABLE collab_events (id TEXT PRIMARY KEY, task_group_id TEXT NOT NULL, subtask_id TEXT NOT NULL, agent_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, expires_at INTEGER)`)
+    raw.exec(`INSERT INTO collab_events (id, task_group_id, subtask_id, agent_id, kind, payload, created_at, expires_at) VALUES ('e1', 'g1', 's1', 'claude', 'claim', '{"file":"src/a.ts"}', 1000, NULL)`)
+    raw.close()
+
+    // Direct repair helper backfills and indexes.
+    const check = new Database(dbPath)
+    expect(ensureCollabFileColumn(check)).toBe(true)
+    const cols = check.prepare(`PRAGMA table_info(collab_events)`).all() as { name: string }[]
+    expect(cols.some(c => c.name === 'file')).toBe(true)
+    check.close()
+
+    // Opening through StateManager (constructor migration path) keeps the
+    // repaired row queryable by the holder lookup.
+    const sm = new StateManager(dbPath, dir)
+    const holder = sm.getFileClaimHolder('g1', 'src/a.ts')
+    expect(holder?.subtaskId).toBe('s1')
+    expect(holder?.agentId).toBe('claude')
   })
 
   it('deduplicates branch names', () => {

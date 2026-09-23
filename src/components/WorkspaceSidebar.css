@@ -333,6 +333,15 @@
   min-width: 140px;
   justify-content: center;
 }
+.workspace-agents-inline {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.workspace-agents-inline .sidebar-add-task-btn {
+  width: calc(100% - 16px);
+  margin: 10px 8px 2px;
+}
 .sidebar-tasks-empty-inline {
   border-top: 1px solid var(--border);
   margin: 10px 4px 0;

@@ -11,13 +11,15 @@
 // Env (injected at session spawn):
 //   AGNTSPCE_TASK_ID     task group id
 //   AGNTSPCE_SUBTASK_ID  this agent's subtask id
+// Sessions grouped after spawn lack the env; pass --task/--subtask instead
+// (flags lose to env when both are present).
 //
 // Usage:
-//   agntspce-collab claim <file> [ttlMs]
-//   agntspce-collab release <file>
-//   agntspce-collab post "<message>"
-//   agntspce-collab request "<message>"
-//   agntspce-collab done "<summary>"
+//   agntspce-collab claim <file> [ttlMs] [--task <id> --subtask <id>]
+//   agntspce-collab release <file> [--task <id> --subtask <id>]
+//   agntspce-collab post "<message>" [--task <id> --subtask <id>]
+//   agntspce-collab request "<message>" [--task <id> --subtask <id>]
+//   agntspce-collab done "<summary>" [--task <id> --subtask <id>]
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -95,12 +97,22 @@ function render(group, subtasks, events, openClaims) {
   return lines.join('\n')
 }
 
+function takeFlag(args, name) {
+  const idx = args.findIndex(a => a === `--${name}`)
+  if (idx < 0 || idx + 1 >= args.length) return null
+  const value = args.splice(idx, 2)[1]
+  return value || null
+}
+
 function main() {
-  const [cmd, ...rest] = process.argv.slice(2)
-  const taskGroupId = process.env.AGNTSPCE_TASK_ID
-  const subtaskId = process.env.AGNTSPCE_SUBTASK_ID
+  const argv = process.argv.slice(2)
+  const flagTask = takeFlag(argv, 'task')
+  const flagSubtask = takeFlag(argv, 'subtask')
+  const [cmd, ...rest] = argv
+  const taskGroupId = process.env.AGNTSPCE_TASK_ID || flagTask
+  const subtaskId = process.env.AGNTSPCE_SUBTASK_ID || flagSubtask
   if (!taskGroupId || !subtaskId) {
-    console.error('agntspce-collab: AGNTSPCE_TASK_ID / AGNTSPCE_SUBTASK_ID are not set')
+    console.error('agntspce-collab: AGNTSPCE_TASK_ID / AGNTSPCE_SUBTASK_ID are not set (or pass --task <id> --subtask <id>)')
     process.exit(2)
   }
   const dbPath = findDbPath(process.cwd())

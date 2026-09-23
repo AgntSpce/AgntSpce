@@ -126,4 +126,23 @@ describe('agntspce-collab CLI', () => {
     const r = runCli(repo, '', '', ['post', 'hi'])
     expect(r.code).not.toBe(0)
   })
+
+  it('accepts --task/--subtask flags when env is missing', () => {
+    const { repo, sm, g, a } = setupRepo()
+    const r = (() => {
+      try {
+        const out = execFileSync(process.execPath, [CLI, 'post', 'via flags', '--task', g.id, '--subtask', a.id], {
+          cwd: repo,
+          env: { ...process.env, AGNTSPCE_TASK_ID: '', AGNTSPCE_SUBTASK_ID: '' },
+          encoding: 'utf-8',
+          timeout: 30000,
+        })
+        return { code: 0, out: String(out) }
+      } catch (e: any) {
+        return { code: e?.status ?? 1, out: '' }
+      }
+    })()
+    expect(r.code).toBe(0)
+    expect(sm.getCollabEvents(g.id).some(e => e.kind === 'progress')).toBe(true)
+  })
 })
