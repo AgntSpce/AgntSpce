@@ -3191,7 +3191,7 @@
 /* Center dashboard tab contents on screen */
 .dashboard-body > * {
   width: 100%;
-  max-width: 1024px;
+  max-width: 1400px;
 }
 
 .dashboard-overview-card,
@@ -3210,24 +3210,26 @@
 /* Dashboard Tab Navigation */
 .dashboard-tabs {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 4px;
-  padding: 4px;
+  padding: 5px;
   margin: 0 auto;
   background: var(--bg-surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  width: fit-content;
+  border-radius: 12px;
+  width: 72%;
+  max-width: 1400px;
 }
 
 .dashboard-tab {
+  flex: 1;
   border: none;
   background: transparent;
   color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 500;
-  padding: 7px 16px;
-  border-radius: 7px;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 11px 20px;
+  border-radius: 8px;
   cursor: pointer;
   transition: all 0.12s;
 }
@@ -4806,6 +4808,66 @@
   cursor: grabbing;
 }
 
+/* ── Expandable task members (VS Code explorer style) ──────────────── */
+.task-member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 4px 22px;
+}
+
+.task-member-row {
+  cursor: pointer;
+}
+
+.task-member-row.pending {
+  opacity: 0.55;
+}
+
+.task-member-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 8px;
+}
+
+.task-row .workspace-tree-actions {
+  margin-left: auto;
+  position: relative;
+}
+
+/* Task-row ⋮ uses .task-row, not .workspace-tree-row, so it needs its own
+   hover rule — otherwise the button stays at opacity 0 (invisible). */
+.task-row:hover .workspace-tree-actions {
+  opacity: 1;
+}
+
+/* Task row body: name on top, member agent logos underneath. */
+.task-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.task-row-logos {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.task-logo-sm {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+
+/* Ungrouped agents fallback (only rendered when non-empty). */
+.workspace-ungrouped {
+  margin-top: 4px;
+}
+
 /* ── TaskChat (v2 Tasks) ──────────────── */
 .task-chat-modal {
   min-width: 480px;
@@ -5341,11 +5403,6 @@
 
 .parallel-field-half {
   flex: 1;
-}
-
-/* ── Grouped session styling ──────────────── */
-.terminal-pane.grouped {
-  border-left: 3px solid var(--accent);
 }
 
 /* ── Startup UI ─────────────────────────── */

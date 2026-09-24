@@ -883,12 +883,25 @@ export class SessionManager extends EventEmitter {
       session.status = 'exited'
       this.outputFilter.finalizeCommand(sessionId, exitCode ?? 1)
       this.persistSessionBuffer(sessionId)
-      const isActive = this.sessions.get(sessionId) === session
+      const isActive = this.sessions.get(sessionId) === session && session.pty === ptyProcess
       if (isActive) {
         try {
           this.io.emit('session-exited', { sessionId, exitCode, signal })
         } catch { }
       }
+      if (isActive && config.taskGroupId) {
+        session.pty = null
+        session.restorable = true
+        session.status = 'idle'
+        session.autoStarted = false
+        session.claudeLaunchState = null
+        this.orchestrator?.parkSession(sessionId)
+        try {
+          this.io.emit('session-resumed', { sessionId, sessions: this.getSessionStates() })
+        } catch { }
+        return
+      }
+      if (!isActive) return
       const canRestart = !this.orchestrator || this.orchestrator.canRestart(sessionId)
       if (isActive && config.type === 'claude' && this.autoRestartSessions && !this.isWorkspaceSwitching && canRestart) {
         this.cleanupSessionBuffer(sessionId)
@@ -980,9 +993,10 @@ export class SessionManager extends EventEmitter {
     })
   }
 
-  closeSession(sessionId: string): boolean {
+  closeSession(sessionId: string, options: { preserveForResume?: boolean } = {}): boolean {
     const session = this.sessions.get(sessionId)
     if (!session) return false
+    const preserveForResume = options.preserveForResume === true
     this.flushTerminalOutput(sessionId)
     session.slotRelease?.()
     this.sessionHistory.push({
@@ -999,8 +1013,10 @@ export class SessionManager extends EventEmitter {
     this.persistSessionBuffer(sessionId)
     try {
       clearInterval(session.processMonitor!)
-      if (session.pty) {
-        try { session.pty.kill() } catch { }
+      const pty = session.pty
+      session.pty = null
+      if (pty) {
+        try { pty.kill() } catch { }
       }
     } catch { }
     this.outputFilter.finalizeCommand(sessionId)
@@ -1009,9 +1025,18 @@ export class SessionManager extends EventEmitter {
     this.cavemanService.cleanup(sessionId)
     this.tokenUsageTracker.cleanup(sessionId)
     this.finalizeSessionContext(sessionId)
-    this.sessions.delete(sessionId)
-    this.cleanupSessionBuffer(sessionId)
-    this.orchestrator?.unregisterSession(sessionId)
+    if (preserveForResume) {
+      session.pty = null
+      session.restorable = true
+      session.status = 'idle'
+      session.autoStarted = false
+      session.claudeLaunchState = null
+      this.orchestrator?.parkSession(sessionId)
+    } else {
+      this.sessions.delete(sessionId)
+      this.cleanupSessionBuffer(sessionId)
+      this.orchestrator?.unregisterSession(sessionId)
+    }
     this.statusDetector?.reset(sessionId)
     this.lastStatusRefresh.delete(sessionId)
     this.lastStatusBytes.delete(sessionId)
@@ -1020,7 +1045,7 @@ export class SessionManager extends EventEmitter {
     return true
   }
 
-  async createRawSession(type: string, workspacePath?: string, existingSessionId?: string): Promise<{ sessionId: string } | null> {
+  async createRawSession(type: string, workspacePath?: string, existingSessionId?: string, taskGroupId?: string | null, subtaskId?: string | null): Promise<{ sessionId: string } | null> {
     const sessionId = existingSessionId || `raw-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     const cwd = workspacePath || this.workspace?.repository?.path || process.env.HOME || os.homedir() || '/tmp'
     const args = type === 'shell'
@@ -1033,9 +1058,11 @@ export class SessionManager extends EventEmitter {
         args,
         cwd,
         type,
-        worktreeId: '',
+        worktreeId: taskGroupId || '',
         repositoryName: '',
         repositoryType: '',
+        taskGroupId: taskGroupId || null,
+        subtaskId: subtaskId || null,
       })
       const session = this.sessions.get(sessionId)
       if (!session) {
@@ -1051,6 +1078,40 @@ export class SessionManager extends EventEmitter {
       console.error('createRawSession failed:', type, e?.message || e)
       return null
     }
+  }
+
+  setSessionTaskLink(sessionId: string, taskGroupId: string, subtaskId: string): boolean {
+    const session = this.sessions.get(sessionId)
+    if (!session || !taskGroupId || !subtaskId) return false
+    session.config = {
+      ...session.config,
+      taskGroupId,
+      subtaskId,
+      worktreeId: session.config.worktreeId || taskGroupId,
+    }
+    session.sessionGroupId = `task-${taskGroupId}`
+    try {
+      const sm = this.orchestrator?.getStateManager()
+      const existing = sm?.getSession(sessionId)
+      if (sm) {
+        sm.upsertSession({
+          id: sessionId,
+          workspaceId: this.workspace?.id ?? null,
+          sessionType: session.type,
+          agentId: session.type,
+          taskId: existing?.taskId ?? null,
+          taskGroupId,
+          subtaskId,
+          status: session.status,
+          branch: session.branch,
+          worktreeId: session.config.worktreeId || taskGroupId,
+          lastActivity: session.lastActivity,
+        })
+      }
+    } catch (e: any) {
+      console.warn('[sessionManager] task link persistence failed:', sessionId, e?.message || e)
+    }
+    return true
   }
 
   restartSession(sessionId: string) {
@@ -1116,52 +1177,104 @@ export class SessionManager extends EventEmitter {
 
   getSessionSaveData(): SavedSessionData[] {
     const data: SavedSessionData[] = []
+    const sm = this.orchestrator?.getStateManager()
     for (const [id, s] of this.sessions) {
       const config = s.agentStartConfig
+      const persisted = sm?.getSession(id)
+      const inferred = this.inferTaskLink(id)
+      const taskGroupId = s.config?.taskGroupId ?? persisted?.taskGroupId ?? inferred?.taskGroupId ?? null
+      const subtaskId = s.config?.subtaskId ?? persisted?.subtaskId ?? inferred?.subtaskId ?? null
       data.push({
         id,
         type: s.type,
         cwd: s.config?.cwd || '',
+        taskGroupId,
+        subtaskId,
+        sessionGroupId: s.sessionGroupId ?? null,
+        worktreeId: s.config?.worktreeId || undefined,
         agentConfig: config
           ? {
-              agentId: config.agentId,
-              mode: config.mode,
-              flags: config.flags,
-              model: config.model,
-              reasoning: config.reasoning,
-              verbosity: config.verbosity,
-              resumeId: config.resumeId,
-            }
+            agentId: config.agentId,
+            mode: config.mode,
+            flags: config.flags,
+            model: config.model,
+            reasoning: config.reasoning,
+            verbosity: config.verbosity,
+            resumeId: config.resumeId,
+          }
           : undefined,
       })
     }
     return data
   }
 
+  private inferTaskLink(sessionId: string): { taskGroupId: string; subtaskId: string } | null {
+    try {
+      const sm = this.orchestrator?.getStateManager()
+      if (!sm) return null
+      const persisted = sm.getSession(sessionId)
+      if (persisted?.taskGroupId && persisted.subtaskId) {
+        return { taskGroupId: persisted.taskGroupId, subtaskId: persisted.subtaskId }
+      }
+      for (const group of sm.listTaskGroups()) {
+        const subtask = sm.listSubTasks(group.id).find(s => s.sessionId === sessionId)
+        if (subtask) return { taskGroupId: group.id, subtaskId: subtask.id }
+      }
+    } catch {}
+    return null
+  }
+
   async restoreSessions(sessions: SavedSessionData[]): Promise<void> {
-    // Shells always restore live (they have no resume UI — a placeholder
-    // shell would be a dead terminal). The first agent also restores live
-    // (PTY + agent started, no resume button) — matching the pre-lazy-restore
-    // behavior. Remaining agents are registered as metadata-only placeholders
-    // and spawned on demand via resumeSession().
     let isFirstAgent = true
     for (const saved of sessions) {
       if (this.sessions.has(saved.id)) continue
-      this.registerRestorableSession(saved)
-      if (saved.type === 'shell' || isFirstAgent) {
-        if ((AGENT_TYPES as readonly string[]).includes(saved.type)) isFirstAgent = false
-        await this.resumeSession(saved.id)
+      const inferred = this.inferTaskLink(saved.id)
+      const restored = inferred && !saved.taskGroupId
+        ? { ...saved, taskGroupId: inferred.taskGroupId, subtaskId: inferred.subtaskId }
+        : saved
+      this.registerRestorableSession(restored)
+      const restoredSubtaskId = this.restoreTaskSessionLink(restored)
+      if (restored.taskGroupId && restoredSubtaskId) this.setSessionTaskLink(restored.id, restored.taskGroupId, restoredSubtaskId)
+      if (restored.taskGroupId) continue
+      if (restored.type === 'shell' || isFirstAgent) {
+        if ((AGENT_TYPES as readonly string[]).includes(restored.type)) isFirstAgent = false
+        await this.resumeSession(restored.id)
       }
+    }
+  }
+
+  private restoreTaskSessionLink(saved: SavedSessionData): string | null {
+    if (!saved.taskGroupId) return null
+    try {
+      const sm = this.orchestrator?.getStateManager()
+      const group = sm?.getTaskGroup(saved.taskGroupId)
+      if (!sm || !group) return null
+      const linked = sm.listSubTasks(group.id).find(s => s.sessionId === saved.id)
+      const byId = saved.subtaskId ? sm.getSubTask(saved.subtaskId) : null
+      const subtask = linked || (byId?.taskGroupId === group.id ? byId : null) || sm.addSubTask({
+        taskGroupId: group.id,
+        agentId: saved.type,
+        title: saved.type,
+      })
+      if (subtask.sessionId !== saved.id) sm.updateSubTaskStatus(subtask.id, 'running', saved.id)
+      if (group.status === 'planning' || group.status === 'paused') sm.updateTaskGroup(group.id, { status: 'active' })
+      return subtask.id
+    } catch (e: any) {
+      console.warn('[sessionManager] task session restoration failed:', saved.id, e?.message || e)
+      return null
     }
   }
 
   private registerRestorableSession(saved: SavedSessionData): void {
     const cwd = saved.cwd || this.workspace?.repository?.path || process.env.HOME || '/tmp'
+    const defaultConfig = (AGENT_TYPES as readonly string[]).includes(saved.type as any)
+      ? this.agentManager?.getDefaultConfig(saved.type)
+      : null
     const session: Session = {
       id: saved.id,
       pty: null,
       type: saved.type as any,
-      worktreeId: '',
+      worktreeId: saved.worktreeId || saved.taskGroupId || '',
       repositoryName: '',
       repositoryType: '',
       status: 'idle',
@@ -1175,9 +1288,11 @@ export class SessionManager extends EventEmitter {
         args: buildShellArgs(`cd ${shq(cwd)}`),
         cwd,
         type: saved.type,
-        worktreeId: '',
+        worktreeId: saved.worktreeId || saved.taskGroupId || '',
         repositoryName: '',
         repositoryType: '',
+        taskGroupId: saved.taskGroupId ?? null,
+        subtaskId: saved.subtaskId ?? null,
       },
       statusChangedAt: Date.now(),
       pendingStatus: null,
@@ -1186,7 +1301,8 @@ export class SessionManager extends EventEmitter {
       autoStarted: false,
       claudeLaunchState: null,
       restorable: true,
-      agentStartConfig: saved.agentConfig,
+      sessionGroupId: saved.sessionGroupId ?? (saved.taskGroupId ? `task-${saved.taskGroupId}` : undefined),
+      agentStartConfig: saved.agentConfig || defaultConfig || undefined,
       workspace: this.workspace?.id || null,
     }
     this.sessions.set(saved.id, session)
@@ -1199,15 +1315,23 @@ export class SessionManager extends EventEmitter {
     const savedType = session.type
     const savedCwd = session.config?.cwd || this.workspace?.repository?.path || process.env.HOME || '/tmp'
     const savedAgentConfig = session.agentStartConfig
+    const taskGroupId = session.config.taskGroupId || null
+    const subtaskId = session.config.subtaskId || null
 
-    // Spawn the real PTY for this session id.
-    const result = await this.createRawSession(savedType, savedCwd, sessionId)
+    const result = await this.createRawSession(savedType, savedCwd, sessionId, taskGroupId, subtaskId)
     if (!result) return false
 
-    // The placeholder is now a live session — clear the flag so the
-    // renderer creates the xterm instance and stops treating it as
-    // a saved-but-not-running session.
-    session.restorable = false
+    const resumed = this.sessions.get(sessionId)
+    if (!resumed) return false
+    resumed.restorable = false
+    const restoredSubtaskId = this.restoreTaskSessionLink({
+      id: sessionId,
+      type: savedType,
+      cwd: savedCwd,
+      taskGroupId,
+      subtaskId,
+    })
+    if (taskGroupId && restoredSubtaskId) this.setSessionTaskLink(sessionId, taskGroupId, restoredSubtaskId)
 
     if (savedAgentConfig) {
       try {
@@ -1409,7 +1533,10 @@ export class SessionManager extends EventEmitter {
     // ensuring the agent CLI (claude, opencode, etc.) and any subprocesses inherit them.
     const binDir = AGNTSPCE_BIN_DIR || path.resolve(__dirname, '..', '..', 'bin')
     const wrapperPathEnv = AGNTSPCE_BIN_DIR ? path.join(AGNTSPCE_BIN_DIR, 'agntspce') : (process.resourcesPath ? path.join(process.resourcesPath, 'rtk', 'agntspce') : path.resolve(__dirname, '..', '..', 'bin', 'agntspce'))
-    const envPrefix = `export AGNTSPCE_ENABLED=1; export AGNTSPCE_WRAPPER_PATH="${wrapperPathEnv}"; export AGNTSPCE_RTK_SESSION="${rtkManager.generateRtkToken()}"; export PATH="${binDir}:$PATH"; `
+    const taskEnv = session.config.taskGroupId && session.config.subtaskId
+      ? ` export AGNTSPCE_TASK_ID=${shq(session.config.taskGroupId)}; export AGNTSPCE_SUBTASK_ID=${shq(session.config.subtaskId)};`
+      : ''
+    const envPrefix = `export AGNTSPCE_ENABLED=1; export AGNTSPCE_WRAPPER_PATH="${wrapperPathEnv}"; export AGNTSPCE_RTK_SESSION="${rtkManager.generateRtkToken()}"; export PATH="${binDir}:$PATH";${taskEnv} `
     this.writeToSession(sessionId, envPrefix + command + newline)
 
     // 2.1 dispatch preamble: deliver the shared orchestration state as the
@@ -1495,6 +1622,8 @@ export class SessionManager extends EventEmitter {
         branch: s.branch,
         lastActivity: s.lastActivity,
         sessionGroupId: s.sessionGroupId,
+        taskGroupId: s.config.taskGroupId,
+        subtaskId: s.config.subtaskId,
         restorable: !!s.restorable,
       }
     }

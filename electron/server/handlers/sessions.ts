@@ -1,5 +1,6 @@
 import type { Socket } from 'socket.io'
 import type { ServerContext } from '../context'
+import { linkSessionToGroup } from '../../services/orchestration/groupSync'
 
 export function registerSessionHandlers(ctx: ServerContext, socket: Socket): void {
   socket.on('terminal-input', ({ sessionId, data, input }) => {
@@ -37,11 +38,24 @@ export function registerSessionHandlers(ctx: ServerContext, socket: Socket): voi
     }
   })
 
-  socket.on('create-agent-session', async ({ type, workspacePath, config }) => {
+  socket.on('create-agent-session', async ({ type, workspacePath, config, taskGroupId }) => {
     try {
       const t = String(type || '').trim().toLowerCase() || 'shell'
       const result = await ctx.sessionManager.createRawSession(t, workspacePath)
       if (result) {
+        if (taskGroupId) {
+          try {
+            const sm = ctx.agentOrchestrator.getStateManager()
+            const group = sm?.getTaskGroup(taskGroupId)
+            if (sm && group) {
+              const linked = linkSessionToGroup(sm, ctx.sessionManager.getSessionStates(), taskGroupId, result.sessionId, group.repoPath)
+              ctx.sessionManager.setSessionTaskLink?.(result.sessionId, taskGroupId, linked.subtask.id)
+              ctx.io.emit('task-groups-changed', { workspaceId: '' })
+            }
+          } catch (e: any) {
+            console.warn('[sessions] spawn group-link failed:', e?.message || e)
+          }
+        }
         try {
           ctx.sessionManager.startAgentWithConfig(result.sessionId, config)
         } catch (e: any) {
@@ -86,9 +100,20 @@ export function registerSessionHandlers(ctx: ServerContext, socket: Socket): voi
   socket.on('close-tab', async ({ sessionIds }) => {
     try {
       const ids = Array.isArray(sessionIds) ? sessionIds : []
+      const preserved: string[] = []
       for (const id of ids) {
-        ctx.sessionManager.closeSession(id)
-        ctx.io.emit('session-closed', { sessionId: id })
+        const before = ctx.sessionManager.getSessionStates()[id]
+        const preserve = !!before?.taskGroupId
+        ctx.sessionManager.closeSession(id, { preserveForResume: preserve })
+        if (preserve) preserved.push(id)
+      }
+      const states = ctx.sessionManager.getSessionStates()
+      for (const id of ids) {
+        if (preserved.includes(id)) {
+          ctx.io.emit('session-resumed', { sessionId: id, sessions: states })
+        } else {
+          ctx.io.emit('session-closed', { sessionId: id })
+        }
       }
       await ctx.autoSaveSessions()
     } catch (error: any) {

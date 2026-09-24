@@ -187,6 +187,14 @@
   padding: 0 8px;
 }
 
+/* The generic .workspace-list rule is flex:1 (for the file tree). In the
+   workspace panel that inflates the card container to full height and shoves
+   everything after it (tasks, buttons) to the bottom — opt out. */
+.orca-workspace-sidebar .workspace-list {
+  flex: none;
+  overflow: visible;
+}
+
 .orca-ws-card {
   border-radius: 8px;
   padding: 3px 4px 4px 0;
@@ -310,8 +318,31 @@
   justify-content: center;
 }
 
+.task-logo-img {
+  object-fit: contain;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.task-logo-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-radius: 3px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.task-row-logos {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .workspace-tasks-top {
-  margin-top: 10px;
+  margin-top: 2px;
   display: flex;
   flex-direction: column;
   align-items: stretch;

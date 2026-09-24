@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import type { CreateTaskGroupInput, TaskDetailData, TaskGroupInfo } from '../types'
+import type { CreateTaskGroupInput, TaskGroupInfo } from '../types'
 import { getAgentColorImage } from '../agentImages'
 
 export interface InstalledAgent {
@@ -25,8 +25,6 @@ interface CreateTaskModalProps {
   open: boolean
   onClose: () => void
   onCreate: (input: CreateTaskGroupInput) => Promise<{ ok: boolean; taskGroup?: TaskGroupInfo; error?: string }>
-  onLaunch: (taskGroupId: string) => Promise<any>
-  onDetail: (taskGroupId: string) => Promise<{ ok: boolean; detail?: TaskDetailData; error?: string }>
   onLaunched?: (taskGroupId: string) => void
   agentsList: InstalledAgent[]
   repoName: string
@@ -41,10 +39,10 @@ const STEP_LABELS: { id: Step; label: string }[] = [
   { id: 'goal', label: 'Task' },
   { id: 'name', label: 'Name' },
   { id: 'agents', label: 'Agents' },
-  { id: 'progress', label: 'Launch' },
+  { id: 'progress', label: 'Create' },
 ]
 
-export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onDetail, onLaunched, agentsList, repoName, repoPath, availableRepos }: CreateTaskModalProps) {
+export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, agentsList, repoName, repoPath, availableRepos }: CreateTaskModalProps) {
   const installed = agentsList.length > 0 ? agentsList : [{ id: 'claude', name: 'Claude Code', icon: '🤖' }]
   const [step, setStep] = useState<Step>('goal')
   const [goal, setGoal] = useState('')
@@ -52,7 +50,6 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onD
   const [pinnedRepo, setPinnedRepo] = useState('')
   const [rows, setRows] = useState<AgentRow[]>([{ key: rowKey++, agentId: installed[0]!.id }])
   const [progress, setProgress] = useState<ProgressItem[]>([])
-  const [assignments, setAssignments] = useState<{ agentId: string; title: string; scope: string }[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [doneId, setDoneId] = useState<string | null>(null)
@@ -66,7 +63,6 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onD
       setPinnedRepo('')
       setRows([{ key: rowKey++, agentId: installed[0]!.id }])
       setProgress([])
-      setAssignments([])
       setBusy(false)
       setError('')
       setDoneId(null)
@@ -108,26 +104,26 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onD
     setRows(prev => (prev.length <= 1 ? prev : prev.filter(r => r.key !== key)))
   }
 
-  async function startLaunch() {
+  // Create-only: no assignment function. The task record (+ optional member
+  // shells) is created with its isolated git worktree; agents are added
+  // afterwards in the group's agents page and auto-join.
+  async function startCreate() {
     const agents = rows.filter(r => r.agentId).map(r => ({ agentId: r.agentId }))
-    if (agents.length === 0) {
-      setError('Select at least one agent.')
+    const trimmedTitle = title.trim() || goal.trim().slice(0, 60)
+    if (!trimmedTitle) {
+      setError('Give the task a name first.')
       return
     }
-    const trimmedTitle = title.trim() || goal.trim().slice(0, 60)
     setError('')
     setBusy(true)
     setStep('progress')
     setProgress([
       { label: 'Creating task', state: 'active' },
-      { label: 'Creating git worktree', state: 'pending' },
-      { label: 'Assigning subtasks', state: 'pending' },
-      { label: 'Spawning agents', state: 'pending' },
+      { label: 'Creating isolated git worktree', state: 'pending' },
     ])
     const mark = (idx: number, patch: Partial<ProgressItem>) =>
       setProgress(prev => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)))
     try {
-      // 1. Task record (+ subtask shells).
       const created = await onCreate({
         title: trimmedTitle,
         userGoal: goal.trim(),
@@ -136,34 +132,12 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onD
         ...(pinnedRepo ? { repoPath: pinnedRepo } : {}),
       })
       if (!created?.ok || !created.taskGroup) throw new Error(created?.error || 'Failed to create task')
-      const taskId = created.taskGroup.id
       mark(0, { state: 'done', detail: trimmedTitle })
-      // 2–4. The assignment function plans the split, creates the isolated
-      // git worktree, and spawns every agent with its own subtask prompt.
-      mark(1, { state: 'active' })
-      mark(2, { state: 'active' })
-      mark(3, { state: 'active' })
-      const launched = await onLaunch(taskId)
-      if (launched && launched.ok === false) throw new Error(launched.error || 'Failed to launch agents')
-      mark(1, { state: 'done', detail: 'isolated branch ready' })
-      mark(2, { state: 'done', detail: launched?.usedFallback ? 'deterministic split' : 'planned by model' })
-      // Show which subtask each agent received.
-      try {
-        const res = await onDetail(taskId)
-        const subs = res?.detail?.subtasks || []
-        if (subs.length > 0) {
-          setAssignments(subs.map(s => ({
-            agentId: s.agentId,
-            title: s.title || s.status,
-            scope: (s.scopeFiles || []).join(', '),
-          })))
-        }
-      } catch {}
-      mark(3, { state: 'done', detail: `${launched?.sessionIds?.length ?? agents.length} agent session(s) started` })
-      setDoneId(taskId)
+      mark(1, { state: 'done', detail: created.taskGroup.branchName || 'ready' })
+      setDoneId(created.taskGroup.id)
     } catch (e: any) {
       setProgress(prev => prev.map(p => (p.state === 'active' ? { ...p, state: 'error' } : p)))
-      setError(e?.message || 'Launch failed')
+      setError(e?.message || 'Create failed')
     }
     setBusy(false)
   }
@@ -287,18 +261,6 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onD
                 </div>
               ))}
             </div>
-            {assignments.length > 0 && (
-              <div className="task-assignments">
-                {assignments.map((a, i) => (
-                  <div key={i} className="task-assignment-row">
-                    <img className="task-agent-logo sm" src={getAgentColorImage(a.agentId)} alt={a.agentId} draggable={false}
-                      onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                    <span className="task-assignment-agent">{a.agentId}</span>
-                    <span className="task-assignment-title">{a.title}{a.scope ? ` — ${a.scope}` : ''}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
 
@@ -322,11 +284,11 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunch, onD
                 onClick={() => {
                   if (step === 'goal') nextFromGoal()
                   else if (step === 'name') nextFromName()
-                  else startLaunch()
+                  else startCreate()
                 }}
                 disabled={busy}
               >
-                {step === 'agents' ? 'Launch task' : 'Next'}
+                {step === 'agents' ? 'Create task' : 'Next'}
               </button>
             </>
           ) : (

@@ -243,34 +243,47 @@ function registerHooks(rtkBinaryPath: string): { registered: string[]; failed: s
 // commands to `rtk git status` (its own engine) instead of `agntspce git
 // status`, silently breaking token stats.
 //
-// To guarantee the app's RTK fork runs, patch every registered hook command
-// to use the ABSOLUTE path of the active RTK binary.
+// To guarantee the app's RTK fork runs, every registered hook command must use
+// the ABSOLUTE path of the active RTK binary.
+//
+// We also collapse duplicates. `rtk init -g --auto-patch` APPENDS a fresh
+// PreToolUse entry on every launch and never removes the old ones, so without
+// dedup the settings file grows by one identical hook per app start (hundreds
+// of them in practice). Collapsing to a single entry fixes both the unbounded
+// growth and the possibility that a competing upstream `rtk` hook wins the
+// rewrite.
 
 type HookPatchResult = { patched: string[] }
+
+// Detect an RTK PreToolUse rewrite hook for Claude, anchored at the START of the
+// command so unrelated user hooks that merely mention "rtk hook claude" are not
+// touched. Handles every form `rtk init -g --auto-patch` can write:
+//   rtk hook claude
+//   /abs/path/rtk hook claude
+//   "/abs/path/rtk" hook claude      ← quoted (paths with spaces, e.g. userData)
+//   /abs/path/rtk.exe hook claude    ← Windows
+// Returns the trailing args after `claude` (usually empty), or null when the
+// command is not the RTK claude rewrite hook.
+function parseRtkClaudeHook(command: unknown): string[] | null {
+  if (typeof command !== 'string') return null
+  const m = command.trim().match(/^(?:"([^"]*)"|(\S+))\s+hook\s+claude\b(.*)$/i)
+  if (!m) return null
+  const exe = m[1] ?? m[2] ?? ''
+  const base = path.basename(exe).toLowerCase()
+  if (base !== 'rtk' && base !== 'rtk.exe') return null
+  return (m[3] || '').split(/\s+/).filter(Boolean)
+}
 
 function patchHookCommands(rtkBinaryPath: string): HookPatchResult {
   const patched: string[] = []
   if (!rtkBinaryPath) return { patched }
-  const binaryName = path.basename(rtkBinaryPath) // 'rtk' or 'rtk.exe'
   // JSON-escaped absolute path. Spaces in userData dirs require shell quoting.
   const absCommand = `"${rtkBinaryPath.replace(/"/g, '\\"')}"`
 
-  const candidates: { label: string; file: string; matcher: (data: any) => boolean }[] = [
-    {
-      label: 'claude',
-      file: path.join(os.homedir(), '.claude', 'settings.json'),
-      matcher: data => !!data?.hooks?.PreToolUse,
-    },
-    {
-      label: 'cursor',
-      file: path.join(os.homedir(), '.cursor', 'settings.json'),
-      matcher: () => true,
-    },
-    {
-      label: 'opencode',
-      file: path.join(os.homedir(), '.config', 'opencode', 'opencode.json'),
-      matcher: data => !!data?.hooks?.PreToolUse,
-    },
+  const candidates: { label: string; file: string }[] = [
+    { label: 'claude', file: path.join(os.homedir(), '.claude', 'settings.json') },
+    { label: 'cursor', file: path.join(os.homedir(), '.cursor', 'settings.json') },
+    { label: 'opencode', file: path.join(os.homedir(), '.config', 'opencode', 'opencode.json') },
   ]
 
   for (const c of candidates) {
@@ -278,28 +291,47 @@ function patchHookCommands(rtkBinaryPath: string): HookPatchResult {
     try {
       const raw = fs.readFileSync(c.file, 'utf-8')
       const data = JSON.parse(raw)
-      if (!c.matcher(data)) continue
-      let changed = false
-      const hooks = data.hooks?.PreToolUse
-      if (Array.isArray(hooks)) {
-        for (const entry of hooks) {
-          const hookDefs = Array.isArray(entry?.hooks) ? entry.hooks : []
-          for (const h of hookDefs) {
-            if (typeof h?.command !== 'string') continue
-            const trimmed = h.command.trim()
-            // Match `rtk hook <anything>` or `<...>/rtk hook <anything>`
-            if (trimmed === `${binaryName} hook claude` || trimmed.endsWith(`${path.sep}${binaryName} hook claude`)) {
-              h.command = `${absCommand} hook claude`
-              changed = true
-            }
+      const pre = data?.hooks?.PreToolUse
+      if (!Array.isArray(pre)) continue
+
+      // Collect the RTK claude-rewrite hooks (bare `rtk`, unquoted absolute, or
+      // quoted absolute) across every entry and drop them all. The first one
+      // is kept as the template for the single canonical entry.
+      let canonical: { entry: any; hook: any; args: string[] } | null = null
+      let removed = 0
+      const rebuilt: any[] = []
+
+      for (const entry of pre) {
+        if (!entry || !Array.isArray(entry.hooks)) { rebuilt.push(entry); continue }
+        const keep: any[] = []
+        for (const h of entry.hooks) {
+          const args = parseRtkClaudeHook(h?.command)
+          if (args) {
+            if (!canonical) canonical = { entry, hook: h, args }
+            removed++
+          } else {
+            keep.push(h)
           }
         }
+        // Keep the entry only if it still holds non-RTK hooks; otherwise drop it.
+        if (keep.length > 0) rebuilt.push({ ...entry, hooks: keep })
       }
-      if (changed) {
-        fs.writeFileSync(c.file, JSON.stringify(data, null, 2), 'utf-8')
-        patched.push(c.label)
-        console.log(`[agntspce] Patched hook command → absolute path for ${c.label}`)
-      }
+
+      if (removed === 0) continue
+
+      // Re-add exactly one RTK hook, pinned to the app's absolute binary so a
+      // clean login shell can never resolve a different `rtk` (e.g. homebrew's,
+      // which would rewrite to `rtk <cmd>` instead of `agntspce <cmd>`).
+      const tail = canonical!.args.length > 0 ? ' ' + canonical!.args.join(' ') : ''
+      rebuilt.push({
+        ...canonical!.entry,
+        hooks: [{ ...canonical!.hook, command: `${absCommand} hook claude${tail}` }],
+      })
+
+      data.hooks.PreToolUse = rebuilt
+      fs.writeFileSync(c.file, JSON.stringify(data, null, 2), 'utf-8')
+      patched.push(c.label)
+      console.log(`[agntspce] Collapsed ${removed} ${c.label} RTK hook(s) → single absolute-path entry`)
     } catch (e: any) {
       console.warn(`[agntspce] Failed to patch hook command for ${c.label}:`, e.message)
     }

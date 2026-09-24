@@ -83,12 +83,14 @@ interface UseSocketReturn {
   groupSessions: (sessionIds: string[], title?: string) => Promise<any>
   joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
   ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
+  renameTaskGroup: (taskGroupId: string, title: string) => Promise<any>
+  deleteTaskGroup: (taskGroupId: string) => Promise<any>
   closeTab: (sessionIds: string[]) => void
   startAgent: (sessionId: string, config: AgentStartConfig) => void
   fetchAgentConfigs: () => Promise<AgentConfig[]>
   fetchInstalledAgents: () => Promise<Record<string, boolean>>
   createRawSession: (type?: string, workspacePath?: string) => void
-  createAgentSession: (type: string, config: any, workspacePath?: string) => void
+  createAgentSession: (type: string, config: any, workspacePath?: string, taskGroupId?: string | null) => void
   emit: (event: string, ...args: any[]) => void
   onFilterEvent: (cb: (data: FilterEvent) => void) => () => void
   filterStats: FilterStats
@@ -644,8 +646,8 @@ socket.emit('get-cumulative-stats', {})
     socketRef.current?.emit('create-raw-session', { type, workspacePath })
   }, [])
 
-  const createAgentSession = useCallback((type: string, config: any, workspacePath?: string) => {
-    socketRef.current?.emit('create-agent-session', { type, workspacePath, config })
+  const createAgentSession = useCallback((type: string, config: any, workspacePath?: string, taskGroupId?: string | null) => {
+    socketRef.current?.emit('create-agent-session', { type, workspacePath, config, taskGroupId: taskGroupId || undefined })
   }, [])
 
   const fetchAgentConfigs = useCallback(async (): Promise<AgentConfig[]> => {
@@ -752,6 +754,14 @@ socket.emit('get-cumulative-stats', {})
 
   const ungroupSession = useCallback((taskGroupId: string, sessionId: string): Promise<any> => {
     return emitAck('ungroup-session', { taskGroupId, sessionId })
+  }, [emitAck])
+
+  const renameTaskGroup = useCallback((taskGroupId: string, title: string): Promise<any> => {
+    return emitAck('rename-task-group', { taskGroupId, title })
+  }, [emitAck])
+
+  const deleteTaskGroup = useCallback((taskGroupId: string): Promise<any> => {
+    return emitAck('delete-task-group', { taskGroupId }, 120000)
   }, [emitAck])
 
   const emit = useCallback((event: string, ...args: any[]) => {
@@ -1110,6 +1120,8 @@ socket.emit('get-cumulative-stats', {})
     groupSessions,
     joinGroup,
     ungroupSession,
+    renameTaskGroup,
+    deleteTaskGroup,
     closeTab,
     startAgent,
     fetchAgentConfigs,

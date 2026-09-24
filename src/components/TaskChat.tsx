@@ -3,9 +3,7 @@ import type { TaskDetailData } from '../types'
 
 export interface TasksApi {
   getDetail: (taskGroupId: string) => Promise<{ ok: boolean; detail?: TaskDetailData; error?: string }>
-  launchTask: (taskGroupId: string) => Promise<any>
   closeTask: (taskGroupId: string, abandon?: boolean) => Promise<any>
-  taskFollowup: (taskGroupId: string, message: string) => Promise<any>
   mergeTask?: (taskGroupId: string) => Promise<any>
   confirmTaskMerge?: (taskGroupId: string) => Promise<any>
 }
@@ -23,7 +21,6 @@ function formatMem(mb: number): string {
 
 export default function TaskChat({ taskGroupId, tasksApi, onClose }: TaskChatProps) {
   const [detail, setDetail] = useState<TaskDetailData | null>(null)
-  const [followup, setFollowup] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [pendingConfirm, setPendingConfirm] = useState<{ diffSummary: string; conflictFiles: string[]; resolvedDiff?: string } | null>(null)
@@ -85,13 +82,6 @@ export default function TaskChat({ taskGroupId, tasksApi, onClose }: TaskChatPro
     setPendingConfirm(null)
   }
 
-  async function sendFollowup() {
-    const msg = followup.trim()
-    if (!msg) return
-    setFollowup('')
-    await run('followup', () => tasksApi.taskFollowup(taskGroupId, msg))
-  }
-
   const group = detail?.group
   const staleAgents = new Set(
     (detail?.warnings || []).filter(w => w.type === 'stale').map(w => w.message.split(' has posted')[0])
@@ -144,11 +134,6 @@ export default function TaskChat({ taskGroupId, tasksApi, onClose }: TaskChatPro
         {error && <p className="error-text">{error}</p>}
 
         <div className="task-chat-actions">
-          {group && (group.status === 'planning' || group.status === 'paused') && (
-            <button className="modal-btn modal-btn-ok" disabled={!!busy} onClick={() => run('launch', () => tasksApi.launchTask(taskGroupId))}>
-              {busy === 'launch' ? 'Launching…' : 'Launch agents'}
-            </button>
-          )}
           {group && group.status === 'active' && (
             <button className="modal-btn" disabled={!!busy} onClick={() => run('close', () => tasksApi.closeTask(taskGroupId))}>
               {busy === 'close' ? 'Pausing…' : 'Pause agents'}
@@ -188,21 +173,6 @@ export default function TaskChat({ taskGroupId, tasksApi, onClose }: TaskChatPro
           </div>
         )}
 
-        <div className="task-chat-followup">
-          <textarea
-            className="text-input"
-            placeholder="Follow up — fix, extend, or redirect the agents…"
-            value={followup}
-            onChange={e => setFollowup(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendFollowup()
-            }}
-            rows={2}
-          />
-          <button className="modal-btn modal-btn-ok" disabled={!!busy || !followup.trim()} onClick={sendFollowup}>
-            {busy === 'followup' ? 'Sending…' : 'Send'}
-          </button>
-        </div>
       </div>
     </div>
   )

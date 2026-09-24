@@ -109,6 +109,7 @@ app.whenReady().then(async () => {
       const savedSessions = await ctx.workspaceManager.loadSessionState(activeWs.id)
       if (savedSessions.length > 0) {
         await ctx.sessionManager.restoreSessions(savedSessions)
+        await ctx.workspaceManager.saveSessionState(activeWs.id, ctx.sessionManager.getSessionSaveData())
       } else {
         await ctx.sessionManager.initializeSessions()
       }

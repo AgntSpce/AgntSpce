@@ -49,6 +49,18 @@ function call(handlers: Record<string, (...a: any[]) => void>, event: string, da
   return new Promise(resolve => handlers[event](data, (res: any) => resolve(res)))
 }
 
+// Worktree setup now runs after the ack (fast create); poll until it lands.
+async function waitForWorktree(handlers: Record<string, (...a: any[]) => void>, id: string): Promise<any> {
+  const deadline = Date.now() + 15000
+  for (;;) {
+    const listed = await call(handlers, 'list-task-groups', { workspaceId: 'ws1' })
+    const group = (listed.taskGroups || []).find((g: any) => g.id === id)
+    if (group?.worktreePath && fs.existsSync(group.worktreePath)) return group
+    if (Date.now() > deadline) throw new Error('timed out waiting for task worktree')
+    await new Promise(r => setTimeout(r, 100))
+  }
+}
+
 describe('create-task-group against a pre-migration DB file', () => {
   it('self-heals a legacy coordinator.db missing the file column', async () => {
     const repo = tmpDir()
@@ -75,7 +87,9 @@ describe('create-task-group against a pre-migration DB file', () => {
       workspaceId: 'ws1',
     })
     expect(res.ok).toBe(true)
-    expect(res.taskGroup.branchName).toMatch(/^task\//)
+    const group = await waitForWorktree(handlers, res.taskGroup.id)
+    expect(group.branchName).toMatch(/^task\//)
+    expect(group.status).toBe('active')
   })
 })
 
@@ -99,10 +113,11 @@ describe('create-task-group (no boot coordinator)', () => {
     })
     expect(res.ok).toBe(true)
     expect(res.taskGroup.id).toBeTruthy()
-    expect(res.taskGroup.status).toBe('active')
-    expect(res.taskGroup.branchName).toMatch(/^task\//)
+    const group = await waitForWorktree(handlers, res.taskGroup.id)
+    expect(group.status).toBe('active')
+    expect(group.branchName).toMatch(/^task\//)
 
-    const wt = res.taskGroup.worktreePath
+    const wt = group.worktreePath
     expect(wt && fs.existsSync(wt)).toBe(true)
     expect(fs.existsSync(path.join(wt, 'COLLAB.md'))).toBe(true)
     expect(fs.existsSync(path.join(wt, '.task.json'))).toBe(true)

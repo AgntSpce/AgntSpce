@@ -161,7 +161,7 @@ function App() {
     getGitFullStatus, gitStageFile, gitUnstageFile, gitCommit, gitPull, gitPush, gitFetch,
     setUserSettings, updateWorkspaceConfig, refreshWorkspaces,
     taskGroups, listTaskGroups, createTaskGroup, onTaskGroupsChanged,
-    groupSessions, joinGroup,
+    renameTaskGroup, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
     mergeTask, confirmTaskMerge,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
@@ -610,22 +610,40 @@ function App() {
     return () => { active = false; clearInterval(id) }
   }, [workspaces, activeWorkspace?.id, getGitFullStatus])
 
-  // Open group: TerminalArea shows only this group's sessions. Persisted per
-  // window like the workspace choice; empty = all agents.
   const [openGroupId, setOpenGroupId] = useState<string | null>(() => {
-    try { return sessionStorage.getItem('agntspce-open-group') } catch { return null }
+    try {
+      if (!windowWorkspaceId) return null
+      return localStorage.getItem(`agntspce-open-group:${windowWorkspaceId}`)
+    } catch { return null }
   })
   const [openGroupSessions, setOpenGroupSessions] = useState<string[]>([])
-  // Shared worktree of the open group: agents added while open spawn here.
   const [openGroupWorktree, setOpenGroupWorktree] = useState<string | null>(null)
+  const openGroupRequestRef = useRef(0)
   useEffect(() => {
     try {
-      if (openGroupId) sessionStorage.setItem('agntspce-open-group', openGroupId)
-      else sessionStorage.removeItem('agntspce-open-group')
+      if (openGroupId && activeWorkspace?.id) {
+        sessionStorage.setItem('agntspce-open-group', openGroupId)
+        localStorage.setItem(`agntspce-open-group:${activeWorkspace.id}`, openGroupId)
+      } else {
+        sessionStorage.removeItem('agntspce-open-group')
+        if (activeWorkspace?.id) localStorage.removeItem(`agntspce-open-group:${activeWorkspace.id}`)
+      }
     } catch {}
-  }, [openGroupId])
+  }, [openGroupId, activeWorkspace?.id])
+
+  useEffect(() => {
+    const workspaceId = activeWorkspace?.id
+    if (!workspaceId || taskGroups.length === 0) return
+    const stored = (() => {
+      try { return localStorage.getItem(`agntspce-open-group:${workspaceId}`) } catch { return null }
+    })()
+    if (stored && taskGroups.some(t => t.id === stored)) {
+      setOpenGroupId(prev => prev === stored ? prev : stored)
+    }
+  }, [activeWorkspace?.id, taskGroups])
 
   const refreshOpenGroup = useCallback(async (groupId: string | null) => {
+    const requestId = ++openGroupRequestRef.current
     if (!groupId) {
       setOpenGroupSessions([])
       setOpenGroupWorktree(null)
@@ -634,114 +652,140 @@ function App() {
     try {
       const res = await getTaskDetail(groupId)
       const subs = res?.detail?.subtasks || []
-      setOpenGroupSessions(subs.filter((s: any) => s.sessionId).map((s: any) => s.sessionId))
-      setOpenGroupWorktree(res?.detail?.group?.worktreePath || null)
+      const live = new Set<string>()
+      for (const sub of subs as any[]) {
+        if (sub.sessionId && sessions[sub.sessionId]) live.add(sub.sessionId)
+      }
+      for (const session of Object.values(sessions)) {
+        if (session.taskGroupId === groupId) live.add(session.id)
+      }
+      if (requestId !== openGroupRequestRef.current) return
+      setOpenGroupSessions([...live])
+      setOpenGroupWorktree(
+        res?.detail?.group?.worktreePath ||
+        taskGroups.find(t => t.id === groupId)?.worktreePath ||
+        null
+      )
     } catch {
+      if (requestId !== openGroupRequestRef.current) return
       setOpenGroupSessions([])
       setOpenGroupWorktree(null)
     }
-  }, [getTaskDetail])
-
-  const exitGroupView = useCallback(() => {
-    setOpenGroupId(null)
-    setOpenGroupSessions([])
-    setOpenGroupWorktree(null)
-  }, [])
+  }, [getTaskDetail, sessions, taskGroups])
 
   useEffect(() => {
     refreshOpenGroup(openGroupId)
   }, [openGroupId, refreshOpenGroup])
 
-  // Membership can change from the sidebar (join/group) — re-resolve.
   useSocketEvent<{ workspaceId: string }>(onTaskGroupsChanged, () => {
     if (openGroupId) refreshOpenGroup(openGroupId)
   }, [onTaskGroupsChanged, openGroupId, refreshOpenGroup])
 
-  // New sessions spawned while a group is open join it automatically.
-  // Sessions already present when the group opens are seeded as known so a
-  // whole backlog is never mass-joined at once.
-  const knownSessionIds = useRef<Set<string>>(new Set())
-  const prevOpenGroup = useRef<string | null>(null)
-  useEffect(() => {
-    if (openGroupId && prevOpenGroup.current !== openGroupId) {
-      knownSessionIds.current = new Set(Object.keys(sessions))
-    }
-    prevOpenGroup.current = openGroupId
-  }, [openGroupId, sessions])
-  useEffect(() => {
-    const ids = new Set(Object.keys(sessions))
-    if (openGroupId) {
-      for (const id of ids) {
-        if (!knownSessionIds.current.has(id) && !openGroupSessions.includes(id)) {
-          joinGroup(openGroupId, id).catch(() => {})
-        }
-      }
-    }
-    knownSessionIds.current = ids
-  }, [sessions, openGroupId, openGroupSessions, joinGroup])
-
-  // First agent with no open group bootstraps an unnamed task and opens it;
-  // later agents land in the open group via auto-join above. Single flight
-  // so rapid clicks create exactly one group.
   const groupCreateInFlight = useRef<Promise<{ id: string; worktreePath: string | null } | null> | null>(null)
   const ensureOpenGroupForNewAgent = useCallback((): Promise<{ id: string; worktreePath: string | null } | null> => {
     if (openGroupId) return Promise.resolve({ id: openGroupId, worktreePath: openGroupWorktree })
-    if (!groupCreateInFlight.current) {
-      const p: Promise<{ id: string; worktreePath: string | null } | null> = (async () => {
-        try {
-          const res = await createTaskGroup({
-            title: 'Unnamed task',
-            userGoal: '',
-            worktreeMode: 'worktree',
-            agents: [],
-            workspaceId: activeWorkspace?.id,
-          })
-          if (res?.ok && res.taskGroup?.id) {
-            listTaskGroups(activeWorkspace?.id).catch(() => {})
-            setOpenGroupId(res.taskGroup.id)
-            setSelectedTaskId(null)
-            refreshOpenGroup(res.taskGroup.id)
-            setActiveView(null)
-            setFileExplorerOpen(false)
-            setViewMode('agents')
-            return { id: res.taskGroup.id as string, worktreePath: (res.taskGroup.worktreePath as string | null) ?? null }
-          }
-          alert(res?.error || 'Failed to create task')
-        } catch (e: any) {
-          alert(e?.message || 'Failed to create task')
-        }
+    if (groupCreateInFlight.current) return groupCreateInFlight.current
+    const promise = (async () => {
+      if (!activeWorkspace?.id) {
+        alert('Open a workspace before adding an agent.')
         return null
-      })()
-      groupCreateInFlight.current = p
-      p.finally(() => { if (groupCreateInFlight.current === p) groupCreateInFlight.current = null })
-    }
-    return groupCreateInFlight.current
-  }, [openGroupId, openGroupWorktree, createTaskGroup, activeWorkspace?.id, listTaskGroups, refreshOpenGroup])
-
-  const handleGroupSessions = useCallback(async (ids: string[]) => {
-    if (ids.length === 0) return
-    try {
-      const res = await groupSessions(ids)
-      if (res?.ok && res.taskGroup?.id) {
-        setSelectedTaskId(res.taskGroup.id)
-        setOpenGroupId(res.taskGroup.id)
-        refreshOpenGroup(res.taskGroup.id)
       }
-    } catch {}
-  }, [groupSessions, refreshOpenGroup])
-
-  const handleJoinGroup = useCallback(async (taskGroupId: string, sessionId: string) => {
-    try {
-      await joinGroup(taskGroupId, sessionId)
-      refreshOpenGroup(openGroupId)
-    } catch {}
-  }, [joinGroup, openGroupId, refreshOpenGroup])
+      const existing = [...taskGroups].reverse().find(t =>
+        t.title === 'Unnamed task' && (t.members || []).every(m => !m.sessionId)
+      )
+      if (existing) {
+        setOpenGroupSessions([])
+        setOpenGroupWorktree(existing.worktreePath || null)
+        setOpenGroupId(existing.id)
+        setSelectedTaskId(null)
+        setActiveView(null)
+        setFileExplorerOpen(false)
+        setViewMode('agents')
+        refreshOpenGroup(existing.id)
+        return { id: existing.id, worktreePath: existing.worktreePath || null }
+      }
+      let res: Awaited<ReturnType<typeof createTaskGroup>>
+      try {
+        res = await createTaskGroup({
+          title: 'Unnamed task',
+          userGoal: '',
+          worktreeMode: 'worktree',
+          agents: [],
+          workspaceId: activeWorkspace.id,
+        })
+      } catch (error: any) {
+        alert(error?.message || 'Failed to create task')
+        return null
+      }
+      if (!res?.ok || !res.taskGroup?.id) {
+        alert(res?.error || 'Failed to create task')
+        return null
+      }
+      listTaskGroups(activeWorkspace.id).catch(() => {})
+      setOpenGroupSessions([])
+      setOpenGroupWorktree(res.taskGroup.worktreePath || null)
+      setOpenGroupId(res.taskGroup.id)
+      setSelectedTaskId(null)
+      setActiveView(null)
+      setFileExplorerOpen(false)
+      setViewMode('agents')
+      refreshOpenGroup(res.taskGroup.id)
+      return { id: res.taskGroup.id, worktreePath: res.taskGroup.worktreePath || null }
+    })()
+    groupCreateInFlight.current = promise
+    promise.finally(() => {
+      if (groupCreateInFlight.current === promise) groupCreateInFlight.current = null
+    })
+    return promise
+  }, [activeWorkspace?.id, createTaskGroup, listTaskGroups, openGroupId, openGroupWorktree, refreshOpenGroup, taskGroups])
 
   const handleSelectTask = useCallback((id: string) => {
-    setSelectedTaskId(id)
+    setActiveSessionId(null)
+    setOpenGroupSessions([])
+    setOpenGroupWorktree(null)
+    if (openGroupId === id) {
+      setOpenGroupId(null)
+      return
+    }
     setOpenGroupId(id)
     refreshOpenGroup(id)
-  }, [refreshOpenGroup])
+    setActiveView(null)
+    setFileExplorerOpen(false)
+    setViewMode('agents')
+  }, [openGroupId, refreshOpenGroup])
+  const fetchGroupMembers = useCallback(async (taskGroupId: string) => {
+    try {
+      const res = await getTaskDetail(taskGroupId)
+      return (res?.detail?.subtasks || []).map((s: any) => ({
+        sessionId: s.sessionId as string | null,
+        agentId: s.agentId as string,
+        status: s.status as string,
+        title: s.title as string,
+      }))
+    } catch {
+      return []
+    }
+  }, [getTaskDetail])
+
+  const handleRenameTask = useCallback(async (taskGroupId: string, title: string) => {
+    try {
+      await renameTaskGroup(taskGroupId, title)
+      listTaskGroups(activeWorkspace?.id).catch(() => {})
+    } catch {}
+  }, [renameTaskGroup, activeWorkspace?.id, listTaskGroups])
+
+  const handleDeleteTask = useCallback(async (taskGroupId: string) => {
+    try {
+      await deleteTaskGroup(taskGroupId)
+      if (openGroupId === taskGroupId) {
+        setOpenGroupId(null)
+        setOpenGroupSessions([])
+        setOpenGroupWorktree(null)
+      }
+      if (selectedTaskId === taskGroupId) setSelectedTaskId(null)
+      listTaskGroups(activeWorkspace?.id).catch(() => {})
+    } catch {}
+  }, [deleteTaskGroup, openGroupId, selectedTaskId, activeWorkspace?.id, listTaskGroups])
 
   // Quick-create: title only → empty planning group → open its fresh agents
   // page. Running sessions are untouched; agents added there auto-join.
@@ -756,7 +800,13 @@ function App() {
       })
       if (res?.ok && res.taskGroup?.id) {
         listTaskGroups(activeWorkspace?.id).catch(() => {})
+        setActiveSessionId(null)
+        setOpenGroupSessions([])
+        setOpenGroupWorktree(null)
         setOpenGroupId(res.taskGroup.id)
+        // Worktree is created server-side at group creation: record it now
+        // so agents added immediately spawn inside it, not the repo root.
+        if (res.taskGroup.worktreePath) setOpenGroupWorktree(res.taskGroup.worktreePath)
         setSelectedTaskId(null)
         refreshOpenGroup(res.taskGroup.id)
         setActiveView(null)
@@ -770,14 +820,11 @@ function App() {
     }
   }, [createTaskGroup, activeWorkspace?.id, listTaskGroups, refreshOpenGroup])
 
-  const openGroup = useMemo(
-    () => taskGroups.find(t => t.id === openGroupId) || null,
-    [taskGroups, openGroupId]
-  )
-
   const agentSessions = useMemo(() => {
     const all = Object.values(sessions).filter(s => AGENT_TYPE_SET.has(s.type))
-    const scoped = openGroupId ? all.filter(s => openGroupSessions.includes(s.id)) : all
+    const scoped = openGroupId
+      ? all.filter(s => openGroupSessions.includes(s.id) || s.taskGroupId === openGroupId)
+      : all
     return scoped.slice(0, 12)
   }, [sessions, openGroupId, openGroupSessions])
   const shellSessions = useMemo(
@@ -936,6 +983,10 @@ function App() {
 
   const handleSelectWorkspace = useCallback((id: string) => {
     setWindowWorkspaceId(id)
+    setActiveSessionId(null)
+    setOpenGroupId(null)
+    setOpenGroupSessions([])
+    setOpenGroupWorktree(null)
     switchWorkspace(id)
     setWorkspaceSidebarOpen(true)
     setFileExplorerOpen(false)
@@ -1087,24 +1138,31 @@ function App() {
       handleNewTerminal(agentId)
       return
     }
-    // No open group: bootstrap an unnamed task first so every agent belongs
-    // to one. On failure still spawn ungrouped (never block agent creation).
-    let cwd = wsPath
-    if (!openGroupId) {
-      const created = await ensureOpenGroupForNewAgent()
-      if (created) cwd = created.worktreePath || wsPath
-    } else {
-      cwd = openGroupWorktree || wsPath
+    const group = await ensureOpenGroupForNewAgent()
+    if (!group) return
+    const groupId = group.id
+    let cwd = group.worktreePath
+    for (let attempt = 0; !cwd && attempt < 12; attempt++) {
+      try {
+        const res = await getTaskDetail(groupId)
+        const taskGroup = res?.detail?.group
+        cwd = taskGroup?.worktreePath || (taskGroup?.worktreeMode === 'in-repo' ? taskGroup?.repoPath : null) || null
+        if (cwd) setOpenGroupWorktree(cwd)
+      } catch {}
+      if (!cwd) await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    if (!cwd) {
+      alert('The task workspace is still being prepared. Try again in a moment.')
+      return
     }
     const defaultConfig = { agentId, mode: 'fresh', flags: [] }
-    createAgentSession(agentId, defaultConfig, cwd)
-  }, [createAgentSession, wsPath, handleNewTerminal, openGroupId, openGroupWorktree, ensureOpenGroupForNewAgent])
+    createAgentSession(agentId, defaultConfig, cwd, groupId)
+  }, [createAgentSession, ensureOpenGroupForNewAgent, getTaskDetail, handleNewTerminal])
 
   useEffect(() => {
-    if (!activeSessionId && agentSessions.length > 0) {
-      setActiveSessionId(agentSessions[0].id)
-    }
-  }, [agentSessions.length])
+    if (activeSessionId && agentSessions.some(s => s.id === activeSessionId)) return
+    setActiveSessionId(agentSessions[0]?.id || null)
+  }, [activeSessionId, agentSessions])
 
   const handleCloseAgentTab = useCallback((sessionId: string) => {
     closeTab([sessionId])
@@ -1840,13 +1898,16 @@ function App() {
               agentConfigs={agentConfigs}
               sessionBuffersRef={writeBuffersRef}
               appBootTime={sessionStartedAt}
-              taskGroups={taskGroups}
-              onOpenCreateTaskModal={() => setCreateTaskModalOpen(true)}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={handleSelectTask}
-              onGroupSessions={handleGroupSessions}
-              onJoinGroup={handleJoinGroup}
+               taskGroups={taskGroups}
+               onOpenCreateTaskModal={() => setCreateTaskModalOpen(true)}
+               selectedTaskId={selectedTaskId}
+               openTaskId={openGroupId}
+               onSelectTask={handleSelectTask}
               onCreateTask={handleQuickCreateTask}
+              onFetchMembers={fetchGroupMembers}
+              onRenameTask={handleRenameTask}
+              onDeleteTask={handleDeleteTask}
+              onOpenTaskDetails={setSelectedTaskId}
             />
           )}
           {activeView === 'git-review' && (
@@ -1927,27 +1988,6 @@ function App() {
             </div>
           ) : (
             <>
-              {openGroup && (
-                <div className="group-banner">
-                  <span className="group-banner-title" title={openGroup.userGoal || openGroup.title}>
-                    Group: {openGroup.title}
-                  </span>
-                  <span className="group-banner-count">{openGroupSessions.length} agent{openGroupSessions.length === 1 ? '' : 's'}</span>
-                  <button className="group-banner-btn" onClick={exitGroupView} title="Show all agents">
-                    All agents
-                  </button>
-                  <button
-                    className="group-banner-btn danger"
-                    onClick={async () => {
-                      try { await closeTask(openGroup.id) } catch {}
-                      exitGroupView()
-                    }}
-                    title="Stop these agents and park the group"
-                  >
-                    Close group
-                  </button>
-                </div>
-              )}
               {(viewMode === 'files' || openFiles.some(f => f.isDiff)) && (!activeView || activeView === 'git-review') && (
                 <div className="editor-area">
                   {openFiles.length > 0 ? (
@@ -2071,18 +2111,15 @@ function App() {
         open={createTaskModalOpen}
         onClose={() => setCreateTaskModalOpen(false)}
         onCreate={handleCreateTaskGroup}
-        onLaunch={async (taskGroupId: string) => {
-          const res = await launchTask(taskGroupId)
-          listTaskGroups(activeWorkspace?.id).catch(() => {})
-          return res
-        }}
-        onDetail={getTaskDetail}
         onLaunched={(taskGroupId: string) => {
           setCreateTaskModalOpen(false)
           setActiveView(null)
           setFileExplorerOpen(false)
           setViewMode('agents')
-          setSelectedTaskId(taskGroupId)
+          listTaskGroups(activeWorkspace?.id).catch(() => {})
+          setActiveSessionId(null)
+          setOpenGroupSessions([])
+          setOpenGroupWorktree(null)
           setOpenGroupId(taskGroupId)
           refreshOpenGroup(taskGroupId)
         }}

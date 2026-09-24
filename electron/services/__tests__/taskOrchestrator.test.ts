@@ -168,6 +168,21 @@ describe('TaskOrchestrator', () => {
     expect(stale.some(w => w.type === 'stale')).toBe(true)
   })
 
+  it('deleteTask closes sessions, retires worktree, drops rows', async () => {
+    const { sm, gid } = setup()
+    const spawner = new FakeSpawner()
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const launched = await orch.launchTask(gid)
+    const wt = sm.getTaskGroup(gid)!.worktreePath!
+    expect(fs.existsSync(wt)).toBe(true)
+
+    const out = orch.deleteTask(gid)
+    expect(out.closed).toBe(2)
+    expect(spawner.closed).toEqual(expect.arrayContaining(launched.sessionIds))
+    expect(sm.getTaskGroup(gid)).toBeNull()
+    expect(fs.existsSync(wt)).toBe(false)
+  })
+
   it('getDetail bundles group, subtasks, summary, warnings', async () => {
     const { sm, gid } = setup()
     const orch = new TaskOrchestrator(sm, new FakeSpawner(), new FakeSlots(), { llm: async () => CLEAN_PLAN })

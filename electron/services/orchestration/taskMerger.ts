@@ -50,7 +50,17 @@ export class TaskMerger {
   }
 
   private execGit(args: string[], cwd?: string): string {
-    return execFileSync('git', args, { cwd: cwd || this.repoPath, encoding: 'utf-8', timeout: 60000 }).toString().trim()
+    // See worktreeLifecycle.execGit: pipe stderr so best-effort probes don't
+    // spam the host terminal; fold it into the thrown error instead.
+    if (args.some(a => a === undefined || a === null || a === '')) {
+      throw new Error(`git ${args.join(' ')} failed: empty revision argument`)
+    }
+    try {
+      return execFileSync('git', args, { cwd: cwd || this.repoPath, encoding: 'utf-8', timeout: 60000, stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim()
+    } catch (e: any) {
+      const stderr = String(e?.stderr || '').trim()
+      throw new Error(stderr ? `git ${args.join(' ')} failed: ${stderr.slice(0, 500)}` : (e?.message || String(e)))
+    }
   }
 
   private groupOrThrow(taskGroupId: string) {

@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { StateManager } from '../orchestration/stateManager'
-import { buildGroupPreamble, injectGroupContext } from '../orchestration/groupSync'
+import { buildGroupPreamble, syncGroupFiles, GROUP_BRIEFING_FILENAME } from '../orchestration/groupSync'
 
 const tmpDirs: string[] = []
 function tmpDir(): string {
@@ -35,7 +35,7 @@ describe('groupSync', () => {
     expect(preamble).toContain('/r/.agntspce/tasks/g1')
   })
 
-  it('injects into running member PTYs and refreshes COLLAB.md', () => {
+  it('syncs COLLAB.md and the briefing file without touching any PTY', () => {
     const dir = tmpDir()
     const sm = new StateManager(path.join(dir, 'c.db'), dir)
     const g = sm.createTaskGroup({ repoPath: dir, title: 'G' })
@@ -44,17 +44,14 @@ describe('groupSync', () => {
     sm.updateSubTaskStatus(a.id, 'running', 'sess-a')
     sm.updateSubTaskStatus(b.id, 'running', 'sess-b')
 
-    const written: string[] = []
-    const { injected } = injectGroupContext(sm, { writeToSession: (id, text) => { written.push(id + ':' + text.slice(0, 20)); return true } }, g.id, dir)
-    expect(injected).toBe(2)
-    expect(written.some(w => w.startsWith('sess-a:'))).toBe(true)
+    const { mdPath, briefingPath } = syncGroupFiles(sm, g.id, dir)
+    expect(mdPath).toBe(path.join(dir, 'COLLAB.md'))
     expect(fs.existsSync(path.join(dir, 'COLLAB.md'))).toBe(true)
-    // No trailing newline: must not auto-submit into a live TUI.
-    const full = (() => {
-      const out: string[] = []
-      injectGroupContext(sm, { writeToSession: (_id, text) => { out.push(text); return true } }, g.id, dir)
-      return out[0]!
-    })()
-    expect(full.endsWith('\n')).toBe(false)
+    expect(briefingPath).toBe(path.join(dir, GROUP_BRIEFING_FILENAME))
+    const briefing = fs.readFileSync(briefingPath!, 'utf-8')
+    // Member ids are discoverable from files alone (no PTY writes).
+    expect(briefing).toContain(`--task ${g.id} --subtask ${a.id}`)
+    expect(briefing).toContain('claude')
+    expect(briefing).toContain('opencode')
   })
 })

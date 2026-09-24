@@ -295,6 +295,22 @@ export class TaskOrchestrator {
     return { closed }
   }
 
+  /** Full delete: closes member PTYs, removes the worktree (merged-only
+   *  branches survive per the never-delete-unmerged rule), drops DB rows. */
+  deleteTask(taskGroupId: string): { closed: number; sessionIds: string[] } {
+    const group = this.sm.getTaskGroup(taskGroupId)
+    if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
+    const subs = this.sm.listSubTasks(taskGroupId)
+    const ids = subs.filter(s => s.sessionId).map(s => s.sessionId as string)
+    let closed = 0
+    try { closed = this.spawner.closeTaskSessions(ids) } catch {}
+    try {
+      new WorktreeLifecycle(group.repoPath).removeTaskWorktree(taskGroupId, this.sm.getIntegrationBranch())
+    } catch {}
+    this.sm.deleteTaskGroup(taskGroupId)
+    return { closed, sessionIds: ids }
+  }
+
   getDetail(taskGroupId: string, now = Date.now()): TaskDetail {
     const group = this.sm.getTaskGroup(taskGroupId)
     if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)

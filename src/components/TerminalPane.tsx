@@ -210,12 +210,6 @@ export default memo(function TerminalPane(props: Props) {
 
   const isAgentType = isAgentTypeId(session.type)
   const shouldShowStartup = isAgentType && session.status === 'waiting' && showStartup
-  const groupColor = session.sessionGroupId
-    ? ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#f97316'][
-        session.sessionGroupId.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 7
-      ]
-    : undefined
-
   useEffect(() => {
     if (session.status === 'waiting' && isAgentType) {
       setShowStartup(true)
@@ -641,7 +635,7 @@ function handleResizeDown(edge: 'left' | 'right' | 'top' | 'bottom', e: React.Mo
     handles.includes(edge) && onResizeStart && onResizeMove
 
   return (
-    <div data-pane-id={session.id} className={`terminal-pane${dimmed ? ' dimmed' : ''}${session.sessionGroupId ? ' grouped' : ''}${isResizing ? ' is-dragging' : ''}`} ref={paneRef} style={session.sessionGroupId ? { ...style, borderLeftColor: groupColor } : style}>
+    <div data-pane-id={session.id} className={`terminal-pane${dimmed ? ' dimmed' : ''}${isResizing ? ' is-dragging' : ''}`} ref={paneRef} style={style}>
       {showHandle('left') && <div className="pane-resize-handle pane-resize-left" onMouseDown={(e) => handleResizeDown('left', e)} />}
       {showHandle('right') && <div className="pane-resize-handle pane-resize-right" onMouseDown={(e) => handleResizeDown('right', e)} />}
       {showHandle('top') && <div className="pane-resize-handle pane-resize-top" onMouseDown={(e) => handleResizeDown('top', e)} />}

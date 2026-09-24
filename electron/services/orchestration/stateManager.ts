@@ -735,6 +735,8 @@ export class StateManager {
     worktreePath?: string | null
     baseSha?: string | null
     completedAt?: number | null
+    title?: string
+    userGoal?: string
   }): TaskGroupOverview | null {
     const group = this.getTaskGroup(id)
     if (!group) return null
@@ -744,12 +746,25 @@ export class StateManager {
       worktree_path: updates.worktreePath !== undefined ? updates.worktreePath : group.worktreePath,
       base_sha: updates.baseSha !== undefined ? updates.baseSha : group.baseSha,
       completed_at: updates.completedAt !== undefined ? updates.completedAt : group.completedAt,
+      title: updates.title ?? group.title,
+      user_goal: updates.userGoal ?? group.userGoal,
     }
     if (next.status === 'done' && next.completed_at == null) next.completed_at = Date.now()
     this.db.prepare(
-      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ? WHERE id = ?'
-    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, id)
+      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ?, title = ?, user_goal = ? WHERE id = ?'
+    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, next.title, next.user_goal, id)
     return this.getTaskGroup(id)
+  }
+
+  /** Hard-delete a task group and everything under it (subtasks, events).
+   *  Worktree/branch on disk are left to the caller (TaskOrchestrator). */
+  deleteTaskGroup(id: string): boolean {
+    const existing = this.db.prepare('SELECT id FROM task_groups WHERE id = ?').get(id) as { id: string } | undefined
+    if (!existing) return false
+    this.db.prepare('DELETE FROM collab_events WHERE task_group_id = ?').run(id)
+    this.db.prepare('DELETE FROM subtasks WHERE task_group_id = ?').run(id)
+    this.db.prepare('DELETE FROM task_groups WHERE id = ?').run(id)
+    return true
   }
 
   private rowToTaskGroup(row: TaskGroupRow): TaskGroupOverview {

@@ -79,11 +79,24 @@ export class WorktreeLifecycle {
   }
 
   private execGit(args: string[], cwd?: string): string {
-    return execFileSync('git', args, {
-      cwd: cwd || this.repoPath,
-      encoding: 'utf-8',
-      timeout: 30000,
-    }).trim()
+    // Pipe stderr: best-effort git probes (dirty-worktree removal, missing
+    // refs) must not spam the host terminal; the message is folded into the
+    // thrown error instead. Empty args are rejected outright — git reports
+    // those as the cryptic "fatal: Needed a single revision".
+    if (args.some(a => a === undefined || a === null || a === '')) {
+      throw new Error(`git ${args.join(' ')} failed: empty revision argument`)
+    }
+    try {
+      return execFileSync('git', args, {
+        cwd: cwd || this.repoPath,
+        encoding: 'utf-8',
+        timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim()
+    } catch (e: any) {
+      const stderr = String(e?.stderr || '').trim()
+      throw new Error(stderr ? `git ${args.join(' ')} failed: ${stderr.slice(0, 500)}` : (e?.message || String(e)))
+    }
   }
 
   getRepoPath(): string {

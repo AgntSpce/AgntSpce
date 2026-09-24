@@ -96,6 +96,10 @@ export interface SavedSessionData {
   id: string
   type: string
   cwd: string
+  taskGroupId?: string | null
+  subtaskId?: string | null
+  sessionGroupId?: string | null
+  worktreeId?: string
   agentConfig?: {
     agentId: string
     mode: string

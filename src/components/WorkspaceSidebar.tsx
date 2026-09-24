@@ -77,17 +77,51 @@ interface Props {
   onOpenCreateTaskModal?: () => void
   /** Currently selected task (visual only until TaskChat lands). */
   selectedTaskId?: string | null
+  /** Task whose agents page is currently open. */
+  openTaskId?: string | null
   /** Called when a task row is clicked. */
   onSelectTask?: (id: string) => void
-  /** Group dropped sessions into a shared task. */
-  onGroupSessions?: (sessionIds: string[]) => void
-  /** Join a session to an existing task group. */
-  onJoinGroup?: (taskGroupId: string, sessionId: string) => void
   /** Quick-create an empty task group (title only), then open it. */
   onCreateTask?: (title: string) => void
+  /** Member sessions of a group for the expandable dropdown. */
+  onFetchMembers?: (taskGroupId: string) => Promise<{ sessionId: string | null; agentId: string; status: string; title: string }[]>
+  /** Rename a task group. */
+  onRenameTask?: (taskGroupId: string, title: string) => void
+  /** Delete a task group (closes members, retires worktree). */
+  onDeleteTask?: (taskGroupId: string) => void
+  /** Open the details popup for a task group. */
+  onOpenTaskDetails?: (taskGroupId: string) => void
 }
 
 // ── Workspace helpers ────────────────────────────────────────────────────
+
+// Agent logo with a letter fallback. Some agent image assets are missing
+// (e.g. claude) — without this the <img> hides itself onError and the row
+// shows a blank gap.
+function AgentLogo({ agentId, size = 16 }: { agentId: string; size?: number }) {
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return (
+      <span
+        className="task-logo-fallback"
+        style={{ width: size, height: size, fontSize: Math.max(9, size - 6) }}
+        title={agentId}
+      >
+        {agentId.slice(0, 1).toUpperCase()}
+      </span>
+    )
+  }
+  return (
+    <img
+      className="task-logo-img"
+      style={{ width: size, height: size }}
+      src={getAgentColorImage(agentId)}
+      alt={agentId}
+      draggable={false}
+      onError={() => setFailed(true)}
+    />
+  )
+}
 
 // v2 task-group status → dot color.
 const TASK_STATUS_COLORS: Record<string, string> = {
@@ -139,12 +173,15 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onSelectSession,
   taskGroups,
   selectedTaskId,
+  openTaskId,
   onSelectTask,
   onOpenFolderDirect,
   onCloneDirect,
-  onGroupSessions,
-  onJoinGroup,
   onCreateTask,
+  onFetchMembers,
+  onRenameTask,
+  onDeleteTask,
+  onOpenTaskDetails,
 }: {
   workspaces: WorkspaceInfo[]
   sessions: Record<string, SessionState>
@@ -172,25 +209,59 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onOpenCreateTaskModal?: () => void
   /** Currently selected task (visual only until TaskChat lands). */
   selectedTaskId?: string | null
+  /** Task whose agents page is currently open. */
+  openTaskId?: string | null
   /** Called when a task row is clicked. */
   onSelectTask?: (id: string) => void
   onOpenFolderDirect?: () => void
   onCloneDirect?: () => void
-  /** Group dropped sessions into a shared task. */
-  onGroupSessions?: (sessionIds: string[]) => void
-  /** Join a session to an existing task group. */
-  onJoinGroup?: (taskGroupId: string, sessionId: string) => void
   /** Quick-create an empty task group (title only), then open it. */
   onCreateTask?: (title: string) => void
+  /** Member sessions of a group for the expandable dropdown. */
+  onFetchMembers?: (taskGroupId: string) => Promise<{ sessionId: string | null; agentId: string; status: string; title: string }[]>
+  /** Rename a task group. */
+  onRenameTask?: (taskGroupId: string, title: string) => void
+  /** Delete a task group (closes members, retires worktree). */
+  onDeleteTask?: (taskGroupId: string) => void
+  /** Open the details popup for a task group. */
+  onOpenTaskDetails?: (taskGroupId: string) => void
 }) {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [showTrash, setShowTrash] = useState(false)
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
+  const [membersByTask, setMembersByTask] = useState<Record<string, { sessionId: string | null; agentId: string; status: string; title: string }[]>>({})
+  const [membersLoadedByTask, setMembersLoadedByTask] = useState<Record<string, boolean>>({})
+  const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
   useEffect(() => {
-    if (!menuOpenId) return
-    const handler = () => setMenuOpenId(null)
+    if (!menuOpenId && !taskMenuId) return
+    const handler = () => { setMenuOpenId(null); setTaskMenuId(null) }
     document.addEventListener('click', handler)
     return () => document.removeEventListener('click', handler)
-  }, [menuOpenId])
+  }, [menuOpenId, taskMenuId])
+
+  function toggleTaskExpand(id: string) {
+    const isExpanded = expandedTaskId === id
+    setExpandedTaskId(isExpanded ? null : id)
+    if (!isExpanded && openTaskId === id) return
+    onSelectTask?.(id)
+  }
+
+  useEffect(() => {
+    if (!expandedTaskId || !onFetchMembers || openTaskId !== expandedTaskId) return
+    let cancelled = false
+    setMembersLoadedByTask(prev => ({ ...prev, [expandedTaskId]: false }))
+    onFetchMembers(expandedTaskId)
+      .then(members => {
+        if (!cancelled) {
+          setMembersByTask(prev => ({ ...prev, [expandedTaskId]: members }))
+          setMembersLoadedByTask(prev => ({ ...prev, [expandedTaskId]: true }))
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setMembersLoadedByTask(prev => ({ ...prev, [expandedTaskId]: true }))
+      })
+    return () => { cancelled = true }
+  }, [expandedTaskId, onFetchMembers, openTaskId, taskGroups])
 
   // Latest known git branch per workspace, from agent sessions (most recent
   // first). Replaces the old aggregate-status gutter data.
@@ -215,6 +286,15 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
       <div className="sidebar-top">
         <div className="sidebar-header">
           <h2>Workspace</h2>
+          <div className="sidebar-header-buttons">
+            <button
+              className="add-btn"
+              onClick={() => showModal('Task name:', (name) => {
+                if (name.trim()) onCreateTask?.(name.trim())
+              })}
+              title="New task"
+            >+</button>
+          </div>
         </div>
 
         <div className="workspace-list orca-workspace-list">
@@ -261,62 +341,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                     </div>
                   )}
                 </span>
-                {/* Agents + Add a Task live inside the card, right under the name */}
-                <div className="workspace-agents-top workspace-agents-inline">
-                  <div className="sidebar-header tasks-header">
-                    <h2>Agents</h2>
-                  </div>
-                  <div
-                    className="agent-row-list"
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={e => {
-                      e.preventDefault()
-                      const dragged = e.dataTransfer.getData('text/agntspce-session')
-                      if (dragged) onGroupSessions?.([dragged])
-                    }}
-                  >
-                    {Object.values(sessions)
-                      .filter(s => AGENT_TYPE_SET.has(s.type))
-                      .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
-                      .map(s => (
-                        <div
-                          key={s.id}
-                          className={`agent-row-item${activeSessionId === s.id ? ' active' : ''}`}
-                          draggable
-                          onDragStart={e => {
-                            e.dataTransfer.setData('text/agntspce-session', s.id)
-                            e.dataTransfer.effectAllowed = 'link'
-                          }}
-                          onDragOver={e => e.preventDefault()}
-                          onDrop={e => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            const dragged = e.dataTransfer.getData('text/agntspce-session')
-                            if (dragged && dragged !== s.id) onGroupSessions?.([dragged, s.id])
-                          }}
-                          onClick={() => onSelectSession?.(s.id)}
-                          title={`${s.type} · ${s.id.slice(-4)} — drag onto another agent to group`}
-                        >
-                          <img
-                            className="task-agent-logo"
-                            src={getAgentColorImage(s.type)}
-                            alt={s.type}
-                            draggable={false}
-                            onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
-                          />
-                          <span className="task-row-title">{s.type}</span>
-                        </div>
-                      ))}
-                  </div>
-                  <button
-                    className="sidebar-create-btn primary sidebar-add-task-btn"
-                    onClick={() => showModal('Task name:', (name) => {
-                      if (name.trim()) onCreateTask?.(name.trim())
-                    })}
-                  >
-                    Add a Task
-                  </button>
-                </div>
               </div>
             )
           })}
@@ -342,30 +366,101 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
           )}
         </div>
 
-        {/* ── v2 Tasks: one shared worktree per task, N agents ── */}
-        {activeWorkspace && (taskGroups || []).length > 0 && (
+        {/* ── Tasks live directly under the workspace card. Each row shows the
+            task name on top with member agent logos underneath; click expands
+            to the named member list. Ungrouped agents get their own section. */}
+        {activeWorkspace && (
           <div className="workspace-tasks-top">
             <div className="sidebar-header tasks-header">
               <h2>Tasks</h2>
             </div>
             <div className="task-list">
-              {(taskGroups || []).map(t => (
-                <div
-                  key={t.id}
-                  className={`task-row${selectedTaskId === t.id ? ' active' : ''}`}
-                  onClick={() => onSelectTask?.(t.id)}
-                  title={`${t.userGoal || t.title} — drop an agent here to join`}
-                  onDragOver={e => e.preventDefault()}
-                  onDrop={e => {
-                    e.preventDefault()
-                    const dragged = e.dataTransfer.getData('text/agntspce-session')
-                    if (dragged) onJoinGroup?.(t.id, dragged)
-                  }}
-                >
-                  <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
-                  <span className="task-row-title">{t.title}</span>
-                </div>
-              ))}
+              {(taskGroups || []).map(t => {
+                 const expanded = expandedTaskId === t.id && openTaskId === t.id
+                 const members = membersByTask[t.id] || []
+                 const visibleMembers = members.filter(m => m.sessionId)
+                 const liveMembers = (t.members || []).filter(m => m.sessionId)
+                return (
+                  <div key={t.id}>
+                    <div
+                       className={`task-row task-row-card${openTaskId === t.id || selectedTaskId === t.id ? ' active' : ''}`}
+                      onClick={() => toggleTaskExpand(t.id)}
+                      title={t.userGoal || t.title}
+                    >
+                      <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
+                      <div className="task-row-main">
+                        <span className="task-row-title">{t.title}</span>
+                        {openTaskId !== t.id && liveMembers.length > 0 && (
+                          <span className="task-row-logos" title={liveMembers.map(m => m.agentId).join(', ')}>
+                            {liveMembers.map(m => (
+                              <span key={m.sessionId} title={m.agentId}>
+                                <AgentLogo agentId={m.agentId} size={16} />
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                      <span className="workspace-tree-actions" onClick={e => e.stopPropagation()}>
+                        <button
+                          className="workspace-tree-dots"
+                          onClick={e => {
+                            e.stopPropagation()
+                            setTaskMenuId(taskMenuId === t.id ? null : t.id)
+                          }}
+                          title="Task options"
+                        >⋮</button>
+                        {taskMenuId === t.id && (
+                          <div className="workspace-tree-menu" onClick={e => e.stopPropagation()}>
+                            <button
+                              className="workspace-tree-menu-item"
+                              onClick={() => {
+                                setTaskMenuId(null)
+                                onOpenTaskDetails?.(t.id)
+                              }}
+                            >Details</button>
+                            <button
+                              className="workspace-tree-menu-item"
+                              onClick={() => {
+                                setTaskMenuId(null)
+                                showModal('Rename task:', (name) => {
+                                  if (name.trim()) onRenameTask?.(t.id, name.trim())
+                                }, t.title)
+                              }}
+                            >Rename</button>
+                            <button
+                              className="workspace-tree-menu-item danger"
+                              onClick={() => {
+                                setTaskMenuId(null)
+                                if (confirm(`Delete task "${t.title}"? Its agents will be stopped.`)) onDeleteTask?.(t.id)
+                              }}
+                            >Delete</button>
+                          </div>
+                        )}
+                      </span>
+                    </div>
+                    {expanded && (
+                      <div className="task-member-list" role="group" aria-label={`Agents in ${t.title}`}>
+                          {!membersLoadedByTask[t.id] ? (
+                            <div className="task-member-empty">Loading agents…</div>
+                          ) : visibleMembers.length === 0 ? (
+                            <div className="task-member-empty">No agents yet — drag one here or add below</div>
+                          ) : null}
+                         {visibleMembers.map(m => (
+                          <div
+                            key={`${m.agentId}-${m.sessionId || m.title}`}
+                            className={`agent-row-item task-member-row${!m.sessionId ? ' pending' : ''}${activeSessionId && m.sessionId === activeSessionId ? ' active' : ''}`}
+                            onClick={() => { if (m.sessionId) onSelectSession?.(m.sessionId) }}
+                            title={m.sessionId ? `${m.agentId} · ${m.status} — click to focus` : `${m.agentId} · ${m.status}`}
+                          >
+                            <AgentLogo agentId={m.agentId} size={18} />
+                            <span className="task-row-title">{m.title || m.agentId}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}
@@ -404,10 +499,10 @@ export default memo(function WorkspaceSidebar({
   expandedFolders, onToggleFolder, onExpandFolder, selectedFilePath, onSelectFile, onFileDeleted,
   getWorkspaceTree, getFileInfo, gitFilesByWorkspace, fileTreeRefreshTick, createFile, createFolder, renameFile, deleteFile,
   title = 'Workspace', rowIcon = 'auto', hideCreateButton = false,
-  taskGroups, selectedTaskId, onSelectTask,
+  taskGroups, selectedTaskId, openTaskId, onSelectTask,
   onOpenFolderDirect, onCloneDirect,
-  activeSessionId, onSelectSession, onGroupSessions, onJoinGroup,
-  onCreateTask,
+  activeSessionId, onSelectSession,
+  onCreateTask, onFetchMembers, onRenameTask, onDeleteTask, onOpenTaskDetails,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -426,16 +521,19 @@ export default memo(function WorkspaceSidebar({
         onPermanentDelete={onPermanentDelete}
         onOpenCreateModal={onOpenCreateModal}
         showModal={showModal}
-        taskGroups={taskGroups}
-        selectedTaskId={selectedTaskId}
-        onSelectTask={onSelectTask}
+         taskGroups={taskGroups}
+         selectedTaskId={selectedTaskId}
+         openTaskId={openTaskId}
+         onSelectTask={onSelectTask}
         onOpenFolderDirect={onOpenFolderDirect}
         onCloneDirect={onCloneDirect}
         activeSessionId={activeSessionId}
         onSelectSession={onSelectSession}
-        onGroupSessions={onGroupSessions}
-        onJoinGroup={onJoinGroup}
         onCreateTask={onCreateTask}
+        onFetchMembers={onFetchMembers}
+        onRenameTask={onRenameTask}
+        onDeleteTask={onDeleteTask}
+        onOpenTaskDetails={onOpenTaskDetails}
       />
     )
   }

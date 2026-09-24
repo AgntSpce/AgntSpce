@@ -34,6 +34,8 @@ export interface SessionState {
   branch: string
   lastActivity: number
   sessionGroupId?: string
+  taskGroupId?: string
+  subtaskId?: string
   restorable?: boolean
 }
 
@@ -194,6 +196,7 @@ export interface TaskGroupInfo {
   baseSha: string | null
   createdAt: number
   completedAt: number | null
+  members?: { agentId: string; sessionId: string | null }[]
 }
 
 export interface SubTaskInfo {

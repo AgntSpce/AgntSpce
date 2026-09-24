@@ -8,8 +8,7 @@ import { ensureCollabFileColumn } from '../../services/orchestration/schema'
 import { TaskOrchestrator } from '../../services/orchestration/taskOrchestrator'
 import { TaskMerger } from '../../services/orchestration/taskMerger'
 import { WorktreeLifecycle } from '../../services/orchestration/worktreeLifecycle'
-import { CollabShim } from '../../services/orchestration/collabShim'
-import { injectGroupContext } from '../../services/orchestration/groupSync'
+import { syncGroupFiles, linkSessionToGroup } from '../../services/orchestration/groupSync'
 import { writeTaskMetaFile } from '../../services/orchestration/taskPlanner'
 import type { ChatMessage } from '../../services/chatTypes'
 
@@ -108,7 +107,17 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
         if (callback) callback({ ok: false, error: 'Task orchestration is unavailable (no workspace root)' })
         return
       }
-      if (callback) callback({ ok: true, taskGroups: sm.listTaskGroups(wsId ?? undefined) })
+      const groups = sm.listTaskGroups(wsId ?? undefined)
+      // Attach live membership so the sidebar can render agent logos per
+      // task and detect ungrouped sessions without extra roundtrips.
+      const withMembers = groups.map(g => {
+        let members: { agentId: string; sessionId: string | null }[] = []
+        try {
+          members = sm.listSubTasks(g.id).map(s => ({ agentId: s.agentId, sessionId: s.sessionId }))
+        } catch {}
+        return { ...g, members }
+      })
+      if (callback) callback({ ok: true, taskGroups: withMembers })
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }
@@ -156,31 +165,43 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
         })
       )
 
-      // Isolated git worktree up front (per task logic): agents added later
-      // spawn straight into it. Best-effort — a non-git folder still yields
-      // a usable group rooted at the repo.
-      try {
-        const wtl = new WorktreeLifecycle(repoPath)
-        const slug = WorktreeLifecycle.sanitizeTaskSlug(title)
-        let ref = 'HEAD'
-        try { ref = sm.getIntegrationBranchSha() } catch {}
-        const res = wtl.createTaskWorktree(group.id, slug, ref)
-        sm.updateTaskGroup(group.id, { branchName: res.branchName, worktreePath: res.worktreePath, baseSha: res.branchPoint, status: 'active' })
-        writeTaskMetaFile(res.worktreePath, {
-          taskGroupId: group.id,
-          branchName: res.branchName,
-          baseSha: res.branchPoint,
-          worktreeMode: 'worktree',
-          todoList: userGoal ? [userGoal] : [title],
-          subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
-        })
-        new CollabShim(sm, repoPath).seed(group.id)
-      } catch (e: any) {
-        console.warn('[tasks] worktree setup skipped:', e?.message || e)
-      }
-
+      // Ack first so task creation feels instant; the isolated worktree
+      // (git, else plain dir fallback) + seed files land right after.
       ctx.io.emit('task-groups-changed', { workspaceId: ws.id })
-      if (callback) callback({ ok: true, taskGroup: sm.getTaskGroup(group.id), subtasks })
+      if (callback) callback({ ok: true, taskGroup: group, subtasks })
+      setImmediate(() => {
+        try {
+          const setup = (worktreePath: string, branchName: string, baseSha: string | null) => {
+            sm.updateTaskGroup(group.id, { branchName, worktreePath, baseSha, status: 'active' })
+            writeTaskMetaFile(worktreePath, {
+              taskGroupId: group.id,
+              branchName,
+              baseSha,
+              worktreeMode: 'worktree',
+              todoList: userGoal ? [userGoal] : [title],
+              subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
+            })
+            syncGroupFiles(sm, group.id, repoPath)
+          }
+          const wtl = new WorktreeLifecycle(repoPath)
+          const slug = WorktreeLifecycle.sanitizeTaskSlug(title)
+          try {
+            let ref = 'HEAD'
+            try { ref = sm.getIntegrationBranchSha() } catch {}
+            const res = wtl.createTaskWorktree(group.id, slug, ref)
+            setup(res.worktreePath, res.branchName, res.branchPoint)
+          } catch (e: any) {
+            console.warn('[tasks] git worktree setup failed, trying plain dir:', e?.message || e)
+            const branchName = wtl.deduplicateBranchName(wtl.buildTaskBranchName(group.id, slug))
+            const dir = wtl.getTaskWorktreePath(group.id)
+            fs.mkdirSync(dir, { recursive: true })
+            setup(dir, branchName, null)
+          }
+          ctx.io.emit('task-groups-changed', { workspaceId: ws.id })
+        } catch (e: any) {
+          console.warn('[tasks] task dir setup skipped:', e?.message || e)
+        }
+      })
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }
@@ -345,36 +366,56 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
         userGoal: '',
         worktreeMode: 'worktree',
       })
-
-      // Shared isolated worktree, best-effort: without one the group still
-      // works with the repo root as cwd.
-      let ref = 'HEAD'
-      try { ref = sm.getIntegrationBranchSha() } catch {}
-      try {
-        const wtl = new WorktreeLifecycle(repoPath)
-        const slug = WorktreeLifecycle.sanitizeTaskSlug(group.title)
-        const res = wtl.createTaskWorktree(group.id, slug, ref)
-        sm.updateTaskGroup(group.id, { branchName: res.branchName, worktreePath: res.worktreePath, baseSha: res.branchPoint, status: 'active' })
-      } catch {
-        sm.updateTaskGroup(group.id, { status: 'active' })
-      }
-
       const subtasks = members.map(m => {
         const s = sm.addSubTask({ taskGroupId: group.id, agentId: m.agentId, title: m.agentId })
-        return sm.updateSubTaskStatus(s.id, 'running', m.sessionId)!
+        const linked = sm.updateSubTaskStatus(s.id, 'running', m.sessionId)!
+        ctx.sessionManager.setSessionTaskLink?.(m.sessionId, group.id, linked.id)
+        return linked
       })
-      const cwd = sm.getTaskGroup(group.id)!.worktreePath ?? repoPath
-      writeTaskMetaFile(cwd, {
-        taskGroupId: group.id,
-        branchName: sm.getTaskGroup(group.id)!.branchName ?? '',
-        baseSha: sm.getTaskGroup(group.id)!.baseSha,
-        worktreeMode: 'worktree',
-        todoList: [`${members.map(m => m.agentId).join(', ')} collaborate in the shared worktree`],
-        subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: [] })),
-      })
-      const { injected } = injectGroupContext(sm, ctx.sessionManager, group.id, repoPath)
+      sm.updateTaskGroup(group.id, { status: 'active' })
       ctx.io.emit('task-groups-changed', { workspaceId: ws!.id })
-      if (callback) callback({ ok: true, taskGroup: sm.getTaskGroup(group.id), subtasks, injected })
+      if (callback) callback({ ok: true, taskGroup: sm.getTaskGroup(group.id), subtasks })
+
+      // Slow part runs after the ack so grouping feels instant: isolated
+      // worktree, meta file, and shared briefing files.
+      setImmediate(() => {
+        try {
+          let ref = 'HEAD'
+          try { ref = sm.getIntegrationBranchSha() } catch {}
+          const wtl = new WorktreeLifecycle(repoPath)
+          const slug = WorktreeLifecycle.sanitizeTaskSlug(group.title)
+          let branchName = sm.getTaskGroup(group.id)?.branchName ?? null
+          let worktreePath: string | null = sm.getTaskGroup(group.id)?.worktreePath ?? null
+          let baseSha: string | null = sm.getTaskGroup(group.id)?.baseSha ?? null
+          if (!branchName) {
+            try {
+              const res = wtl.createTaskWorktree(group.id, slug, ref)
+              branchName = res.branchName
+              worktreePath = res.worktreePath
+              baseSha = res.branchPoint
+            } catch {
+              // Non-git folder fallback: plain isolated directory.
+              branchName = wtl.deduplicateBranchName(wtl.buildTaskBranchName(group.id, slug))
+              worktreePath = wtl.getTaskWorktreePath(group.id)
+              try { fs.mkdirSync(worktreePath, { recursive: true }) } catch {}
+            }
+            sm.updateTaskGroup(group.id, { branchName, worktreePath, baseSha })
+          }
+          const cwd = worktreePath ?? repoPath
+          writeTaskMetaFile(cwd, {
+            taskGroupId: group.id,
+            branchName: branchName ?? '',
+            baseSha,
+            worktreeMode: 'worktree',
+            todoList: [`${members.map(m => m.agentId).join(', ')} collaborate in the shared worktree`],
+            subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: [] })),
+          })
+          syncGroupFiles(sm, group.id, repoPath)
+          ctx.io.emit('task-groups-changed', { workspaceId: ws!.id })
+        } catch (e: any) {
+          console.warn('[tasks] group worktree setup failed:', e?.message || e)
+        }
+      })
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }
@@ -386,19 +427,40 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
       if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
       const group = sm.getTaskGroup(taskGroupId)
       if (!group) throw new Error(`Task ${taskGroupId} not found`)
-      const state = ctx.sessionManager.getSessionStates()[sessionId]
-      if (!state) throw new Error('That session no longer exists')
-      const already = sm.listSubTasks(taskGroupId).find(s => s.sessionId === sessionId)
-      if (already) {
-        if (callback) callback({ ok: true, subtask: already, joined: false })
-        return
-      }
-      const created = sm.addSubTask({ taskGroupId, agentId: String(state.type || 'shell'), title: String(state.type || 'shell') })
-      const subtask = sm.updateSubTaskStatus(created.id, 'running', sessionId)!
-      if (group.status !== 'active') sm.updateTaskGroup(taskGroupId, { status: 'active' })
-      injectGroupContext(sm, ctx.sessionManager, taskGroupId, group.repoPath)
+      const { subtask, joined } = linkSessionToGroup(sm, ctx.sessionManager.getSessionStates(), taskGroupId, sessionId, group.repoPath)
+      ctx.sessionManager.setSessionTaskLink?.(sessionId, taskGroupId, subtask.id)
       ctx.io.emit('task-groups-changed', { workspaceId: '' })
-      if (callback) callback({ ok: true, subtask, joined: true })
+      if (callback) callback({ ok: true, subtask, joined })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('rename-task-group', async ({ taskGroupId, title }: { taskGroupId: string; title: string }, callback?: Function) => {
+    try {
+      const sm = smForTask(ctx, taskGroupId) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      const name = (title ?? '').trim()
+      if (!name) throw new Error('Task name cannot be empty')
+      const updated = sm.updateTaskGroup(taskGroupId, { title: name })
+      if (!updated) throw new Error(`Task ${taskGroupId} not found`)
+      ctx.io.emit('task-groups-changed', { workspaceId: '' })
+      if (callback) callback({ ok: true, taskGroup: updated })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('delete-task-group', async ({ taskGroupId }: { taskGroupId: string }, callback?: Function) => {
+    try {
+      const sm = smForTask(ctx, taskGroupId) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      const result = buildOrchestrator(taskGroupId).deleteTask(taskGroupId)
+      for (const sid of result.sessionIds) {
+        try { ctx.io.emit('session-closed', { sessionId: sid }) } catch {}
+      }
+      ctx.io.emit('task-groups-changed', { workspaceId: '' })
+      if (callback) callback({ ok: true, ...result })
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }

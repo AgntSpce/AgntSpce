@@ -86,7 +86,7 @@ function OverviewCard({ label, value, change, changeClass }: { label: string; va
 }
 
 export default function Dashboard(props: Props) {
-  const { workspaces, sessions, activeWorkspace, deletedWorkspaces, onSelect, onDelete, onRestore, onPermanentDelete, onNewWorkspace, onClose } = props
+  const { workspaces, sessions, activeWorkspace, deletedWorkspaces, onSelect, onDelete, onRestore, onPermanentDelete, onClose } = props
   const filterStats = props.filterStats || { totalOriginalBytes: 0, totalFilteredBytes: 0, totalOriginalTokens: 0, totalFilteredTokens: 0, eventsProcessed: 0 }
   const searchEvents = props.searchEvents || []
   const commandHistory = props.commandHistory || []
@@ -117,14 +117,8 @@ export default function Dashboard(props: Props) {
       <div className="dashboard-header">
         <div className="dashboard-header-left">
           <h1>Dashboard</h1>
-          <div className="dashboard-header-stats">
-            <span className="dashboard-header-stat">{workspaces.length} workspaces</span>
-            <span className="dashboard-header-stat">{totalSessions} terminals</span>
-            {activeCount > 0 && <span className="dashboard-header-stat active">{activeCount} active</span>}
-          </div>
         </div>
         <div className="dashboard-header-actions">
-          <button className="new-terminal-btn" onClick={onNewWorkspace}>+ New Workspace</button>
           <button className="dashboard-close-btn" onClick={onClose} title="Close">
             <i className="codicon codicon-close" style={{ fontSize: 16 }}></i>
           </button>

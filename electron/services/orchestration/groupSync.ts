@@ -1,4 +1,5 @@
 import * as fs from 'node:fs'
+import * as path from 'node:path'
 import {
   StateManager,
   CoordinatorError,
@@ -12,10 +13,11 @@ export interface PtyWriter {
   writeToSession(sessionId: string, data: string): boolean
 }
 
-/** Shared-context preamble injected into each grouped session's live PTY.
- *  No trailing newline on purpose: the text lands in the agent's input box
- *  for it (or the user) to submit — auto-submitting into a live TUI can
- *  misfire mid-turn. Scopes are advisory: grouped agents share everything
+/** Shared-context briefing, written to a file — never into a live PTY.
+ *  Writing text into an interactive agent TUI corrupts its visible transcript
+ *  (garbled repeats), so agents discover everything by reading files:
+ *  COLLAB.md (members, scopes, progress), .task.json (ids), and the CLI
+ *  usage block below. Scopes are advisory: grouped agents share everything
  *  and coordinate through claims, not exclusivity. */
 export function buildGroupPreamble(
   group: TaskGroupOverview,
@@ -45,14 +47,40 @@ export function buildGroupPreamble(
   return lines.join('\n')
 }
 
-/** Re-renders COLLAB.md and injects the shared preamble into every running
- *  member session. Returns how many PTYs accepted the write. */
-export function injectGroupContext(
+export const GROUP_BRIEFING_FILENAME = 'AGENTS-TASK.md'
+
+/** Link one live session into a group: subtask row (running + linked),
+ *  group flipped active, files re-rendered. Idempotent — returns
+ *  joined:false when already linked. Shared by join-group and spawn. */
+export function linkSessionToGroup(
   sm: StateManager,
-  writer: PtyWriter,
+  sessionStates: Record<string, any>,
+  taskGroupId: string,
+  sessionId: string,
+  repoPath: string
+): { subtask: SubTaskOverview; joined: boolean } {
+  const group = sm.getTaskGroup(taskGroupId)
+  if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
+  const state = sessionStates[sessionId]
+  if (!state) throw new CoordinatorError('NOT_FOUND', 'That session no longer exists')
+  const already = sm.listSubTasks(taskGroupId).find(s => s.sessionId === sessionId)
+  if (already) return { subtask: already, joined: false }
+  const agentId = String(state.type || 'shell')
+  const created = sm.addSubTask({ taskGroupId, agentId, title: agentId })
+  const subtask = sm.updateSubTaskStatus(created.id, 'running', sessionId)!
+  if (group.status !== 'active') sm.updateTaskGroup(taskGroupId, { status: 'active' })
+  syncGroupFiles(sm, taskGroupId, repoPath)
+  return { subtask, joined: true }
+}
+
+/** Re-renders COLLAB.md and writes the shared briefing file next to it.
+ *  Returns the paths written. Pure file I/O — nothing is ever written into
+ *  a live terminal, so agent transcripts stay clean. */
+export function syncGroupFiles(
+  sm: StateManager,
   taskGroupId: string,
   repoPath: string
-): { injected: number } {
+): { mdPath: string; briefingPath: string | null } {
   const group = sm.getTaskGroup(taskGroupId)
   if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
   const members = sm.listSubTasks(taskGroupId)
@@ -62,13 +90,24 @@ export function injectGroupContext(
   try {
     conventions = fs.readFileSync(mdPath, 'utf-8')
   } catch {}
-  const running = members.filter(m => m.status === 'running' && m.sessionId)
-  let injected = 0
-  for (const m of running) {
-    const text = buildGroupPreamble(group, members, conventions)
-    try {
-      if (writer.writeToSession(m.sessionId as string, text)) injected++
-    } catch {}
-  }
-  return { injected }
+  const dir = group.worktreePath && fs.existsSync(group.worktreePath)
+    ? group.worktreePath
+    : repoPath
+  let briefingPath: string | null = null
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    briefingPath = path.join(dir, GROUP_BRIEFING_FILENAME)
+    fs.writeFileSync(briefingPath, buildGroupPreamble(group, members, conventions), 'utf-8')
+  } catch {}
+  return { mdPath, briefingPath }
+}
+
+/** @deprecated PTY injection garbles live TUI transcripts. Use syncGroupFiles. */
+export function injectGroupContext(
+  _sm: StateManager,
+  _writer: PtyWriter,
+  _taskGroupId: string,
+  _repoPath: string
+): { injected: number } {
+  return { injected: 0 }
 }

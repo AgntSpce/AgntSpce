@@ -173,6 +173,21 @@ describe('v2 task worktrees', () => {
     expect(holder?.agentId).toBe('claude')
   })
 
+  it('renames and hard-deletes task groups', () => {
+    const dir = tmpDir()
+    const sm = new StateManager(path.join(dir, 'c.db'), dir)
+    const g = sm.createTaskGroup({ repoPath: '/repo/a', title: 'Old' })
+    const s = sm.addSubTask({ taskGroupId: g.id, agentId: 'claude' })
+    sm.appendCollabEvent({ taskGroupId: g.id, subtaskId: s.id, agentId: 'claude', kind: 'progress', payload: { message: 'hi' } })
+
+    expect(sm.updateTaskGroup(g.id, { title: 'New' })?.title).toBe('New')
+    expect(sm.deleteTaskGroup(g.id)).toBe(true)
+    expect(sm.getTaskGroup(g.id)).toBeNull()
+    expect(sm.listSubTasks(g.id)).toHaveLength(0)
+    expect(sm.getCollabEvents(g.id)).toHaveLength(0)
+    expect(sm.deleteTaskGroup(g.id)).toBe(false)
+  })
+
   it('deduplicates branch names', () => {
     const repo = tmpDir()
     const defaultBranch = initRepo(repo)
