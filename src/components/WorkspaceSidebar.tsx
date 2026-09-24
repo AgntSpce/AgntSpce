@@ -1,14 +1,17 @@
-import { useState, useEffect, useCallback, useMemo, memo } from 'react'
-import type { WorkspaceInfo, SessionState, ExecutionEvent, AgentConfig, CommandEvent, TaskGroupInfo } from '../types'
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
+import type { WorkspaceInfo, SessionState, ExecutionEvent, AgentConfig, CommandEvent, TaskGroupInfo, TerminalOutput } from '../types'
 import { FileExplorer } from './FileExplorer'
 import { AGENT_TYPE_SET } from '../utils/agentTypes'
 import { getAgentColorImage } from '../agentImages'
+import useSocketEvent from '../hooks/useSocketEvent'
+import TaskAgentRow, { type TaskMember } from './TaskAgentRow'
 import './WorkspaceSidebar.css'
 
 interface PromptHistoryEntry {
   sessionId: string
   originalPrompt: string
   timestamp: number
+  source?: string // 'typed' (user submitted) | 'agent-start' (launch prompt)
 }
 
 interface DeletedWs {
@@ -83,8 +86,16 @@ interface Props {
   onSelectTask?: (id: string) => void
   /** Quick-create an empty task group (title only), then open it. */
   onCreateTask?: (title: string) => void
-  /** Member sessions of a group for the expandable dropdown. */
-  onFetchMembers?: (taskGroupId: string) => Promise<{ sessionId: string | null; agentId: string; status: string; title: string }[]>
+  /** Member sessions of a group for the task's agent rows. */
+  onFetchMembers?: (taskGroupId: string) => Promise<TaskMember[]>
+  /**
+   * Subscribe to the live `terminal-output` stream. Passed down from App (the
+   * single useSocket owner) for the per-agent live feed. The panel must NOT call
+   * useSocket() itself — each call opens a new connection.
+   */
+  onTerminalOutput?: (cb: (data: TerminalOutput) => void) => () => void
+  /** Pull token usage for a session (output/total/estimated cost). */
+  getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
   onRenameTask?: (taskGroupId: string, title: string) => void
   /** Delete a task group (closes members, retires worktree). */
@@ -157,6 +168,140 @@ function clampContextMenuPos(x: number, y: number, estW = 230, estH = 340) {
   }
 }
 
+// ── Agent live-output buffer (workspace panel) ──────────────────────────
+// One panel-level subscription to the existing `onTerminalOutput` fan-out keeps
+// a small, capped tail of each task-agent's live terminal output. `useSocket`
+// opens a NEW connection per call, so the panel never calls it — App passes its
+// single instance's `onTerminalOutput` down instead (many subscribers are free).
+// Chunks append into a ref and commit to React state on a throttle, so a busy
+// agent never triggers a setState per chunk.
+
+const AGENT_FEED_CAP = 8192 // ~8 KB tail per session
+const AGENT_FEED_FLUSH_MS = 100
+
+type AgentOutEntry = { text: string; lastLine: string; ts: number }
+
+// Strip ANSI/control sequences (keeps \t and \n; folds \r\n → \n) so the feed
+// renders clean text.
+function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '') // OSC
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')            // CSI
+    .replace(/\x1B[@-Z\\-_]/g, '')                       // misc escapes
+    .replace(/\r/g, '')                                  // CR
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')     // remaining control chars
+}
+
+function lastNonEmptyLine(s: string): string {
+  const lines = s.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim()
+    if (t) return t.length > 160 ? t.slice(0, 160) : t
+  }
+  return ''
+}
+
+function useAgentOutputBuffer(
+  onTerminalOutput: ((cb: (d: TerminalOutput) => void) => () => void) | undefined,
+  trackedIds: string[],
+) {
+  const bufRef = useRef<Record<string, AgentOutEntry>>({})
+  const trackedRef = useRef<Set<string>>(new Set())
+  trackedRef.current = useMemo(() => new Set(trackedIds), [trackedIds])
+  const [, forceRender] = useState(0)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useSocketEvent<TerminalOutput>(
+    onTerminalOutput || (() => () => {}),
+    (d) => {
+      if (!trackedRef.current.has(d.sessionId)) return
+      const clean = stripAnsi(d.data || '')
+      if (!clean) return
+      const prev = bufRef.current[d.sessionId]
+      const text = (prev?.text || '') + clean
+      bufRef.current[d.sessionId] = {
+        text: text.length > AGENT_FEED_CAP ? text.slice(-AGENT_FEED_CAP) : text,
+        lastLine: lastNonEmptyLine(clean) || prev?.lastLine || '',
+        ts: Date.now(),
+      }
+      if (!timerRef.current) {
+        timerRef.current = setTimeout(() => {
+          timerRef.current = null
+          forceRender(v => v + 1)
+        }, AGENT_FEED_FLUSH_MS)
+      }
+    },
+    [onTerminalOutput],
+  )
+
+  // Drop buffers for sessions no longer tracked (task/agent gone).
+  useEffect(() => {
+    for (const id of Object.keys(bufRef.current)) {
+      if (!trackedRef.current.has(id)) delete bufRef.current[id]
+    }
+  }, [trackedIds])
+
+  // Cancel a pending flush on unmount so we never setState after teardown.
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current) }, [])
+
+  return bufRef
+}
+
+// ── "Agent is working" flags ──────────────────────────────────────────
+// The backend statusDetector flips a session to `busy` on ANY recent output —
+// including the echo of the user typing — so `status === 'busy'` alone makes
+// the spinner flash before the user has even pressed Enter. To only show
+// "working" when the agent is genuinely responding to a SUBMITTED prompt, we
+// track, per session, the last time it settled (idle/waiting/exited) and
+// compare it to the newest submitted prompt ('typed' or 'agent-start'). If the
+// newest prompt came after the last settle, and the session is busy, the agent
+// is working on it — otherwise the busy flag is just typing echo.
+function useAgentWorkingFlags(
+  promptHistory: PromptHistoryEntry[],
+  sessions: Record<string, SessionState>,
+): Record<string, boolean> {
+  const lastSettledRef = useRef<Record<string, number>>({})
+  const prevStatusRef = useRef<Record<string, string>>({})
+  const [, force] = useState(0)
+
+  // Newest submitted prompt timestamp per session.
+  const latestPrompt = useMemo(() => {
+    const m: Record<string, number> = {}
+    for (const p of promptHistory) {
+      if (p.source && p.source !== 'typed' && p.source !== 'agent-start') continue
+      if (!m[p.sessionId] || p.timestamp > m[p.sessionId]) m[p.sessionId] = p.timestamp
+    }
+    return m
+  }, [promptHistory])
+
+  // Stamp the last-settled time ONLY on a busy → settled transition, i.e. the
+  // agent actually finished responding. The brief idle at launch (before any
+  // work) must not clear the launch prompt, or the agent's first run wouldn't
+  // show as working.
+  useEffect(() => {
+    let changed = false
+    for (const [sid, s] of Object.entries(sessions)) {
+      const prev = prevStatusRef.current[sid]
+      if (prev !== s.status) {
+        if (prev === 'busy' && (s.status === 'idle' || s.status === 'waiting' || s.status === 'exited')) {
+          lastSettledRef.current[sid] = Date.now()
+          changed = true
+        }
+        prevStatusRef.current[sid] = s.status
+      }
+    }
+    if (changed) force(v => v + 1)
+  }, [sessions])
+
+  const flags: Record<string, boolean> = {}
+  for (const sid of Object.keys(sessions)) {
+    const prompt = latestPrompt[sid] || 0
+    const settled = lastSettledRef.current[sid] || 0
+    flags[sid] = prompt > 0 && prompt > settled && sessions[sid].status === 'busy'
+  }
+  return flags
+}
+
 const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   workspaces,
   sessions,
@@ -179,6 +324,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onCloneDirect,
   onCreateTask,
   onFetchMembers,
+  onTerminalOutput,
+  getTokenUsage,
+  promptHistory,
   onRenameTask,
   onDeleteTask,
   onOpenTaskDetails,
@@ -217,8 +365,16 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onCloneDirect?: () => void
   /** Quick-create an empty task group (title only), then open it. */
   onCreateTask?: (title: string) => void
-  /** Member sessions of a group for the expandable dropdown. */
-  onFetchMembers?: (taskGroupId: string) => Promise<{ sessionId: string | null; agentId: string; status: string; title: string }[]>
+  /** Member sessions of a group for the task's agent rows. */
+  onFetchMembers?: (taskGroupId: string) => Promise<TaskMember[]>
+  /**
+   * Subscribe to the live `terminal-output` stream. Passed down from App (the
+   * single useSocket owner) for the per-agent live feed. The panel must NOT call
+   * useSocket() itself — each call opens a new connection.
+   */
+  onTerminalOutput?: (cb: (data: TerminalOutput) => void) => () => void
+  /** Pull token usage for a session (output/total/estimated cost). */
+  getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
   onRenameTask?: (taskGroupId: string, title: string) => void
   /** Delete a task group (closes members, retires worktree). */
@@ -228,8 +384,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
 }) {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [showTrash, setShowTrash] = useState(false)
-  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
-  const [membersByTask, setMembersByTask] = useState<Record<string, { sessionId: string | null; agentId: string; status: string; title: string }[]>>({})
+  const [membersByTask, setMembersByTask] = useState<Record<string, TaskMember[]>>({})
   const [membersLoadedByTask, setMembersLoadedByTask] = useState<Record<string, boolean>>({})
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
   useEffect(() => {
@@ -239,28 +394,56 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     return () => document.removeEventListener('click', handler)
   }, [menuOpenId, taskMenuId])
 
-  function toggleTaskExpand(id: string, event?: React.MouseEvent) {
+  function handleTaskRowClick(id: string, event?: React.MouseEvent) {
     if (event && event.detail > 1) return
-    setExpandedTaskId(id)
+    // Agent rows are always visible now, so a task-row click just navigates to
+    // that task's agents page (as it always did).
     if (openTaskId !== id) onSelectTask?.(id)
   }
 
+  // Agent rows are always visible, so fetch members for EVERY task (not just the
+  // expanded one). Re-runs when the task list changes (new agents auto-attach).
+  // Already-loaded tasks keep their rows while refreshing in the background so
+  // the list never flashes back to "Loading agents…".
   useEffect(() => {
-    if (!expandedTaskId || !onFetchMembers || openTaskId !== expandedTaskId) return
+    if (!onFetchMembers || !taskGroups) return
     let cancelled = false
-    setMembersLoadedByTask(prev => ({ ...prev, [expandedTaskId]: false }))
-    onFetchMembers(expandedTaskId)
-      .then(members => {
-        if (!cancelled) {
-          setMembersByTask(prev => ({ ...prev, [expandedTaskId]: members }))
-          setMembersLoadedByTask(prev => ({ ...prev, [expandedTaskId]: true }))
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setMembersLoadedByTask(prev => ({ ...prev, [expandedTaskId]: true }))
-      })
+    const ids = taskGroups.map(t => t.id)
+    setMembersLoadedByTask(prev => {
+      let changed = false
+      const next = { ...prev }
+      for (const id of ids) {
+        if (!(id in next)) { next[id] = false; changed = true }
+      }
+      return changed ? next : prev
+    })
+    for (const id of ids) {
+      onFetchMembers(id)
+        .then(members => {
+          if (cancelled) return
+          setMembersByTask(prev => ({ ...prev, [id]: members }))
+          setMembersLoadedByTask(prev => ({ ...prev, [id]: true }))
+        })
+        .catch(() => {
+          if (cancelled) return
+          setMembersByTask(prev => ({ ...prev, [id]: [] }))
+          setMembersLoadedByTask(prev => ({ ...prev, [id]: true }))
+        })
+    }
     return () => { cancelled = true }
-  }, [expandedTaskId, onFetchMembers, openTaskId, taskGroups])
+  }, [onFetchMembers, taskGroups])
+
+  // Every task-agent's sessionId — the panel tracks live output for all of them
+  // (rows are always visible). Sorted union so the set reference is stable.
+  const trackedIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const list of Object.values(membersByTask)) {
+      for (const m of list) if (m.sessionId) set.add(m.sessionId)
+    }
+    return [...set].sort()
+  }, [membersByTask])
+  const agentOutRef = useAgentOutputBuffer(onTerminalOutput, trackedIds)
+  const workingFlags = useAgentWorkingFlags(promptHistory || [], sessions)
 
   // Latest known git branch per workspace, from agent sessions (most recent
   // first). Replaces the old aggregate-status gutter data.
@@ -375,20 +558,18 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
             </div>
             <div className="task-list">
               {(taskGroups || []).map(t => {
-                 const expanded = expandedTaskId === t.id && openTaskId === t.id
                  const members = membersByTask[t.id] || []
                  const isLiveMember = (member: { sessionId: string | null }) => {
                    if (!member.sessionId) return false
                    const session = sessions[member.sessionId]
                    return !!session && (!session.taskGroupId || session.taskGroupId === t.id)
                  }
-                 const visibleMembers = members.filter(isLiveMember)
                  const liveMembers = (t.members || []).filter(isLiveMember)
                 return (
                   <div key={t.id}>
                     <div
                        className={`task-row task-row-card${openTaskId === t.id || selectedTaskId === t.id ? ' active' : ''}`}
-                       onClick={(e) => toggleTaskExpand(t.id, e)}
+                       onClick={(e) => handleTaskRowClick(t.id, e)}
                        onDoubleClick={(e) => { e.stopPropagation(); onSelectTask?.(t.id) }}
                        title={t.userGoal || t.title}
                     >
@@ -443,26 +624,29 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                         )}
                       </span>
                     </div>
-                    {expanded && (
-                      <div className="task-member-list" role="group" aria-label={`Agents in ${t.title}`}>
-                          {!membersLoadedByTask[t.id] ? (
-                            <div className="task-member-empty">Loading agents…</div>
-                          ) : visibleMembers.length === 0 ? (
-                            <div className="task-member-empty">No agents yet — drag one here or add below</div>
-                          ) : null}
-                         {visibleMembers.map(m => (
-                          <div
-                            key={`${m.agentId}-${m.sessionId || m.title}`}
-                            className={`agent-row-item task-member-row${!m.sessionId ? ' pending' : ''}${activeSessionId && m.sessionId === activeSessionId ? ' active' : ''}`}
-                            onClick={() => { if (m.sessionId) onSelectSession?.(m.sessionId) }}
-                            title={m.sessionId ? `${m.agentId} · ${m.status} — click to focus` : `${m.agentId} · ${m.status}`}
-                          >
-                            <AgentLogo agentId={m.agentId} size={18} />
-                            <span className="task-row-title">{m.title || m.agentId}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <div className="task-member-list" role="group" aria-label={`Agents in ${t.title}`}>
+                      {!membersLoadedByTask[t.id] ? (
+                        <div className="task-member-empty">Loading agents…</div>
+                      ) : members.length === 0 ? (
+                        <div className="task-member-empty">No agents yet</div>
+                      ) : null}
+                      {membersLoadedByTask[t.id] && members.map(m => {
+                        const buf = m.sessionId ? agentOutRef.current[m.sessionId] : undefined
+                        return (
+                          <TaskAgentRow
+                            key={`${m.agentId}-${m.sessionId || m.subtaskId || m.title}`}
+                            member={m}
+                            sessionStatus={m.sessionId ? sessions[m.sessionId]?.status : undefined}
+                            isWorking={!!(m.sessionId && workingFlags[m.sessionId])}
+                            active={!!(activeSessionId && m.sessionId === activeSessionId)}
+                            previewLine={buf?.lastLine || ''}
+                            lastLineTs={buf?.ts || 0}
+                            getTokenUsage={getTokenUsage}
+                            onSelectSession={onSelectSession}
+                          />
+                        )
+                      })}
+                    </div>
                   </div>
                 )
               })}
@@ -507,7 +691,8 @@ export default memo(function WorkspaceSidebar({
   taskGroups, selectedTaskId, openTaskId, onSelectTask,
   onOpenFolderDirect, onCloneDirect,
   activeSessionId, onSelectSession,
-  onCreateTask, onFetchMembers, onRenameTask, onDeleteTask, onOpenTaskDetails,
+  onCreateTask, onFetchMembers, onTerminalOutput, getTokenUsage, promptHistory,
+  onRenameTask, onDeleteTask, onOpenTaskDetails,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -536,6 +721,9 @@ export default memo(function WorkspaceSidebar({
         onSelectSession={onSelectSession}
         onCreateTask={onCreateTask}
         onFetchMembers={onFetchMembers}
+        onTerminalOutput={onTerminalOutput}
+        getTokenUsage={getTokenUsage}
+        promptHistory={promptHistory}
         onRenameTask={onRenameTask}
         onDeleteTask={onDeleteTask}
         onOpenTaskDetails={onOpenTaskDetails}

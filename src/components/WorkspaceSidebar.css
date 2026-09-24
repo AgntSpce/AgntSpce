@@ -598,3 +598,95 @@
     border-top-color: var(--warning);
   }
 }
+
+/* ── Task agent row: wrapper, meta cluster, details popover ──────── */
+.task-member-row-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Time + disclosure caret sit at the right edge of the row. */
+.orca-agent-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.orca-agent-caret {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-dim);
+  transition: transform var(--anim-duration-fast, 120ms) var(--anim-ease, ease);
+}
+
+.orca-agent-caret.open {
+  transform: rotate(180deg);
+}
+
+/* Model tag shown inline next to the agent name. */
+.orca-agent-model {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* Click-triggered details popover (model / tokens / status). */
+.orca-agent-details {
+  margin: 0 0 4px 28px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.orca-agent-details-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 4px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.orca-agent-details-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.orca-agent-details-model {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.orca-agent-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.orca-agent-detail-row .val {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.orca-agent-detail-row .val.muted {
+  color: var(--text-dim);
+}

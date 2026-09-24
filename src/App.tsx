@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
 
 import WorkspaceSidebar from './components/WorkspaceSidebar'
+import type { TaskMember } from './components/TaskAgentRow'
 import TerminalArea from './components/TerminalArea'
 import InputModal from './components/InputModal'
 import AgentModal from './components/AgentModal'
@@ -173,6 +174,7 @@ function App() {
     filterStats, commandHistory, searchEvents, promptHistory,
     getOrchestratorStats, sessionStartedAt,
     sessionCompressionModes, setSessionCompressionMode,
+    getTokenUsage,
   } = useSocket()
   // Per-window workspace: one window, one workspace.
   // - App restart (first window, no ?blank): restore the last workspace from
@@ -749,14 +751,18 @@ function App() {
     setFileExplorerOpen(false)
     setViewMode('agents')
   }, [refreshOpenGroup])
-  const fetchGroupMembers = useCallback(async (taskGroupId: string) => {
+  const fetchGroupMembers = useCallback(async (taskGroupId: string): Promise<TaskMember[]> => {
     try {
       const res = await getTaskDetail(taskGroupId)
       return (res?.detail?.subtasks || []).map((s: any) => ({
-        sessionId: s.sessionId as string | null,
+        sessionId: (s.sessionId as string | null) ?? null,
         agentId: s.agentId as string,
         status: s.status as string,
         title: s.title as string,
+        model: (s.model as string | null) ?? null,
+        assignmentPrompt: (s.assignmentPrompt as string) || '',
+        subtaskId: (s.id as string) || '',
+        lastEventAt: (s.lastEventAt as number | null) ?? null,
       }))
     } catch {
       return []
@@ -1906,6 +1912,8 @@ function App() {
                onSelectTask={handleSelectTask}
               onCreateTask={handleQuickCreateTask}
               onFetchMembers={fetchGroupMembers}
+              onTerminalOutput={onTerminalOutput}
+              getTokenUsage={getTokenUsage}
               onRenameTask={handleRenameTask}
               onDeleteTask={handleDeleteTask}
               onOpenTaskDetails={setSelectedTaskId}
