@@ -147,36 +147,6 @@ export class AgentOrchestrator {
     }
   }
 
-  parkSession(sessionId: string): void {
-    this.resourceTracker.unregisterSession(sessionId)
-    this.sessions.delete(sessionId)
-    if (this.sessions.size === 0) {
-      this.stopHealthChecks()
-      this.resourceTracker.stopMonitoring()
-    }
-    try {
-      const sm = this.stateManager
-      const existing = sm?.getSession(sessionId)
-      if (sm && existing) {
-        sm.upsertSession({
-          id: existing.id,
-          workspaceId: existing.workspaceId,
-          sessionType: existing.sessionType,
-          agentId: existing.agentId,
-          taskId: existing.taskId,
-          taskGroupId: existing.taskGroupId,
-          subtaskId: existing.subtaskId,
-          status: 'idle',
-          branch: existing.branch,
-          worktreeId: existing.worktreeId,
-          lastActivity: Date.now(),
-        })
-      }
-    } catch (err: any) {
-      console.error('[orchestrator] parkSession persistence failed:', sessionId, err?.message || err)
-    }
-  }
-
   private teardownMergedWorktree(sessionId: string): void {
     const sm = this.stateManager
     if (!sm) return

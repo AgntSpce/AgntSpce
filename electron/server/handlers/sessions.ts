@@ -100,21 +100,31 @@ export function registerSessionHandlers(ctx: ServerContext, socket: Socket): voi
   socket.on('close-tab', async ({ sessionIds }) => {
     try {
       const ids = Array.isArray(sessionIds) ? sessionIds : []
-      const preserved: string[] = []
-      for (const id of ids) {
-        const before = ctx.sessionManager.getSessionStates()[id]
-        const preserve = !!before?.taskGroupId
-        ctx.sessionManager.closeSession(id, { preserveForResume: preserve })
-        if (preserve) preserved.push(id)
-      }
       const states = ctx.sessionManager.getSessionStates()
+      let taskGroupsChanged = false
       for (const id of ids) {
-        if (preserved.includes(id)) {
-          ctx.io.emit('session-resumed', { sessionId: id, sessions: states })
-        } else {
-          ctx.io.emit('session-closed', { sessionId: id })
+        const state = states[id]
+        ctx.sessionManager.closeSession(id)
+        if (state?.taskGroupId) {
+          taskGroupsChanged = true
+          if (state.subtaskId) {
+            try {
+              const sm = ctx.agentOrchestrator.getStateManager()
+              const subtask = sm?.getSubTask(state.subtaskId)
+              if (sm && subtask?.sessionId === id) {
+                sm.updateSubTaskStatus(subtask.id, 'pending', null)
+                if (!sm.listSubTasks(state.taskGroupId).some(s => s.status === 'running')) {
+                  sm.updateTaskGroup(state.taskGroupId, { status: 'paused' })
+                }
+              }
+            } catch (e: any) {
+              console.warn('[sessions] task member cleanup failed:', e?.message || e)
+            }
+          }
         }
+        ctx.io.emit('session-closed', { sessionId: id })
       }
+      if (taskGroupsChanged) ctx.io.emit('task-groups-changed', { workspaceId: ctx.sessionManager.getWorkspace()?.id || '' })
       await ctx.autoSaveSessions()
     } catch (error: any) {
       socket.emit('error', { message: 'Failed to close tabs', error: error.message })

@@ -108,6 +108,7 @@ export interface SavedSessionData {
     reasoning?: string
     verbosity?: string
     resumeId?: string
+    nativeSessionId?: string
   }
 }
 

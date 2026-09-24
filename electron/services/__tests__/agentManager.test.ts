@@ -120,6 +120,20 @@ describe('AgentManager', () => {
         .toBe('codex resume def456')
     })
 
+    it('builds exact Pi fresh and resume commands', () => {
+      expect(manager.buildCommand('pi', 'fresh', { agentId: 'pi', mode: 'fresh', flags: [], nativeSessionId: 'pi-session' }))
+        .toBe('pi --session-id pi-session')
+      expect(manager.buildCommand('pi', 'resume', { agentId: 'pi', mode: 'resume', flags: [], resumeId: 'pi-session' }))
+        .toBe('pi --session pi-session')
+    })
+
+    it('builds resume commands for Gemini and Droid', () => {
+      expect(manager.buildCommand('gemini', 'resume', { agentId: 'gemini', mode: 'resume', flags: [], resumeId: 'gemini-session' }))
+        .toBe('gemini --resume gemini-session')
+      expect(manager.buildCommand('droid', 'continue', { agentId: 'droid', mode: 'continue', flags: [] }))
+        .toBe('droid --resume')
+    })
+
     it('ignores resumeId for agents without resume support', () => {
       expect(manager.buildCommand('gemini', 'fresh', { agentId: 'gemini', mode: 'fresh', flags: [], resumeId: 'abc' }))
         .toBe('gemini')

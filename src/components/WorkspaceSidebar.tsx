@@ -239,11 +239,10 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     return () => document.removeEventListener('click', handler)
   }, [menuOpenId, taskMenuId])
 
-  function toggleTaskExpand(id: string) {
-    const isExpanded = expandedTaskId === id
-    setExpandedTaskId(isExpanded ? null : id)
-    if (!isExpanded && openTaskId === id) return
-    onSelectTask?.(id)
+  function toggleTaskExpand(id: string, event?: React.MouseEvent) {
+    if (event && event.detail > 1) return
+    setExpandedTaskId(id)
+    if (openTaskId !== id) onSelectTask?.(id)
   }
 
   useEffect(() => {
@@ -378,14 +377,20 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
               {(taskGroups || []).map(t => {
                  const expanded = expandedTaskId === t.id && openTaskId === t.id
                  const members = membersByTask[t.id] || []
-                 const visibleMembers = members.filter(m => m.sessionId)
-                 const liveMembers = (t.members || []).filter(m => m.sessionId)
+                 const isLiveMember = (member: { sessionId: string | null }) => {
+                   if (!member.sessionId) return false
+                   const session = sessions[member.sessionId]
+                   return !!session && (!session.taskGroupId || session.taskGroupId === t.id)
+                 }
+                 const visibleMembers = members.filter(isLiveMember)
+                 const liveMembers = (t.members || []).filter(isLiveMember)
                 return (
                   <div key={t.id}>
                     <div
                        className={`task-row task-row-card${openTaskId === t.id || selectedTaskId === t.id ? ' active' : ''}`}
-                      onClick={() => toggleTaskExpand(t.id)}
-                      title={t.userGoal || t.title}
+                       onClick={(e) => toggleTaskExpand(t.id, e)}
+                       onDoubleClick={(e) => { e.stopPropagation(); onSelectTask?.(t.id) }}
+                       title={t.userGoal || t.title}
                     >
                       <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
                       <div className="task-row-main">

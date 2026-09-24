@@ -106,6 +106,7 @@ export interface AgentStartConfig {
   reasoning?: string
   verbosity?: string
   resumeId?: string
+  nativeSessionId?: string
   declaredFiles?: string[]
   prompt?: string
 }

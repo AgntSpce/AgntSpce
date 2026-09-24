@@ -84,7 +84,7 @@ const FALLBACK_AGENTS: AgentConfig[] = [
   },
   {
     id: 'gemini', name: 'Gemini', icon: '✨', description: 'Google Gemini CLI',
-    modes: [{ id: 'fresh', name: 'Fresh', description: 'Start new session' }],
+    modes: [{ id: 'fresh', name: 'Fresh', description: 'Start new session' }, { id: 'continue', name: 'Continue', description: 'Continue last session' }, { id: 'resume', name: 'Resume', description: 'Resume saved session' }],
     models: ['gemini-2.5-pro', 'gemini-2.0-flash'],
     defaultModel: 'gemini-2.5-pro',
     flags: [],
@@ -110,7 +110,7 @@ const FALLBACK_AGENTS: AgentConfig[] = [
   },
   {
     id: 'droid', name: 'Droid', icon: '🤖', description: 'Factory AI Droid coding agent',
-    modes: [{ id: 'fresh', name: 'Fresh', description: 'Start new session' }, { id: 'continue', name: 'Continue', description: 'Continue last session' }],
+    modes: [{ id: 'fresh', name: 'Fresh', description: 'Start new session' }, { id: 'continue', name: 'Continue', description: 'Continue last session' }, { id: 'resume', name: 'Resume', description: 'Resume saved session' }],
     flags: [],
     defaultMode: 'fresh',
   },
@@ -122,7 +122,7 @@ const FALLBACK_AGENTS: AgentConfig[] = [
   },
   {
     id: 'pi', name: 'Pi', icon: '🥧', description: 'Pi coding agent',
-    modes: [{ id: 'fresh', name: 'Fresh', description: 'Start new session' }, { id: 'continue', name: 'Continue', description: 'Continue last session' }],
+    modes: [{ id: 'fresh', name: 'Fresh', description: 'Start new session' }, { id: 'continue', name: 'Continue', description: 'Continue last session' }, { id: 'resume', name: 'Resume', description: 'Resume saved session' }],
     flags: [],
     defaultMode: 'fresh',
   },
@@ -743,16 +743,12 @@ function App() {
     setActiveSessionId(null)
     setOpenGroupSessions([])
     setOpenGroupWorktree(null)
-    if (openGroupId === id) {
-      setOpenGroupId(null)
-      return
-    }
     setOpenGroupId(id)
     refreshOpenGroup(id)
     setActiveView(null)
     setFileExplorerOpen(false)
     setViewMode('agents')
-  }, [openGroupId, refreshOpenGroup])
+  }, [refreshOpenGroup])
   const fetchGroupMembers = useCallback(async (taskGroupId: string) => {
     try {
       const res = await getTaskDetail(taskGroupId)
@@ -822,11 +818,16 @@ function App() {
 
   const agentSessions = useMemo(() => {
     const all = Object.values(sessions).filter(s => AGENT_TYPE_SET.has(s.type))
-    const scoped = openGroupId
-      ? all.filter(s => openGroupSessions.includes(s.id) || s.taskGroupId === openGroupId)
-      : all
-    return scoped.slice(0, 12)
-  }, [sessions, openGroupId, openGroupSessions])
+    if (!openGroupId) return []
+    const memberIds = new Set(
+      (taskGroups.find(group => group.id === openGroupId)?.members || [])
+        .map(member => member.sessionId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    )
+    return all
+      .filter(s => s.taskGroupId === openGroupId || openGroupSessions.includes(s.id) || memberIds.has(s.id))
+      .slice(0, 12)
+  }, [sessions, taskGroups, openGroupId, openGroupSessions])
   const shellSessions = useMemo(
     () => Object.values(sessions).filter(s => s.type === 'shell'),
     [sessions]

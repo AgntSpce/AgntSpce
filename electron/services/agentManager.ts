@@ -63,8 +63,16 @@ export interface AgentStartConfig {
   reasoning?: string
   verbosity?: string
   resumeId?: string
+  nativeSessionId?: string
   declaredFiles?: string[]
   prompt?: string
+}
+
+function commandArg(value: string): string {
+  const trimmed = String(value || '').trim()
+  if (!trimmed) return ''
+  if (/^[A-Za-z0-9._:-]+$/.test(trimmed)) return trimmed
+  return `'${trimmed.replace(/'/g, `'\\''`)}'`
 }
 
 export class AgentManager {
@@ -153,6 +161,8 @@ export class AgentManager {
       baseCommand: 'gemini',
       modes: {
         fresh: { command: 'gemini', description: 'Start new session' },
+        continue: { command: 'gemini --resume', description: 'Continue last session' },
+        resume: { command: 'gemini --resume', description: 'Resume saved session' },
       },
       models: ['gemini-2.5-pro', 'gemini-2.0-flash'],
       defaultModel: 'gemini-2.5-pro',
@@ -342,6 +352,8 @@ export class AgentManager {
       baseCommand: 'droid',
       modes: {
         fresh: { command: 'droid', description: 'Start new droid session' },
+        continue: { command: 'droid --resume', description: 'Continue last session' },
+        resume: { command: 'droid --resume', description: 'Resume saved session' },
         review: { command: 'droid review', description: 'Review code changes' },
         plan: { command: 'droid plan', description: 'Generate implementation plan' },
       },
@@ -397,6 +409,8 @@ export class AgentManager {
       baseCommand: 'pi',
       modes: {
         fresh: { command: 'pi', description: 'Start new session' },
+        continue: { command: 'pi --continue', description: 'Continue last session' },
+        resume: { command: 'pi --session', description: 'Resume saved session' },
         chat: { command: 'pi chat', description: 'Interactive chat mode' },
         review: { command: 'pi review', description: 'Review code changes' },
       },
@@ -504,12 +518,25 @@ export class AgentManager {
     if (typeof configOrFlags === 'object' && !Array.isArray(configOrFlags)) {
       const config = configOrFlags as AgentStartConfig
 
-      if (mode === 'resume' && config.resumeId) {
-        if (agentId === 'claude') {
-          command = `${modeConfig.command} ${config.resumeId}`
-        } else if (agentId === 'codex') {
-          command = `${modeConfig.command} ${config.resumeId}`
-        }
+      const nativeSessionId = typeof config.nativeSessionId === 'string' ? config.nativeSessionId.trim() : ''
+      if ((agentId === 'claude' || agentId === 'pi') && mode === 'fresh' && nativeSessionId) {
+        command += ` --session-id ${commandArg(nativeSessionId)}`
+      }
+      if (mode === 'resume' && (agentId === 'claude' || agentId === 'codex')) {
+        const resumeId = config.resumeId || nativeSessionId
+        if (resumeId) command = `${modeConfig.command} ${commandArg(resumeId)}`
+      }
+      if (agentId === 'pi' && mode === 'resume') {
+        const sessionId = config.resumeId || nativeSessionId
+        if (sessionId) command = `pi --session ${commandArg(sessionId)}`
+      }
+      if ((agentId === 'gemini' || agentId === 'droid') && (mode === 'resume' || mode === 'continue')) {
+        const sessionId = config.resumeId || nativeSessionId
+        if (sessionId) command = `${modeConfig.command} ${commandArg(sessionId)}`
+      }
+      if (agentId === 'opencode' && mode === 'continue') {
+        const sessionId = config.resumeId || nativeSessionId
+        if (sessionId) command = `opencode -s ${commandArg(sessionId)}`
       }
 
       if (config.model && agent.models) {

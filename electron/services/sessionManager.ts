@@ -2,6 +2,8 @@ import { EventEmitter } from 'events'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
@@ -135,6 +137,18 @@ function shq(value: string): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`
 }
 
+function runCommand(command: string, args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { cwd, timeout: 10000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve(String(stdout || ''))
+    })
+  })
+}
+
 // Strip shell-active characters from display-only labels (repo names,
 // worktree ids) before they are interpolated into echo commands.
 function sanitizeLabel(value: unknown): string {
@@ -236,6 +250,9 @@ export class SessionManager extends EventEmitter {
   private lastStatusBytes = new Map<string, number>()
   private pendingOutput = new Map<string, { chunks: string[]; bytes: number; timer: ReturnType<typeof setTimeout> | null }>()
   private compressionMode: 'lite' | 'medium' | 'extreme' = 'lite'
+  private nativeSessionLookups = new Map<string, Promise<void>>()
+  private resumeFailureProbes = new Map<string, { output: string; timer: ReturnType<typeof setTimeout> | null }>()
+  private sessionStateSaveQueue: Promise<void> = Promise.resolve()
 
   constructor(io: any, agentManager?: any, dataDir?: string) {
     super()
@@ -848,6 +865,7 @@ export class SessionManager extends EventEmitter {
 
     ptyProcess.onData((data: string) => {
       session.buffer.write(data)
+      this.maybeRecoverFailedAgentResume(sessionId, data)
       session.lastActivity = Date.now()
       this.orchestrator?.markHealthCheck(sessionId)
 
@@ -879,6 +897,7 @@ export class SessionManager extends EventEmitter {
       // there is no later flush to announce a skip for this session.
       this.flushTerminalOutput(sessionId, true)
       session.slotRelease?.()
+      this.clearResumeFailureProbe(sessionId)
       clearInterval(session.processMonitor!)
       session.status = 'exited'
       this.outputFilter.finalizeCommand(sessionId, exitCode ?? 1)
@@ -888,18 +907,6 @@ export class SessionManager extends EventEmitter {
         try {
           this.io.emit('session-exited', { sessionId, exitCode, signal })
         } catch { }
-      }
-      if (isActive && config.taskGroupId) {
-        session.pty = null
-        session.restorable = true
-        session.status = 'idle'
-        session.autoStarted = false
-        session.claudeLaunchState = null
-        this.orchestrator?.parkSession(sessionId)
-        try {
-          this.io.emit('session-resumed', { sessionId, sessions: this.getSessionStates() })
-        } catch { }
-        return
       }
       if (!isActive) return
       const canRestart = !this.orchestrator || this.orchestrator.canRestart(sessionId)
@@ -942,6 +949,9 @@ export class SessionManager extends EventEmitter {
       const clean = data.replace(/\n$/, '').trim()
       if (clean && !/^(claude|opencode|gemini|codex)\b/i.test(clean) && !/^--/.test(clean)) {
         this.cavemanService.setPendingPrompt(sessionId, clean)
+      }
+      if (session.type === 'opencode' && !session.agentStartConfig?.nativeSessionId && !this.nativeSessionLookups.has(sessionId)) {
+        this.scheduleOpenCodeSessionLookup(sessionId, session.config.cwd, Date.now())
       }
       session.pty.write(data)
       return true
@@ -993,10 +1003,10 @@ export class SessionManager extends EventEmitter {
     })
   }
 
-  closeSession(sessionId: string, options: { preserveForResume?: boolean } = {}): boolean {
+  closeSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId)
     if (!session) return false
-    const preserveForResume = options.preserveForResume === true
+    this.clearResumeFailureProbe(sessionId)
     this.flushTerminalOutput(sessionId)
     session.slotRelease?.()
     this.sessionHistory.push({
@@ -1025,18 +1035,9 @@ export class SessionManager extends EventEmitter {
     this.cavemanService.cleanup(sessionId)
     this.tokenUsageTracker.cleanup(sessionId)
     this.finalizeSessionContext(sessionId)
-    if (preserveForResume) {
-      session.pty = null
-      session.restorable = true
-      session.status = 'idle'
-      session.autoStarted = false
-      session.claudeLaunchState = null
-      this.orchestrator?.parkSession(sessionId)
-    } else {
-      this.sessions.delete(sessionId)
-      this.cleanupSessionBuffer(sessionId)
-      this.orchestrator?.unregisterSession(sessionId)
-    }
+    this.sessions.delete(sessionId)
+    this.cleanupSessionBuffer(sessionId)
+    this.orchestrator?.unregisterSession(sessionId)
     this.statusDetector?.reset(sessionId)
     this.lastStatusRefresh.delete(sessionId)
     this.lastStatusBytes.delete(sessionId)
@@ -1201,6 +1202,7 @@ export class SessionManager extends EventEmitter {
             reasoning: config.reasoning,
             verbosity: config.verbosity,
             resumeId: config.resumeId,
+            nativeSessionId: config.nativeSessionId,
           }
           : undefined,
       })
@@ -1315,6 +1317,33 @@ export class SessionManager extends EventEmitter {
     const savedType = session.type
     const savedCwd = session.config?.cwd || this.workspace?.repository?.path || process.env.HOME || '/tmp'
     const savedAgentConfig = session.agentStartConfig
+    const resumeConfig = savedAgentConfig ? { ...savedAgentConfig } : null
+    if (resumeConfig?.agentId === 'opencode' && !resumeConfig.nativeSessionId) {
+      const discoveredSessionId = await this.findLatestOpenCodeSessionId(savedCwd)
+      if (discoveredSessionId) resumeConfig.nativeSessionId = discoveredSessionId
+    }
+    if (resumeConfig?.agentId === 'pi' && !resumeConfig.nativeSessionId) {
+      const discoveredSessionId = this.findLatestPiSessionId(savedCwd)
+      if (discoveredSessionId) resumeConfig.nativeSessionId = discoveredSessionId
+    }
+    if (resumeConfig) {
+      const nativeSessionId = typeof resumeConfig.nativeSessionId === 'string' ? resumeConfig.nativeSessionId.trim() : ''
+      if (nativeSessionId) resumeConfig.resumeId = resumeConfig.resumeId || nativeSessionId
+      const agent = this.agentManager?.getAgent?.(resumeConfig.agentId)
+      if (resumeConfig.agentId === 'claude') {
+        resumeConfig.mode = nativeSessionId ? 'resume' : 'fresh'
+      } else if (resumeConfig.agentId === 'opencode') {
+        resumeConfig.mode = 'continue'
+      } else if (resumeConfig.agentId === 'pi') {
+        resumeConfig.mode = nativeSessionId ? 'resume' : 'continue'
+      } else if (nativeSessionId && agent?.modes.resume) {
+        resumeConfig.mode = 'resume'
+      } else if (agent?.modes.continue) {
+        resumeConfig.mode = 'continue'
+      } else if (resumeConfig.mode === 'resume' && !nativeSessionId) {
+        resumeConfig.mode = 'fresh'
+      }
+    }
     const taskGroupId = session.config.taskGroupId || null
     const subtaskId = session.config.subtaskId || null
 
@@ -1333,9 +1362,9 @@ export class SessionManager extends EventEmitter {
     })
     if (taskGroupId && restoredSubtaskId) this.setSessionTaskLink(sessionId, taskGroupId, restoredSubtaskId)
 
-    if (savedAgentConfig) {
+    if (resumeConfig) {
       try {
-        this.startAgentWithConfig(sessionId, savedAgentConfig)
+        this.startAgentWithConfig(sessionId, resumeConfig)
       } catch (e: any) {
         console.error('resumeSession: agent start failed:', sessionId, e?.message || e)
       }
@@ -1492,37 +1521,213 @@ export class SessionManager extends EventEmitter {
     return closed
   }
 
+  private persistSessionState(): Promise<void> {
+    const workspaceId = this.workspace?.id
+    if (!workspaceId) return Promise.resolve()
+    const save = async () => {
+      const sessions = this.getSessionSaveData()
+      await WorkspaceManager.getInstance().saveSessionState(workspaceId, sessions)
+    }
+    const result = this.sessionStateSaveQueue.then(save, save)
+    this.sessionStateSaveQueue = result.catch(() => {})
+    return result
+  }
+
+  private findLatestPiSessionId(cwd: string): string | null {
+    const configuredSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR?.trim()
+    const configuredAgentDir = process.env.PI_CODING_AGENT_DIR?.trim()
+    const root = configuredSessionDir || path.join(configuredAgentDir || path.join(os.homedir(), '.pi', 'agent'), 'sessions')
+    const target = path.resolve(cwd)
+    let newest: { id: string; mtime: number } | null = null
+    const visit = (dir: string) => {
+      let entries: fs.Dirent[]
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        const filePath = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          visit(filePath)
+          continue
+        }
+        if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
+        try {
+          const stat = fs.statSync(filePath)
+          if (newest && stat.mtimeMs <= newest.mtime) continue
+          const firstLine = fs.readFileSync(filePath, 'utf8').split(/\r?\n/, 1)[0]
+          const row = JSON.parse(firstLine)
+          if (row?.type !== 'session' || typeof row.id !== 'string' || typeof row.cwd !== 'string') continue
+          if (path.resolve(row.cwd) !== target) continue
+          newest = { id: row.id, mtime: stat.mtimeMs }
+        } catch {}
+      }
+    }
+    visit(root)
+    return newest?.id || null
+  }
+
+  private async findLatestOpenCodeSessionId(cwd: string): Promise<string | null> {
+    try {
+      const command = resolveAgent('opencode') || 'opencode'
+      const stdout = await runCommand(command, ['session', 'list', '--format', 'json', '-n', '100'], cwd)
+      const start = stdout.indexOf('[')
+      const end = stdout.lastIndexOf(']')
+      const rows = JSON.parse(start >= 0 && end >= start ? stdout.slice(start, end + 1) : stdout) as any[]
+      const target = path.resolve(cwd)
+      const match = (Array.isArray(rows) ? rows : [])
+        .filter(row => {
+          const id = String(row?.id || '')
+          const directory = String(row?.directory || '')
+          return /^ses_[A-Za-z0-9_-]+$/.test(id) && directory && path.resolve(directory) === target
+        })
+        .sort((a, b) => Number(b?.updated ?? b?.created ?? 0) - Number(a?.updated ?? a?.created ?? 0))[0]
+      return match?.id || null
+    } catch {
+      return null
+    }
+  }
+
+  private async captureOpenCodeSessionId(sessionId: string, cwd: string, startedAt: number): Promise<void> {
+    const command = resolveAgent('opencode') || 'opencode'
+    for (const delay of [300, 900, 1800, 3500, 6000, 12000, 30000]) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+      const session = this.sessions.get(sessionId)
+      if (!session?.pty) return
+      try {
+        const stdout = await runCommand(command, ['session', 'list', '--format', 'json', '-n', '100'], cwd)
+        const start = stdout.indexOf('[')
+        const end = stdout.lastIndexOf(']')
+        const rows = JSON.parse(start >= 0 && end >= start ? stdout.slice(start, end + 1) : stdout) as any[]
+        const assigned = new Set(
+          [...this.sessions.values()]
+            .map(s => s.agentStartConfig?.nativeSessionId)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0)
+        )
+        const target = path.resolve(cwd)
+        const candidates = (Array.isArray(rows) ? rows : [])
+          .filter(row => {
+             const id = String(row?.id || '')
+             const timestamp = Number(row?.updated ?? row?.lastUpdated ?? row?.created ?? row?.time_created ?? 0)
+             const directory = String(row?.directory || '')
+             return /^ses_[A-Za-z0-9_-]+$/.test(id)
+               && !assigned.has(id)
+               && timestamp >= startedAt - 10000
+               && directory
+               && path.resolve(directory) === target
+           })
+           .sort((a, b) => Number(b?.updated ?? b?.lastUpdated ?? b?.created ?? b?.time_created ?? 0) - Number(a?.updated ?? a?.lastUpdated ?? a?.created ?? a?.time_created ?? 0))
+        const nativeSessionId = candidates[0]?.id
+        if (!nativeSessionId) continue
+        session.agentStartConfig = { ...(session.agentStartConfig || {}), nativeSessionId }
+        await this.persistSessionState()
+        return
+      } catch {}
+    }
+  }
+
+  private scheduleOpenCodeSessionLookup(sessionId: string, cwd: string, startedAt: number): void {
+    if (this.nativeSessionLookups.has(sessionId)) return
+    const lookup = this.captureOpenCodeSessionId(sessionId, cwd, startedAt)
+    this.nativeSessionLookups.set(sessionId, lookup)
+    void lookup.then(
+      () => { if (this.nativeSessionLookups.get(sessionId) === lookup) this.nativeSessionLookups.delete(sessionId) },
+      () => { if (this.nativeSessionLookups.get(sessionId) === lookup) this.nativeSessionLookups.delete(sessionId) }
+    )
+  }
+
+  private clearResumeFailureProbe(sessionId: string) {
+    const probe = this.resumeFailureProbes.get(sessionId)
+    if (probe?.timer) clearTimeout(probe.timer)
+    this.resumeFailureProbes.delete(sessionId)
+  }
+
+  private beginResumeFailureProbe(sessionId: string) {
+    this.clearResumeFailureProbe(sessionId)
+    const probe: { output: string; timer: ReturnType<typeof setTimeout> | null } = { output: '', timer: null }
+    probe.timer = setTimeout(() => {
+      if (this.resumeFailureProbes.get(sessionId) === probe) this.clearResumeFailureProbe(sessionId)
+    }, 60000)
+    probe.timer.unref?.()
+    this.resumeFailureProbes.set(sessionId, probe)
+  }
+
+  private maybeRecoverFailedAgentResume(sessionId: string, data: string) {
+    const probe = this.resumeFailureProbes.get(sessionId)
+    const session = this.sessions.get(sessionId)
+    if (!probe || !session?.pty) return
+    probe.output = `${probe.output}${data}`.slice(-8192)
+    const config = session.agentStartConfig
+    if (!config || (config.mode !== 'resume' && config.mode !== 'continue')) return
+    if (!/(?:no conversation found|no (?:session|sessions|previous session) found|no session available|session\s+(?:id\s+)?[^\n]*(?:not found|does not exist|unavailable|not available|invalid)|unable to resume (?:session|conversation)|failed to resume (?:session|conversation)|could not find (?:session|conversation)|unknown session)/i.test(probe.output)) return
+
+    this.clearResumeFailureProbe(sessionId)
+    const fallbackSessionId = config.agentId === 'claude' || config.agentId === 'pi' ? randomUUID() : undefined
+    setTimeout(() => {
+      const current = this.sessions.get(sessionId)
+      if (!current?.pty || current.agentStartConfig?.mode !== config.mode) return
+      try {
+        this.startAgentWithConfig(sessionId, {
+          ...current.agentStartConfig,
+          mode: 'fresh',
+          resumeId: undefined,
+          nativeSessionId: fallbackSessionId,
+        })
+      } catch (error: any) {
+        console.error('resume fallback: fresh agent start failed:', error?.message || error)
+      }
+    }, 100)
+  }
+
   startAgentWithConfig(sessionId: string, config: any) {
     const session = this.sessions.get(sessionId)
     if (!session || !this.agentManager) return
-    const validation = this.agentManager.validateConfig(config)
+    const startedAt = Date.now()
+    let startConfig: any = config
+    const agentConfig = this.agentManager.getAgent?.(startConfig.agentId)
+    const hasResumeId = !!(startConfig.resumeId || startConfig.nativeSessionId)
+    if (startConfig.mode === 'resume' && !agentConfig?.modes.resume) {
+      startConfig = { ...startConfig, mode: agentConfig?.modes.continue ? 'continue' : 'fresh' }
+    }
+    if (startConfig.mode === 'resume' && !hasResumeId) {
+      startConfig = {
+        ...startConfig,
+        mode: startConfig.agentId === 'claude' || !agentConfig?.modes.continue ? 'fresh' : 'continue',
+        resumeId: undefined,
+        nativeSessionId: undefined,
+      }
+    }
+    if ((startConfig.agentId === 'claude' || startConfig.agentId === 'pi') && startConfig.mode === 'fresh' && !startConfig.nativeSessionId) {
+      startConfig = { ...startConfig, nativeSessionId: randomUUID() }
+    }
+    const isResumeAttempt = (startConfig.mode === 'resume' || startConfig.mode === 'continue') && (AGENT_TYPES as readonly string[]).includes(startConfig.agentId)
+    if (isResumeAttempt) this.beginResumeFailureProbe(sessionId)
+    else this.clearResumeFailureProbe(sessionId)
+    const validation = this.agentManager.validateConfig(startConfig)
     if (!validation.valid) throw new Error(validation.error)
 
     // Capture the user-supplied agent prompt (if any) with its submission
     // timestamp so the Dashboard Prompts tab shows it before/after
     // agntspce-prompter compression for this session.
-    if (typeof config?.prompt === 'string' && config.prompt.trim()) {
+    if (typeof startConfig?.prompt === 'string' && startConfig.prompt.trim()) {
       try {
-        this.promptHistory.record(sessionId, config.prompt, 'agent-start')
+        this.promptHistory.record(sessionId, startConfig.prompt, 'agent-start')
       } catch {}
     }
 
     // 1.5 claim enforcement: the session's task must declare its file scope
     // before the agent starts, and it must not overlap another active task.
-    if (this.orchestrator && (AGENT_TYPES as readonly string[]).includes(config.agentId)) {
-      const declared = Array.isArray(config.declaredFiles) ? config.declaredFiles : []
-      const excluded = Array.isArray(config.excludeSessionIds) ? config.excludeSessionIds : []
-      const enforced = this.orchestrator.enforceSessionClaims(sessionId, config.agentId, declared, excluded)
+    if (this.orchestrator && (AGENT_TYPES as readonly string[]).includes(startConfig.agentId)) {
+      const declared = Array.isArray(startConfig.declaredFiles) ? startConfig.declaredFiles : []
+      const excluded = Array.isArray(startConfig.excludeSessionIds) ? startConfig.excludeSessionIds : []
+      const enforced = this.orchestrator.enforceSessionClaims(sessionId, startConfig.agentId, declared, excluded)
       if (!enforced) {
         throw new Error('Session blocked: declared files overlap another active task. Resolve the claim conflict and retry.')
       }
     }
 
     if (this.cavemanService.isEnabled(sessionId) && this.workspace?.repository?.path) {
-      this.cavemanService.writeSkillFiles(this.workspace.repository.path, config.agentId)
+      this.cavemanService.writeSkillFiles(this.workspace.repository.path, startConfig.agentId)
     }
 
-    const command = this.agentManager.buildCommand(config.agentId, config.mode, config)
+    const command = this.agentManager.buildCommand(startConfig.agentId, startConfig.mode, startConfig)
     const baseCmd = command.split(/\s+/)[0]
     const resolvedPath = resolveAgent(baseCmd)
     if (!resolvedPath) {
@@ -1544,18 +1749,18 @@ export class SessionManager extends EventEmitter {
     // read stdin; a small delay lets the TUI finish starting). If a prompt is
     // supplied (parallel tasks), it follows the preamble in the same write so
     // the agent gets context then its task.
-    const isFreshDispatch = config.mode !== 'resume' && config.mode !== 'continue' && !config.resumeId
+    const isFreshDispatch = startConfig.mode !== 'resume' && startConfig.mode !== 'continue' && !startConfig.resumeId
     const sm = this.orchestrator?.getStateManager()
-    if (sm || config.prompt) {
+    if (sm || startConfig.prompt) {
       try {
         let body = ''
         if (sm && isFreshDispatch) {
           const ownTaskId = sm.getSession(sessionId)?.taskId || undefined
-          const preamble = sm.buildDispatchPreamble(config.agentId, ownTaskId ? [ownTaskId] : [])
+          const preamble = sm.buildDispatchPreamble(startConfig.agentId, ownTaskId ? [ownTaskId] : [])
           if (preamble) body = preamble
         }
-        if (config.prompt) {
-          body = body ? `${body}\n\nDispatch task:\n${config.prompt}` : config.prompt
+        if (startConfig.prompt) {
+          body = body ? `${body}\n\nDispatch task:\n${startConfig.prompt}` : startConfig.prompt
         }
         if (body) {
           const sid = sessionId
@@ -1574,9 +1779,13 @@ export class SessionManager extends EventEmitter {
 
     session.autoStarted = true
     session.claudeLaunchState = 'launched'
-    session.agentStartConfig = config
+    session.agentStartConfig = startConfig
+    if (startConfig.agentId === 'opencode' && (startConfig.mode === 'fresh' || startConfig.mode === 'continue')) {
+      this.scheduleOpenCodeSessionLookup(sessionId, session.config.cwd, startedAt)
+    }
+    void this.persistSessionState()
     try {
-      this.io.emit('agent-started', { sessionId, config })
+      this.io.emit('agent-started', { sessionId, config: startConfig })
     } catch {}
   }
 
