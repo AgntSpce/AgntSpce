@@ -1742,6 +1742,9 @@ export class SessionManager extends EventEmitter {
       ? ` export AGNTSPCE_TASK_ID=${shq(session.config.taskGroupId)}; export AGNTSPCE_SUBTASK_ID=${shq(session.config.subtaskId)};`
       : ''
     const envPrefix = `export AGNTSPCE_ENABLED=1; export AGNTSPCE_WRAPPER_PATH="${wrapperPathEnv}"; export AGNTSPCE_RTK_SESSION="${rtkManager.generateRtkToken()}"; export PATH="${binDir}:$PATH";${taskEnv} `
+    session.agentStartConfig = startConfig
+    session.autoStarted = true
+    session.claudeLaunchState = 'launched'
     this.writeToSession(sessionId, envPrefix + command + newline)
 
     // 2.1 dispatch preamble: deliver the shared orchestration state as the
@@ -1777,9 +1780,6 @@ export class SessionManager extends EventEmitter {
       }
     }
 
-    session.autoStarted = true
-    session.claudeLaunchState = 'launched'
-    session.agentStartConfig = startConfig
     if (startConfig.agentId === 'opencode' && (startConfig.mode === 'fresh' || startConfig.mode === 'continue')) {
       this.scheduleOpenCodeSessionLookup(sessionId, session.config.cwd, startedAt)
     }
