@@ -249,55 +249,65 @@ function useAgentOutputBuffer(
 
 // ── "Agent is working" flags ──────────────────────────────────────────
 // The backend statusDetector flips a session to `busy` on ANY recent output —
-// including the echo of the user typing — so `status === 'busy'` alone makes
-// the spinner flash before the user has even pressed Enter. To only show
-// "working" when the agent is genuinely responding to a SUBMITTED prompt, we
-// track, per session, the last time it settled (idle/waiting/exited) and
-// compare it to the newest submitted prompt ('typed' or 'agent-start'). If the
-// newest prompt came after the last settle, and the session is busy, the agent
-// is working on it — otherwise the busy flag is just typing echo.
+// including the echo of the user typing AND the banner an agent prints when it
+// first opens — so `status === 'busy'` alone makes the spinner flash without
+// the user ever asking anything.
+//
+// We only treat an agent as "working" when a request the USER actually
+// submitted is still outstanding: a prompt with source 'typed' (Enter pressed)
+// that arrived after we started watching the session, and the agent has not
+// settled (busy → idle/waiting/exited) since. Deliberately excludes:
+//   • the launch 'agent-start' prompt — opening an assistant is not a request,
+//   • any prompt history left over from a previous use of the same session —
+//     on first sight we treat existing history as already handled.
 function useAgentWorkingFlags(
   promptHistory: PromptHistoryEntry[],
   sessions: Record<string, SessionState>,
 ): Record<string, boolean> {
-  const lastSettledRef = useRef<Record<string, number>>({})
-  const prevStatusRef = useRef<Record<string, string>>({})
+  // per session: last typed-prompt timestamp we've accounted for, whether one is
+  // still outstanding, and the last status we observed.
+  const stateRef = useRef<Record<string, { lastPromptTs: number; outstanding: boolean; prevStatus?: string }>>({})
   const [, force] = useState(0)
 
-  // Newest submitted prompt timestamp per session.
-  const latestPrompt = useMemo(() => {
+  // Newest USER-submitted (source 'typed') prompt timestamp per session.
+  const latestTyped = useMemo(() => {
     const m: Record<string, number> = {}
     for (const p of promptHistory) {
-      if (p.source && p.source !== 'typed' && p.source !== 'agent-start') continue
+      if (p.source !== 'typed') continue
       if (!m[p.sessionId] || p.timestamp > m[p.sessionId]) m[p.sessionId] = p.timestamp
     }
     return m
   }, [promptHistory])
 
-  // Stamp the last-settled time ONLY on a busy → settled transition, i.e. the
-  // agent actually finished responding. The brief idle at launch (before any
-  // work) must not clear the launch prompt, or the agent's first run wouldn't
-  // show as working.
   useEffect(() => {
     let changed = false
     for (const [sid, s] of Object.entries(sessions)) {
-      const prev = prevStatusRef.current[sid]
-      if (prev !== s.status) {
-        if (prev === 'busy' && (s.status === 'idle' || s.status === 'waiting' || s.status === 'exited')) {
-          lastSettledRef.current[sid] = Date.now()
-          changed = true
-        }
-        prevStatusRef.current[sid] = s.status
+      let st = stateRef.current[sid]
+      if (!st) {
+        // First time we see this session: assume any existing prompt history is
+        // already handled, so opening a (possibly reused) assistant never spins.
+        stateRef.current[sid] = { lastPromptTs: latestTyped[sid] || 0, outstanding: false, prevStatus: s.status }
+        continue
       }
+      const maxTyped = latestTyped[sid] || 0
+      if (maxTyped > st.lastPromptTs) {
+        st.lastPromptTs = maxTyped
+        st.outstanding = true
+        changed = true
+      }
+      if (st.prevStatus === 'busy' && (s.status === 'idle' || s.status === 'waiting' || s.status === 'exited')) {
+        st.outstanding = false
+        changed = true
+      }
+      st.prevStatus = s.status
     }
     if (changed) force(v => v + 1)
-  }, [sessions])
+  }, [sessions, latestTyped])
 
   const flags: Record<string, boolean> = {}
   for (const sid of Object.keys(sessions)) {
-    const prompt = latestPrompt[sid] || 0
-    const settled = lastSettledRef.current[sid] || 0
-    flags[sid] = prompt > 0 && prompt > settled && sessions[sid].status === 'busy'
+    const st = stateRef.current[sid]
+    flags[sid] = !!(st && st.outstanding && sessions[sid].status === 'busy')
   }
   return flags
 }

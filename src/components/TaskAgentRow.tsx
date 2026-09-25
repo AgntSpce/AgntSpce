@@ -92,15 +92,17 @@ function TaskAgentRow({
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number; estimatedCost: number } | null>(null)
   const rowRef = useRef<HTMLDivElement | null>(null)
 
-  // Derive the Orca state glyph from the member + live session status.
-  // "working" uses the prompt-gated flag, not raw `busy` (typing echo safe).
+  // Derive the state glyph from the member + live session status. "working" uses
+  // the prompt-gated flag, not raw `busy` (typing echo safe). A session that is
+  // `busy` WITHOUT an outstanding user prompt is just the echo of typing (or an
+  // autonomous dispatch), so it stays a neutral idle dot — only a genuine
+  // `waiting` (permission/input needed) shows the amber "?".
   let state: 'working' | 'waiting' | 'done' | 'blocked' | 'exited' | 'idle' = 'idle'
   if (sessionStatus === 'exited') state = 'exited'
   else if (member.status === 'failed') state = 'blocked'
   else if (member.status === 'done') state = 'done'
   else if (isWorking) state = 'working'
   else if (sessionStatus === 'waiting') state = 'waiting'
-  else if (sessionStatus === 'busy') state = 'waiting' // busy without a submitted prompt = user typing
 
   const glyph = (() => {
     switch (state) {
