@@ -179,7 +179,19 @@ function clampContextMenuPos(x: number, y: number, estW = 230, estH = 340) {
 const AGENT_FEED_CAP = 8192 // ~8 KB tail per session
 const AGENT_FEED_FLUSH_MS = 100
 
-type AgentOutEntry = { text: string; lastLine: string; ts: number }
+type AgentOutEntry = {
+  text: string
+  lastLine: string
+  /** Last time ANY bytes arrived (drives the "5s" relative-time label). */
+  ts: number
+  /** Running length of cleaned text, immune to the tail cap. */
+  cleanLen: number
+  /** Last time the agent's RESPONSE CONTENT actually changed. Agent TUIs
+   *  redraw constantly (spinner frames, cursor moves); those are pure ANSI and
+   *  vanish after stripping, so they must not count as the agent still
+   *  responding. This timestamp is what the working-spinner keys off. */
+  contentTs: number
+}
 
 // Strip ANSI/control sequences (keeps \t and \n; folds \r\n → \n) so the feed
 // renders clean text.
@@ -219,10 +231,19 @@ function useAgentOutputBuffer(
       if (!clean) return
       const prev = bufRef.current[d.sessionId]
       const text = (prev?.text || '') + clean
+      const cleanLen = (prev?.cleanLen || 0) + clean.length
+      // Content counts as "still responding" only if the cleaned text actually
+      // grew, or the latest visible line changed. Pure ANSI redraw strips to
+      // empty and is ignored above; a redraw that carries no new characters
+      // doesn't move this timestamp.
+      const nextLine = lastNonEmptyLine(clean) || prev?.lastLine || ''
+      const contentChanged = cleanLen !== (prev?.cleanLen || 0) || nextLine !== prev?.lastLine
       bufRef.current[d.sessionId] = {
         text: text.length > AGENT_FEED_CAP ? text.slice(-AGENT_FEED_CAP) : text,
-        lastLine: lastNonEmptyLine(clean) || prev?.lastLine || '',
+        lastLine: nextLine,
         ts: Date.now(),
+        cleanLen,
+        contentTs: contentChanged ? Date.now() : (prev?.contentTs || Date.now()),
       }
       if (!timerRef.current) {
         timerRef.current = setTimeout(() => {
@@ -247,27 +268,32 @@ function useAgentOutputBuffer(
   return bufRef
 }
 
+// How long the agent may go without producing new response CONTENT before we
+// stop showing the working spinner. Agent TUIs keep repainting (spinner frames,
+// cursor moves) long after they stop responding; those bytes strip to nothing,
+// so we time the spinner off real content instead. Kept short so the spinner
+// drops as soon as the response ends, with enough slack to ride over the brief
+// pauses between tool calls.
+const AGENT_CONTENT_LIVE_MS = 5000
+
 // ── "Agent is working" flags ──────────────────────────────────────────
-// The backend statusDetector flips a session to `busy` on ANY recent output —
-// including the echo of the user typing AND the banner an agent prints when it
-// first opens — so `status === 'busy'` alone makes the spinner flash without
-// the user ever asking anything.
-//
-// We only treat an agent as "working" when a request the USER actually
-// submitted is still outstanding: a prompt with source 'typed' (Enter pressed)
-// that arrived after we started watching the session, and the agent has not
-// settled (busy → idle/waiting/exited) since. Deliberately excludes:
-//   • the launch 'agent-start' prompt — opening an assistant is not a request,
-//   • any prompt history left over from a previous use of the same session —
-//     on first sight we treat existing history as already handled.
+// An agent counts as working only when ALL of these hold:
+//   1. the USER submitted a prompt (source 'typed') after we started watching —
+//      not the launch 'agent-start' prompt, not leftover history from a prior
+//      use of the session, and not mere keystrokes still being typed;
+//   2. the agent has not settled since (busy → idle/waiting/exited);
+//   3. it produced new response CONTENT within AGENT_CONTENT_LIVE_MS.
+// (3) is what makes the spinner stop the moment the agent stops responding,
+// even while the backend status still reads `busy`.
 function useAgentWorkingFlags(
   promptHistory: PromptHistoryEntry[],
   sessions: Record<string, SessionState>,
+  outRef: React.MutableRefObject<Record<string, AgentOutEntry>>,
 ): Record<string, boolean> {
   // per session: last typed-prompt timestamp we've accounted for, whether one is
   // still outstanding, and the last status we observed.
   const stateRef = useRef<Record<string, { lastPromptTs: number; outstanding: boolean; prevStatus?: string }>>({})
-  const [, force] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
 
   // Newest USER-submitted (source 'typed') prompt timestamp per session.
   const latestTyped = useMemo(() => {
@@ -301,13 +327,25 @@ function useAgentWorkingFlags(
       }
       st.prevStatus = s.status
     }
-    if (changed) force(v => v + 1)
+    if (changed) setNow(Date.now())
   }, [sessions, latestTyped])
+
+  // Tick while anything is outstanding so the spinner switches off on its own
+  // once content goes stale — no further socket event is needed.
+  useEffect(() => {
+    const anyOutstanding = Object.values(stateRef.current).some(s => s.outstanding)
+    if (!anyOutstanding) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [sessions, latestTyped, now])
 
   const flags: Record<string, boolean> = {}
   for (const sid of Object.keys(sessions)) {
     const st = stateRef.current[sid]
-    flags[sid] = !!(st && st.outstanding && sessions[sid].status === 'busy')
+    if (!st || !st.outstanding) { flags[sid] = false; continue }
+    const entry = outRef.current[sid]
+    const contentLive = !!entry && now - entry.contentTs < AGENT_CONTENT_LIVE_MS
+    flags[sid] = sessions[sid].status !== 'exited' && contentLive
   }
   return flags
 }
@@ -453,7 +491,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     return [...set].sort()
   }, [membersByTask])
   const agentOutRef = useAgentOutputBuffer(onTerminalOutput, trackedIds)
-  const workingFlags = useAgentWorkingFlags(promptHistory || [], sessions)
+  const workingFlags = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef)
 
   // Latest known git branch per workspace, from agent sessions (most recent
   // first). Replaces the old aggregate-status gutter data.
