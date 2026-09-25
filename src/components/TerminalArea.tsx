@@ -46,6 +46,7 @@ interface Props {
   onToggleChatSidebar: () => void
   onTerminalOutput: (cb: (data: any) => void) => () => void
   sessionCompressionModes?: Record<string, 'lite' | 'medium' | 'extreme'>
+  promptCompressionEnabled?: boolean
   onSessionCompressionModeChange?: (sessionId: string, mode: 'lite' | 'medium' | 'extreme') => void
   pageViews?: PageView[]
   activeView: string | null
@@ -401,6 +402,7 @@ export default memo(function TerminalArea({
   focusMode, agentsList, bottomShellOpen, onToggleShell,
   onTerminalOutput,
   sessionCompressionModes = {},
+  promptCompressionEnabled = true,
   onSessionCompressionModeChange,
   pageViews, activeView, shellOnly,
   onTerminalResizerMouseDown, terminalHeight = 40, terminalDrag,
@@ -585,7 +587,7 @@ export default memo(function TerminalArea({
         dimmed={focusMode && session.id !== activeSessionId && !isFullScreen}
         onTerminalOutput={onTerminalOutput}
         isResizing={isFlexDragging}
-        sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'}
+        sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} promptCompressionEnabled={promptCompressionEnabled}
         onSessionCompressionModeChange={onSessionCompressionModeChange}
         fontSize={fontSize}
         fontFamily={fontFamily}
@@ -770,11 +772,11 @@ export default memo(function TerminalArea({
                   {splitLayout === 'side-left' ? (
                     <>
                       {filteredSessions.filter(s => s.id === focusSessionId).map(session => (
-                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-left" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
+                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-left" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} promptCompressionEnabled={promptCompressionEnabled} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                       ))}
                       <div className="terminal-area" style={{ flex: 1, minWidth: 0, display: 'grid', gap: 4, gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', alignContent: 'start' }}>
                         {filteredSessions.filter(s => s.id !== focusSessionId).map(session => (
-                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
+                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} promptCompressionEnabled={promptCompressionEnabled} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                         ))}
                       </div>
                     </>
@@ -782,11 +784,11 @@ export default memo(function TerminalArea({
                     <>
                       <div className="terminal-area" style={{ flex: 1, minWidth: 0, display: 'grid', gap: 4, gridTemplateColumns: '1fr 1fr', gridTemplateRows: '1fr 1fr', alignContent: 'start' }}>
                         {filteredSessions.filter(s => s.id !== focusSessionId).map(session => (
-                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
+                          <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="grid" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') { setFocusSessionId(session.id); setSplitLayout('grid') } else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{}} onClose={onCloseTab} dimmed={focusMode && session.id !== activeSessionId} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} promptCompressionEnabled={promptCompressionEnabled} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                         ))}
                       </div>
                       {filteredSessions.filter(s => s.id === focusSessionId).map(session => (
-                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-right" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
+                        <TerminalPane key={session.id} session={session} onInput={onInput} onResize={onResize} onRestart={onRestart} onResumeSession={onResumeSession} onStartAgent={onStartAgent} onShowAgentModal={onShowAgentModal} writeData={writeBuffersRef.current[session.id] || ''} agentConfigs={agentConfigs} layoutMode="side-right" onLayoutChange={(m) => { if (m === 'grid') { setFocusSessionId(null); setSplitLayout('grid') } else if (m === 'focus') setFocusSessionId(null); else { setFocusSessionId(session.id); setSplitLayout(m) } }} style={{ flex: 1, minWidth: 0 }} onClose={onCloseTab} dimmed={false} onTerminalOutput={onTerminalOutput} isResizing={isFlexDragging} sessionCompressionMode={sessionCompressionModes[session.id] ?? 'lite'} promptCompressionEnabled={promptCompressionEnabled} onSessionCompressionModeChange={onSessionCompressionModeChange} fontSize={fontSize} fontFamily={fontFamily} confirmClose={pendingCloseSessionId === session.id} onCloseConfirmResponse={onCloseConfirm} />
                       ))}
                     </>
                   )}

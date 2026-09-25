@@ -240,6 +240,14 @@ function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     return (localStorage.getItem('agent-workspace-theme') as 'dark' | 'light') || 'dark'
   })
+  const [promptCompressionEnabled, setPromptCompressionEnabled] = useState(() => {
+    try {
+      const prefs = JSON.parse(localStorage.getItem('agent-workspace-prefs') || '{}')
+      return prefs.promptCompressionEnabled !== false
+    } catch {
+      return true
+    }
+  })
   const [createWorkspaceModalOpen, setCreateWorkspaceModalOpen] = useState(false)
   const [createTaskModalOpen, setCreateTaskModalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
@@ -1748,7 +1756,7 @@ function App() {
       </Suspense>
     )},
     { id: 'settings', label: 'Settings', icon: '⚙', render: () => (
-      <Settings theme={theme} onThemeChange={setTheme} onFontSizeChange={setFontSize} onFontFamilyChange={setFontFamily} onPrefsChange={(prefs) => { setUserSettings({ autoRestartSessions: prefs.autoStart }) }} onClose={() => setActiveView(null)} />
+      <Settings theme={theme} onThemeChange={setTheme} onFontSizeChange={setFontSize} onFontFamilyChange={setFontFamily} onPrefsChange={(prefs) => { setPromptCompressionEnabled(prefs.promptCompressionEnabled !== false); setUserSettings({ autoRestartSessions: prefs.autoStart }) }} onClose={() => setActiveView(null)} />
     )},
   ], [workspaces, sessions, activeWorkspace, deletedWorkspaces, switchWorkspace, handleDeleteWorkspace, handleRestoreWorkspace, handlePermanentDelete, handleCreateWorkspace, filterStats, searchEvents, commandHistory, promptHistory, getOrchestratorStats, theme, setUserSettings])
 
@@ -2081,6 +2089,7 @@ function App() {
             onToggleChatSidebar={handleToggleChatSidebar}
             onTerminalOutput={onTerminalOutput}
             sessionCompressionModes={sessionCompressionModes}
+            promptCompressionEnabled={promptCompressionEnabled}
             onSessionCompressionModeChange={setSessionCompressionMode}
             onTerminalResizerMouseDown={onTerminalResizerMouseDown}
             terminalHeight={terminalHeight}

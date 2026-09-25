@@ -41,6 +41,7 @@ interface Props {
   layoutMode?: 'grid' | 'focus' | 'side-left' | 'side-right'
   onLayoutChange?: (mode: 'grid' | 'focus' | 'side-left' | 'side-right') => void
   sessionCompressionMode?: 'lite' | 'medium' | 'extreme'
+  promptCompressionEnabled?: boolean
   onSessionCompressionModeChange?: (sessionId: string, mode: 'lite' | 'medium' | 'extreme') => void
   onResizeStart?: (sessionId: string, edge: 'left' | 'right' | 'top' | 'bottom', x: number, y: number) => void
   onResizeMove?: (sessionId: string, edge: 'left' | 'right' | 'top' | 'bottom', x: number, y: number) => void
@@ -142,7 +143,7 @@ function safeFit(fitAddon: FitAddon, term: Terminal, paneEl: HTMLElement | null,
 
 
 export default memo(function TerminalPane(props: Props) {
-  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace", confirmClose = false, onCloseConfirmResponse } = props
+  const { session, onInput, onResize, onResumeSession, onStartAgent, onShowAgentModal, onClose, writeData, agentConfigs, style, dimmed, onTerminalOutput, layoutMode = 'grid', onLayoutChange, sessionCompressionMode = 'lite', promptCompressionEnabled = true, onSessionCompressionModeChange, onResizeStart, onResizeMove, onResizeEnd, edgeHandles, isResizing, fontSize = 16, fontFamily = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace", confirmClose = false, onCloseConfirmResponse } = props
   const isResizingRef = useRef(isResizing)
   useEffect(() => { isResizingRef.current = isResizing }, [isResizing])
   const terminalRef = useRef<HTMLDivElement>(null)
@@ -654,7 +655,7 @@ function handleResizeDown(edge: 'left' | 'right' | 'top' | 'bottom', e: React.Mo
           <span className="terminal-branch">{session.branch}</span>
         )}
         <span className="terminal-layout-btns">
-          {isAgentType && (
+          {promptCompressionEnabled && isAgentType && (
             <label
               className="terminal-compression-picker"
               onMouseDown={(e) => e.stopPropagation()}
@@ -769,6 +770,7 @@ function areTerminalPanePropsEqual(prev: Props, next: Props): boolean {
   if (prev.dimmed !== next.dimmed) return false
   if (prev.layoutMode !== next.layoutMode) return false
   if (prev.sessionCompressionMode !== next.sessionCompressionMode) return false
+  if (prev.promptCompressionEnabled !== next.promptCompressionEnabled) return false
   if (prev.onSessionCompressionModeChange !== next.onSessionCompressionModeChange) return false
   if (prev.agentConfigs !== next.agentConfigs) return false
   if (prev.isResizing !== next.isResizing) return false

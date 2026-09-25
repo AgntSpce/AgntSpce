@@ -11,6 +11,7 @@ interface UserPrefs {
   tokenCompression: boolean
   autoStart: boolean
   sessionRecovery: boolean
+  promptCompressionEnabled: boolean
   layoutPreset: string
 }
 
@@ -38,6 +39,7 @@ const defaultPrefs: UserPrefs = {
   tokenCompression: true,
   autoStart: true,
   sessionRecovery: true,
+  promptCompressionEnabled: true,
   layoutPreset: 'auto',
 }
 
@@ -379,6 +381,20 @@ export default function Settings({ theme, onThemeChange, onFontSizeChange, onFon
                 type="checkbox"
                 checked={prefs.autoStart}
                 onChange={e => updatePrefs({ autoStart: e.target.checked })}
+              />
+              <span className="settings-toggle-slider" />
+            </label>
+          </div>
+          <div className="settings-row">
+            <div>
+              <span className="settings-label">agntspce-pc prompt compression</span>
+              <span className="settings-label-desc">Show compression mode and controls on agent windows</span>
+            </div>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={prefs.promptCompressionEnabled}
+                onChange={e => updatePrefs({ promptCompressionEnabled: e.target.checked })}
               />
               <span className="settings-toggle-slider" />
             </label>
