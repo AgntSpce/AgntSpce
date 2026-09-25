@@ -610,9 +610,16 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                  const isLiveMember = (member: { sessionId: string | null }) => {
                    if (!member.sessionId) return false
                    const session = sessions[member.sessionId]
-                   return !!session && (!session.taskGroupId || session.taskGroupId === t.id)
+                   // Drop members whose session is gone (closed) or has exited —
+                   // a dead agent shouldn't keep showing from its DB record.
+                   return !!session && session.status !== 'exited' && (!session.taskGroupId || session.taskGroupId === t.id)
                  }
                  const liveMembers = (t.members || []).filter(isLiveMember)
+                 // Rows show agents that are still live, plus members that are
+                 // assigned but have no session yet (pending). A member whose
+                 // session has been closed is no longer in `sessions`, so it
+                 // drops out here instead of lingering from its DB record.
+                 const rowMembers = members.filter(m => !m.sessionId || isLiveMember(m))
                 return (
                   <div key={t.id}>
                     <div
@@ -675,10 +682,10 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                     <div className="task-member-list" role="group" aria-label={`Agents in ${t.title}`}>
                       {!membersLoadedByTask[t.id] ? (
                         <div className="task-member-empty">Loading agents…</div>
-                      ) : members.length === 0 ? (
+                      ) : rowMembers.length === 0 ? (
                         <div className="task-member-empty">No agents yet</div>
                       ) : null}
-                      {membersLoadedByTask[t.id] && members.map(m => {
+                      {membersLoadedByTask[t.id] && rowMembers.map(m => {
                         const buf = m.sessionId ? agentOutRef.current[m.sessionId] : undefined
                         return (
                           <TaskAgentRow
