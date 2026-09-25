@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import { SessionManager } from '../sessionManager'
 import { RingBuffer } from '../ringBuffer'
 import type { Session, Workspace } from '../types'
@@ -193,6 +196,25 @@ describe('SessionManager (orchestration logic)', () => {
       }
       expect(sm.sessionHistory.length).toBe(200)
     })
+  })
+
+  it('discovers an existing Claude transcript when the saved ID is stale', () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agntspce-claude-'))
+    try {
+      process.env.CLAUDE_CONFIG_DIR = root
+      const cwd = '/tmp/claude-project'
+      const projectDir = path.join(root, 'projects', path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-'))
+      fs.mkdirSync(projectDir, { recursive: true })
+      const sessionId = 'f1304fae-b2e6-49c9-9623-504466c56782'
+      fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), '{}\n')
+      const manager = new SessionManager({ emit: vi.fn(), on: vi.fn() } as any)
+      expect((manager as any).findLatestClaudeSessionId(cwd, '6934d463-6fef-4325-9c81-c572342d24da')).toBe(sessionId)
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   describe('writeToSession / resizeSession', () => {

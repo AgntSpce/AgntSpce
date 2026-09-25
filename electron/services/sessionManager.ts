@@ -251,8 +251,9 @@ export class SessionManager extends EventEmitter {
   private pendingOutput = new Map<string, { chunks: string[]; bytes: number; timer: ReturnType<typeof setTimeout> | null }>()
   private compressionMode: 'lite' | 'medium' | 'extreme' = 'lite'
   private nativeSessionLookups = new Map<string, Promise<void>>()
+  private claudeSessionLookups = new Map<string, Promise<void>>()
   private resumeFailureProbes = new Map<string, { output: string; timer: ReturnType<typeof setTimeout> | null }>()
-  private claudeShellFallbacks = new Map<string, { marker: string; nativeSessionId: string; fallbackScheduled: boolean }>()
+  private claudeShellFallbacks = new Map<string, { marker: string; fallbackScheduled: boolean }>()
   private sessionStateSaveQueue: Promise<void> = Promise.resolve()
 
   constructor(io: any, agentManager?: any, dataDir?: string) {
@@ -901,6 +902,7 @@ export class SessionManager extends EventEmitter {
       session.slotRelease?.()
       this.clearResumeFailureProbe(sessionId)
       this.clearClaudeShellFallback(sessionId)
+      this.claudeSessionLookups.delete(sessionId)
       clearInterval(session.processMonitor!)
       session.status = 'exited'
       this.outputFilter.finalizeCommand(sessionId, exitCode ?? 1)
@@ -955,6 +957,9 @@ export class SessionManager extends EventEmitter {
       }
       if (session.type === 'opencode' && !session.agentStartConfig?.nativeSessionId && !this.nativeSessionLookups.has(sessionId)) {
         this.scheduleOpenCodeSessionLookup(sessionId, session.config.cwd, Date.now())
+      }
+      if (session.type === 'claude' && session.agentStartConfig?.mode === 'fresh' && !this.claudeSessionLookups.has(sessionId)) {
+        this.scheduleClaudeSessionLookup(sessionId, session.config.cwd, Date.now(), session.agentStartConfig.nativeSessionId)
       }
       session.pty.write(data)
       return true
@@ -1011,6 +1016,7 @@ export class SessionManager extends EventEmitter {
     if (!session) return false
     this.clearResumeFailureProbe(sessionId)
     this.clearClaudeShellFallback(sessionId)
+    this.claudeSessionLookups.delete(sessionId)
     this.flushTerminalOutput(sessionId)
     session.slotRelease?.()
     this.sessionHistory.push({
@@ -1326,16 +1332,23 @@ export class SessionManager extends EventEmitter {
       const discoveredSessionId = await this.findLatestOpenCodeSessionId(savedCwd)
       if (discoveredSessionId) resumeConfig.nativeSessionId = discoveredSessionId
     }
+    if (resumeConfig?.agentId === 'claude') {
+      const discoveredSessionId = this.findLatestClaudeSessionId(savedCwd, resumeConfig.nativeSessionId || resumeConfig.resumeId)
+      if (discoveredSessionId) {
+        resumeConfig.nativeSessionId = discoveredSessionId
+        resumeConfig.resumeId = discoveredSessionId
+      }
+    }
     if (resumeConfig?.agentId === 'pi' && !resumeConfig.nativeSessionId) {
       const discoveredSessionId = this.findLatestPiSessionId(savedCwd)
       if (discoveredSessionId) resumeConfig.nativeSessionId = discoveredSessionId
     }
     if (resumeConfig) {
       const nativeSessionId = typeof resumeConfig.nativeSessionId === 'string' ? resumeConfig.nativeSessionId.trim() : ''
-      if (nativeSessionId) resumeConfig.resumeId = resumeConfig.resumeId || nativeSessionId
+      if (nativeSessionId) resumeConfig.resumeId = nativeSessionId
       const agent = this.agentManager?.getAgent?.(resumeConfig.agentId)
       if (resumeConfig.agentId === 'claude') {
-        resumeConfig.mode = nativeSessionId ? 'resume' : 'fresh'
+        resumeConfig.mode = nativeSessionId ? 'resume' : 'continue'
       } else if (resumeConfig.agentId === 'opencode') {
         resumeConfig.mode = 'continue'
       } else if (resumeConfig.agentId === 'pi') {
@@ -1537,6 +1550,59 @@ export class SessionManager extends EventEmitter {
     return result
   }
 
+  private getClaudeProjectDir(cwd: string): string {
+    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), '.claude')
+    const encodedCwd = path.resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
+    return path.join(configDir, 'projects', encodedCwd)
+  }
+
+  private findClaudeSessionFile(cwd: string, sessionId: string): string | null {
+    const direct = path.join(this.getClaudeProjectDir(cwd), `${sessionId}.jsonl`)
+    if (fs.existsSync(direct)) return direct
+    const projectsRoot = path.join(process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), '.claude'), 'projects')
+    let found: string | null = null
+    const visit = (dir: string) => {
+      if (found) return
+      let entries: fs.Dirent[]
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        const filePath = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          visit(filePath)
+          if (found) return
+        } else if (entry.isFile() && entry.name === `${sessionId}.jsonl`) {
+          found = filePath
+          return
+        }
+      }
+    }
+    visit(projectsRoot)
+    return found
+  }
+
+  private listClaudeSessions(cwd: string): { id: string; mtime: number }[] {
+    const projectDir = this.getClaudeProjectDir(cwd)
+    try {
+      return fs.readdirSync(projectDir, { withFileTypes: true })
+        .filter(entry => entry.isFile() && /^[0-9a-f]{8}-[0-9a-f-]{27,}\.jsonl$/i.test(entry.name))
+        .map(entry => {
+          const filePath = path.join(projectDir, entry.name)
+          return { id: entry.name.slice(0, -6), mtime: fs.statSync(filePath).mtimeMs }
+        })
+        .sort((a, b) => b.mtime - a.mtime)
+    } catch {
+      return []
+    }
+  }
+
+  private findLatestClaudeSessionId(cwd: string, preferredId?: string): string | null {
+    if (preferredId) {
+      const preferredFile = this.findClaudeSessionFile(cwd, preferredId)
+      if (preferredFile) return preferredId
+    }
+    return this.listClaudeSessions(cwd)[0]?.id || null
+  }
+
   private findLatestPiSessionId(cwd: string): string | null {
     const configuredSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR?.trim()
     const configuredAgentDir = process.env.PI_CODING_AGENT_DIR?.trim()
@@ -1566,6 +1632,36 @@ export class SessionManager extends EventEmitter {
     }
     visit(root)
     return newest?.id || null
+  }
+
+  private async captureClaudeSessionId(sessionId: string, cwd: string, startedAt: number, preferredId?: string): Promise<void> {
+    for (const delay of [500, 1500, 3000, 6000, 12000, 30000]) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+      const session = this.sessions.get(sessionId)
+      if (!session?.pty) return
+      const candidates = this.listClaudeSessions(cwd)
+      const preferred = preferredId ? candidates.find(candidate => candidate.id === preferredId) : undefined
+      const recent = candidates.filter(candidate => candidate.mtime >= startedAt - 10000)
+      const candidate = preferred || recent[0]
+      if (!candidate) continue
+      session.agentStartConfig = {
+        ...(session.agentStartConfig || {}),
+        nativeSessionId: candidate.id,
+        resumeId: undefined,
+      }
+      await this.persistSessionState()
+      return
+    }
+  }
+
+  private scheduleClaudeSessionLookup(sessionId: string, cwd: string, startedAt: number, preferredId?: string): void {
+    if (this.claudeSessionLookups.has(sessionId)) return
+    const lookup = this.captureClaudeSessionId(sessionId, cwd, startedAt, preferredId)
+    this.claudeSessionLookups.set(sessionId, lookup)
+    void lookup.then(
+      () => { if (this.claudeSessionLookups.get(sessionId) === lookup) this.claudeSessionLookups.delete(sessionId) },
+      () => { if (this.claudeSessionLookups.get(sessionId) === lookup) this.claudeSessionLookups.delete(sessionId) }
+    )
   }
 
   private async findLatestOpenCodeSessionId(cwd: string): Promise<string | null> {
@@ -1658,8 +1754,9 @@ export class SessionManager extends EventEmitter {
       ...session.agentStartConfig,
       mode: 'fresh',
       resumeId: undefined,
-      nativeSessionId: fallback.nativeSessionId,
+      nativeSessionId: undefined,
     }
+    this.scheduleClaudeSessionLookup(sessionId, session.config.cwd, Date.now())
     void this.persistSessionState()
   }
 
@@ -1696,7 +1793,7 @@ export class SessionManager extends EventEmitter {
               ...current.agentStartConfig,
               mode: 'fresh',
               resumeId: undefined,
-              nativeSessionId: shellFallback.nativeSessionId,
+              nativeSessionId: undefined,
             })
           } catch (error: any) {
             console.error('resume fallback: fresh Claude start failed:', error?.message || error)
@@ -1707,7 +1804,7 @@ export class SessionManager extends EventEmitter {
     }
 
     this.clearResumeFailureProbe(sessionId)
-    const fallbackSessionId = config.agentId === 'claude' || config.agentId === 'pi' ? randomUUID() : undefined
+    const fallbackSessionId = config.agentId === 'pi' ? randomUUID() : undefined
     setTimeout(() => {
       const current = this.sessions.get(sessionId)
       if (!current?.pty || current.agentStartConfig?.mode !== config.mode) return
@@ -1742,7 +1839,7 @@ export class SessionManager extends EventEmitter {
         nativeSessionId: undefined,
       }
     }
-    if ((startConfig.agentId === 'claude' || startConfig.agentId === 'pi') && startConfig.mode === 'fresh' && !startConfig.nativeSessionId) {
+    if (startConfig.agentId === 'pi' && startConfig.mode === 'fresh' && !startConfig.nativeSessionId) {
       startConfig = { ...startConfig, nativeSessionId: randomUUID() }
     }
     const isResumeAttempt = (startConfig.mode === 'resume' || startConfig.mode === 'continue') && (AGENT_TYPES as readonly string[]).includes(startConfig.agentId)
@@ -1777,20 +1874,19 @@ export class SessionManager extends EventEmitter {
 
     const command = this.agentManager.buildCommand(startConfig.agentId, startConfig.mode, startConfig)
     let launchCommand = command
-    const useClaudeShellFallback = startConfig.agentId === 'claude' && startConfig.mode === 'resume' && !!(startConfig.resumeId || startConfig.nativeSessionId)
+    const useClaudeShellFallback = startConfig.agentId === 'claude' && (startConfig.mode === 'resume' || startConfig.mode === 'continue') && (startConfig.mode === 'continue' || !!(startConfig.resumeId || startConfig.nativeSessionId))
     if (useClaudeShellFallback) {
-      const fallbackSessionId = randomUUID()
       const freshCommand = this.agentManager.buildCommand('claude', 'fresh', {
         ...startConfig,
         mode: 'fresh',
         resumeId: undefined,
-        nativeSessionId: fallbackSessionId,
+        nativeSessionId: undefined,
       })
       const marker = `[agntspce:claude-resume-fallback:${sessionId}:${Date.now()}]`
       launchCommand = process.platform === 'win32'
         ? `${command}; if ($LASTEXITCODE -ne 0) { Write-Output ${shq(marker)}; ${freshCommand} }`
         : `(${command}) || { printf '%s\\n' ${shq(marker)}; ${freshCommand}; }`
-      this.claudeShellFallbacks.set(sessionId, { marker, nativeSessionId: fallbackSessionId, fallbackScheduled: false })
+      this.claudeShellFallbacks.set(sessionId, { marker, fallbackScheduled: false })
     } else {
       this.clearClaudeShellFallback(sessionId)
     }
@@ -1846,6 +1942,9 @@ export class SessionManager extends EventEmitter {
       }
     }
 
+    if (startConfig.agentId === 'claude' && startConfig.mode === 'fresh') {
+      this.scheduleClaudeSessionLookup(sessionId, session.config.cwd, startedAt, startConfig.nativeSessionId)
+    }
     if (startConfig.agentId === 'opencode' && (startConfig.mode === 'fresh' || startConfig.mode === 'continue')) {
       this.scheduleOpenCodeSessionLookup(sessionId, session.config.cwd, startedAt)
     }
