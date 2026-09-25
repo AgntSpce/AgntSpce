@@ -615,11 +615,12 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                    return !!session && session.status !== 'exited' && (!session.taskGroupId || session.taskGroupId === t.id)
                  }
                  const liveMembers = (t.members || []).filter(isLiveMember)
-                 // Rows show agents that are still live, plus members that are
-                 // assigned but have no session yet (pending). A member whose
-                 // session has been closed is no longer in `sessions`, so it
-                 // drops out here instead of lingering from its DB record.
-                 const rowMembers = members.filter(m => !m.sessionId || isLiveMember(m))
+                 // Rows show only agents with a LIVE session. Closing a task
+                 // agent resets its subtask to `pending` with a null sessionId
+                 // (so it can be relaunched) — keeping such members would make a
+                 // closed agent linger in the panel. Filtering to live sessions
+                 // removes it; it reappears only if relaunched.
+                 const rowMembers = members.filter(isLiveMember)
                 return (
                   <div key={t.id}>
                     <div
