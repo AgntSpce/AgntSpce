@@ -493,6 +493,20 @@
   background: var(--danger);
 }
 
+/* Real tick / cross marks (codicon) for done / stopped agents. */
+.orca-agent-done-check,
+.orca-agent-alert-cross {
+  display: block;
+  font-size: 14px;
+  line-height: 12px;
+}
+.orca-agent-done-check {
+  color: var(--success);
+}
+.orca-agent-alert-cross {
+  color: var(--danger);
+}
+
 .orca-agent-idle-dot {
   display: block;
   width: 6px;

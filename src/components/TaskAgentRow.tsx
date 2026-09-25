@@ -67,12 +67,25 @@ interface TaskAgentRowProps {
    *  (never from typing echo) — drives the "working" spinner. */
   isWorking: boolean
   active: boolean
-  /** One-line latest thinking/output (already ANSI-cleaned by the panel). */
+  /** One-line latest thinking/output (already ANSI-cleaned + chrome-filtered). */
   previewLine: string
   /** Timestamp of the latest output (for the relative-time meta). */
   lastLineTs: number
+  /** True once the agent has produced real (non-chrome) output — drives the
+   *  green "done" tick. */
+  hasOutput: boolean
   getTokenUsage?: (sessionId?: string) => Promise<any>
   onSelectSession?: (sessionId: string) => void
+  /** True when this row's task is the one currently open in the main view. */
+  isInOpenTask?: boolean
+  /** Switch the main view to this row's task (used when clicking an agent that
+   *  belongs to a task you're not currently viewing). */
+  onOpenTask?: () => void
+  /** Whether this row's stats popover is the one open (owned by the panel, so
+   *  only one popover is ever open and switching agents closes the previous). */
+  detailsOpen: boolean
+  /** Toggle this row's stats popover. */
+  onToggleDetails: () => void
 }
 
 // Orca-style agent row: name + the agent's latest line of thinking/output shown
@@ -85,32 +98,41 @@ function TaskAgentRow({
   active,
   previewLine,
   lastLineTs,
+  hasOutput,
   getTokenUsage,
   onSelectSession,
+  isInOpenTask,
+  onOpenTask,
+  detailsOpen,
+  onToggleDetails,
 }: TaskAgentRowProps) {
-  const [detailsOpen, setDetailsOpen] = useState(false)
   const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number; estimatedCost: number } | null>(null)
   const rowRef = useRef<HTMLDivElement | null>(null)
 
-  // Derive the state glyph from the member + live session status. "working" uses
-  // the prompt-gated flag, not raw `busy` (typing echo safe). A session that is
-  // `busy` WITHOUT an outstanding user prompt is just the echo of typing (or an
-  // autonomous dispatch), so it stays a neutral idle dot — only a genuine
-  // `waiting` (permission/input needed) shows the amber "?".
-  let state: 'working' | 'waiting' | 'done' | 'blocked' | 'exited' | 'idle' = 'idle'
-  if (sessionStatus === 'exited') state = 'exited'
-  else if (member.status === 'failed') state = 'blocked'
-  else if (member.status === 'done') state = 'done'
+  // State → glyph:
+  //   red     — the agent stopped/failed (exited or errored) and gave no output
+  //   spinner — actively producing a response right now
+  //   green   — finished working (it produced output and has settled)
+  //   amber ? — genuinely waiting on input/permission, with nothing produced yet
+  //   grey    — idle: never produced output
+  // The `busy` status alone is NOT trusted (it fires on typing echo and lingers
+  // after a response); `isWorking` is prompt-gated, and "done" additionally
+  // requires real output to have been produced.
+  let state: 'working' | 'waiting' | 'done' | 'blocked' | 'idle' = 'idle'
+  if (sessionStatus === 'exited' || member.status === 'failed') state = 'blocked'
   else if (isWorking) state = 'working'
+  else if (member.status === 'done' || hasOutput) state = 'done'
   else if (sessionStatus === 'waiting') state = 'waiting'
 
   const glyph = (() => {
     switch (state) {
       case 'working': return <span className="orca-agent-spinner" />
       case 'waiting': return <span className="orca-agent-dot-waiting"><span className="orca-agent-question">?</span></span>
-      case 'done': return <span className="orca-agent-done-dot" />
-      case 'blocked': return <span className="orca-agent-alert-dot" />
-      case 'exited': return <span className="orca-agent-exited">⊘</span>
+      // Real tick / cross marks (codicons, matching the app's icon style) rather
+      // than plain dots, so a finished agent (✓) vs a stopped one (✕) reads
+      // instantly.
+      case 'done': return <i className="codicon codicon-check orca-agent-done-check" />
+      case 'blocked': return <i className="codicon codicon-close orca-agent-alert-cross" />
       default: return <span className="orca-agent-idle-dot" />
     }
   })()
@@ -125,20 +147,10 @@ function TaskAgentRow({
     return () => { cancelled = true }
   }, [detailsOpen, member.sessionId, getTokenUsage])
 
-  // Dismiss the popover on outside click / Escape.
-  useEffect(() => {
-    if (!detailsOpen) return
-    const onDown = (e: MouseEvent) => {
-      if (rowRef.current && !rowRef.current.contains(e.target as Node)) setDetailsOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDetailsOpen(false) }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [detailsOpen])
+  // The stats popover is intentionally PERSISTENT: it does NOT auto-close on
+  // outside-click, Escape, or navigating to another task/agent. It stays open
+  // so you can browse freely, and closes only when you click the SAME agent
+  // again (the row's own click toggles it). No dismiss listeners here on purpose.
 
   const isPending = !member.sessionId
   const displayName = member.title || member.agentId
@@ -151,8 +163,14 @@ function TaskAgentRow({
       <div
         className={`orca-agent-row${active ? ' focused' : ''}`}
         onClick={() => {
+          // If this agent belongs to a task that isn't the one currently open in
+          // the main view, switch to that task first so clicking the agent
+          // actually opens its task's agent section (instead of focusing a
+          // session that's hidden behind a different task). Then focus the
+          // session and open the details popover.
+          if (!isInOpenTask) onOpenTask?.()
           if (member.sessionId) onSelectSession?.(member.sessionId)
-          setDetailsOpen(v => !v)
+          onToggleDetails()
         }}
         title={member.sessionId ? `${member.agentId} · ${member.status} — click to focus + details` : `${member.agentId} · ${member.status}`}
       >

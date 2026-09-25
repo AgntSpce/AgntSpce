@@ -94,6 +94,13 @@ interface Props {
    * useSocket() itself — each call opens a new connection.
    */
   onTerminalOutput?: (cb: (data: TerminalOutput) => void) => () => void
+  /**
+   * Fires when a session is resumed. Resuming replays the entire prior
+   * conversation into the terminal, which would otherwise flood the agent feed
+   * with old prompts/history and light the working spinner. The panel uses this
+   * to reset that session's buffer + working state.
+   */
+  onSessionResumed?: (cb: (data: { sessionId: string }) => void) => () => void
   /** Pull token usage for a session (output/total/estimated cost). */
   getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
@@ -191,6 +198,9 @@ type AgentOutEntry = {
    *  vanish after stripping, so they must not count as the agent still
    *  responding. This timestamp is what the working-spinner keys off. */
   contentTs: number
+  /** True once the agent has produced at least one line of real (non-chrome)
+   *  output — used to show the green "done" dot. */
+  hasOutput: boolean
 }
 
 // Strip ANSI/control sequences (keeps \t and \n; folds \r\n → \n) so the feed
@@ -204,17 +214,43 @@ function stripAnsi(s: string): string {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')     // remaining control chars
 }
 
-function lastNonEmptyLine(s: string): string {
+// Agent CLIs (opencode, codex, …) render a TUI "loading bar" / spinner using
+// real glyphs — block elements (█ ░ ▒ ▓ ▀ ▄), box-drawing, and braille spinner
+// frames. Those are ordinary text, so after ANSI-stripping they survive and
+// would otherwise (a) be shown as the agent's "current line" instead of its
+// thinking/output, and (b) refresh the content timestamp on every frame, keeping
+// the working spinner alive forever. We classify such chrome-only lines as
+// noise and ignore them, so only the agent's genuine thinking/output counts.
+const NOISE_RE = /[▀-▟⠀-⣿─-╿■-◿⎰-⏿⬛-⬟]/g
+
+function isChromeOnlyLine(line: string): boolean {
+  const t = line.trim()
+  if (!t) return true
+  const compact = t.replace(/\s+/g, '')
+  if (!compact) return true
+  const noiseCount = (compact.match(NOISE_RE) || []).length
+  // A line that is mostly bar/border glyphs is chrome, not content.
+  if (noiseCount / compact.length > 0.3) return true
+  // A line that is *only* spinner/border glyphs (e.g. "⠋", "────") is chrome.
+  const meaningful = t.replace(NOISE_RE, '').replace(/\s+/g, '')
+  if (meaningful.length === 0) return true
+  return false
+}
+
+// The last line that is real agent content (thinking/output), skipping any
+// trailing TUI chrome lines.
+function lastMeaningfulLine(s: string): string {
   const lines = s.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
     const t = lines[i].trim()
-    if (t) return t.length > 160 ? t.slice(0, 160) : t
+    if (t && !isChromeOnlyLine(t)) return t.length > 160 ? t.slice(0, 160) : t
   }
   return ''
 }
 
 function useAgentOutputBuffer(
   onTerminalOutput: ((cb: (d: TerminalOutput) => void) => () => void) | undefined,
+  onSessionResumed: ((cb: (d: { sessionId: string }) => void) => () => void) | undefined,
   trackedIds: string[],
 ) {
   const bufRef = useRef<Record<string, AgentOutEntry>>({})
@@ -231,19 +267,19 @@ function useAgentOutputBuffer(
       if (!clean) return
       const prev = bufRef.current[d.sessionId]
       const text = (prev?.text || '') + clean
-      const cleanLen = (prev?.cleanLen || 0) + clean.length
-      // Content counts as "still responding" only if the cleaned text actually
-      // grew, or the latest visible line changed. Pure ANSI redraw strips to
-      // empty and is ignored above; a redraw that carries no new characters
-      // doesn't move this timestamp.
-      const nextLine = lastNonEmptyLine(clean) || prev?.lastLine || ''
-      const contentChanged = cleanLen !== (prev?.cleanLen || 0) || nextLine !== prev?.lastLine
+      // The "current line" and the content timestamp both key off REAL agent
+      // output only. A chunk that is pure TUI chrome (loading bar / spinner)
+      // leaves lastLine and contentTs untouched, so a spinning loader can't
+      // masquerade as a live response or pin the working spinner on.
+      const nextLine = lastMeaningfulLine(clean) || prev?.lastLine || ''
+      const contentChanged = nextLine !== (prev?.lastLine || '')
       bufRef.current[d.sessionId] = {
         text: text.length > AGENT_FEED_CAP ? text.slice(-AGENT_FEED_CAP) : text,
         lastLine: nextLine,
         ts: Date.now(),
-        cleanLen,
+        cleanLen: (prev?.cleanLen || 0) + clean.length,
         contentTs: contentChanged ? Date.now() : (prev?.contentTs || Date.now()),
+        hasOutput: (prev?.hasOutput || false) || contentChanged,
       }
       if (!timerRef.current) {
         timerRef.current = setTimeout(() => {
@@ -253,6 +289,18 @@ function useAgentOutputBuffer(
       }
     },
     [onTerminalOutput],
+  )
+
+  // Resuming a session replays its entire prior conversation into the terminal.
+  // Drop any buffer we already hold for it so the replayed history (old prompts,
+  // past answers) never shows as the "current" line or lights the spinner.
+  useSocketEvent<{ sessionId: string }>(
+    onSessionResumed || (() => () => {}),
+    ({ sessionId }) => {
+      delete bufRef.current[sessionId]
+      forceRender(v => v + 1)
+    },
+    [onSessionResumed],
   )
 
   // Drop buffers for sessions no longer tracked (task/agent gone).
@@ -289,11 +337,25 @@ function useAgentWorkingFlags(
   promptHistory: PromptHistoryEntry[],
   sessions: Record<string, SessionState>,
   outRef: React.MutableRefObject<Record<string, AgentOutEntry>>,
+  onSessionResumed: ((cb: (d: { sessionId: string }) => void) => () => void) | undefined,
 ): Record<string, boolean> {
   // per session: last typed-prompt timestamp we've accounted for, whether one is
   // still outstanding, and the last status we observed.
   const stateRef = useRef<Record<string, { lastPromptTs: number; outstanding: boolean; prevStatus?: string }>>({})
   const [now, setNow] = useState(() => Date.now())
+
+  // Resuming replays old history, which would look like a burst of "response".
+  // Treat it as a fresh start: no outstanding prompt, so no spinner until the
+  // user actually submits something new.
+  useSocketEvent<{ sessionId: string }>(
+    onSessionResumed || (() => () => {}),
+    ({ sessionId }) => {
+      const st = stateRef.current[sessionId]
+      if (st) st.outstanding = false
+      setNow(Date.now())
+    },
+    [onSessionResumed],
+  )
 
   // Newest USER-submitted (source 'typed') prompt timestamp per session.
   const latestTyped = useMemo(() => {
@@ -373,6 +435,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onCreateTask,
   onFetchMembers,
   onTerminalOutput,
+  onSessionResumed,
   getTokenUsage,
   promptHistory,
   onRenameTask,
@@ -421,6 +484,13 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
    * useSocket() itself — each call opens a new connection.
    */
   onTerminalOutput?: (cb: (data: TerminalOutput) => void) => () => void
+  /**
+   * Fires when a session is resumed. Resuming replays the entire prior
+   * conversation into the terminal, which would otherwise flood the agent feed
+   * with old prompts/history and light the working spinner. The panel uses this
+   * to reset that session's buffer + working state.
+   */
+  onSessionResumed?: (cb: (data: { sessionId: string }) => void) => () => void
   /** Pull token usage for a session (output/total/estimated cost). */
   getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
@@ -435,6 +505,11 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   const [membersByTask, setMembersByTask] = useState<Record<string, TaskMember[]>>({})
   const [membersLoadedByTask, setMembersLoadedByTask] = useState<Record<string, boolean>>({})
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
+  // Which agent's stats popover is open (its row key). Kept here — not per-row —
+  // so only ONE popover can ever be open: clicking a different agent/task
+  // switches it instantly instead of leaving the previous agent's stats on
+  // screen while the view navigates.
+  const [openDetailsKey, setOpenDetailsKey] = useState<string | null>(null)
   useEffect(() => {
     if (!menuOpenId && !taskMenuId) return
     const handler = () => { setMenuOpenId(null); setTaskMenuId(null) }
@@ -444,8 +519,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
 
   function handleTaskRowClick(id: string, event?: React.MouseEvent) {
     if (event && event.detail > 1) return
-    // Agent rows are always visible now, so a task-row click just navigates to
-    // that task's agents page (as it always did).
+    // The open agent-stats window is persistent — navigating to another task
+    // (or agent) does NOT close it; it only closes when you click that same
+    // agent again. So we deliberately don't touch openDetailsKey here.
     if (openTaskId !== id) onSelectTask?.(id)
   }
 
@@ -490,8 +566,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     }
     return [...set].sort()
   }, [membersByTask])
-  const agentOutRef = useAgentOutputBuffer(onTerminalOutput, trackedIds)
-  const workingFlags = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef)
+  const agentOutRef = useAgentOutputBuffer(onTerminalOutput, onSessionResumed, trackedIds)
+  const workingFlags = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef, onSessionResumed)
 
   // Latest known git branch per workspace, from agent sessions (most recent
   // first). Replaces the old aggregate-status gutter data.
@@ -688,15 +764,21 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                       ) : null}
                       {membersLoadedByTask[t.id] && rowMembers.map(m => {
                         const buf = m.sessionId ? agentOutRef.current[m.sessionId] : undefined
+                        const rowKey = `${m.agentId}-${m.sessionId || m.subtaskId || m.title}`
                         return (
                           <TaskAgentRow
-                            key={`${m.agentId}-${m.sessionId || m.subtaskId || m.title}`}
+                            key={rowKey}
                             member={m}
                             sessionStatus={m.sessionId ? sessions[m.sessionId]?.status : undefined}
                             isWorking={!!(m.sessionId && workingFlags[m.sessionId])}
                             active={!!(activeSessionId && m.sessionId === activeSessionId)}
                             previewLine={buf?.lastLine || ''}
                             lastLineTs={buf?.ts || 0}
+                            hasOutput={!!buf?.hasOutput}
+                            isInOpenTask={openTaskId === t.id}
+                            onOpenTask={() => onSelectTask?.(t.id)}
+                            detailsOpen={openDetailsKey === rowKey}
+                            onToggleDetails={() => setOpenDetailsKey(prev => prev === rowKey ? null : rowKey)}
                             getTokenUsage={getTokenUsage}
                             onSelectSession={onSelectSession}
                           />
@@ -747,7 +829,7 @@ export default memo(function WorkspaceSidebar({
   taskGroups, selectedTaskId, openTaskId, onSelectTask,
   onOpenFolderDirect, onCloneDirect,
   activeSessionId, onSelectSession,
-  onCreateTask, onFetchMembers, onTerminalOutput, getTokenUsage, promptHistory,
+  onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, getTokenUsage, promptHistory,
   onRenameTask, onDeleteTask, onOpenTaskDetails,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
@@ -778,6 +860,7 @@ export default memo(function WorkspaceSidebar({
         onCreateTask={onCreateTask}
         onFetchMembers={onFetchMembers}
         onTerminalOutput={onTerminalOutput}
+        onSessionResumed={onSessionResumed}
         getTokenUsage={getTokenUsage}
         promptHistory={promptHistory}
         onRenameTask={onRenameTask}

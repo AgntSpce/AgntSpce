@@ -55,6 +55,7 @@ interface UseSocketReturn {
   workspaces: WorkspaceInfo[]
   activeWorkspace: WorkspaceInfo | null
   onTerminalOutput: (cb: (data: TerminalOutput) => void) => () => void
+  onSessionResumed: (cb: (data: { sessionId: string }) => void) => () => void
   onStatusChange: (cb: (data: StatusChange) => void) => () => void
   onBranchChange: (cb: (data: BranchChange) => void) => () => void
   onWorkspaceChanged: (cb: (data: WorkspaceChange) => void) => () => void
@@ -185,6 +186,7 @@ export function useSocket(): UseSocketReturn {
   const [sessionCompressionModes, setSessionCompressionModes] = useState<Record<string, CompressionMode>>({})
   const sessionCompressionCbs = useRef<((sessionId: string, mode: CompressionMode) => void)[]>([])
   const terminalOutputCbs = useRef<((data: TerminalOutput) => void)[]>([])
+  const sessionResumedCbs = useRef<((data: { sessionId: string }) => void)[]>([])
   const lastStatsFetchAt = useRef(0)
   const statusChangeCbs = useRef<((data: StatusChange) => void)[]>([])
   const branchChangeCbs = useRef<((data: BranchChange) => void)[]>([])
@@ -428,6 +430,11 @@ socket.emit('get-cumulative-stats', {})
         if (!session) return prev
         return { ...prev, [sessionId]: session }
       })
+      // Notify subscribers (e.g. the workspace panel) that this session was
+      // resumed, so they can discard the replayed-history burst.
+      for (const cb of sessionResumedCbs.current) {
+        try { cb({ sessionId }) } catch {}
+      }
     })
 
     socket.on('error', (err: any) => {
@@ -542,6 +549,13 @@ socket.emit('get-cumulative-stats', {})
     terminalOutputCbs.current.push(cb)
     return () => {
       terminalOutputCbs.current = terminalOutputCbs.current.filter(c => c !== cb)
+    }
+  }, [])
+
+  const onSessionResumed = useCallback((cb: (data: { sessionId: string }) => void) => {
+    sessionResumedCbs.current.push(cb)
+    return () => {
+      sessionResumedCbs.current = sessionResumedCbs.current.filter(c => c !== cb)
     }
   }, [])
 
@@ -1092,6 +1106,7 @@ socket.emit('get-cumulative-stats', {})
     workspaces,
     activeWorkspace,
     onTerminalOutput,
+    onSessionResumed,
     onStatusChange,
     onBranchChange,
     onWorkspaceChanged,

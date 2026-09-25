@@ -153,7 +153,7 @@ const NOOP = () => {}
 function App() {
   const {
     sessions, workspaces, activeWorkspace: _globalActiveWorkspace,
-    onTerminalOutput, sendTerminalInput, sendTerminalResize,
+    onTerminalOutput, onSessionResumed, sendTerminalInput, sendTerminalResize,
     restartSession, resumeSession, switchWorkspace, createWorkspace,
     deleteWorkspace, listDeletedWorkspaces, restoreWorkspace, permanentDeleteWorkspace,
     closeTab, startAgent, fetchAgentConfigs, fetchInstalledAgents, createRawSession, createAgentSession,
@@ -1921,6 +1921,7 @@ function App() {
               onCreateTask={handleQuickCreateTask}
               onFetchMembers={fetchGroupMembers}
               onTerminalOutput={onTerminalOutput}
+              onSessionResumed={onSessionResumed}
               getTokenUsage={getTokenUsage}
               onRenameTask={handleRenameTask}
               onDeleteTask={handleDeleteTask}
