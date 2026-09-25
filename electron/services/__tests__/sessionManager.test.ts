@@ -29,7 +29,7 @@ describe('SessionManager (orchestration logic)', () => {
   let sm: SessionManager
 
   beforeEach(() => {
-    const io = { emit: vi.fn() }
+    const io = { emit: vi.fn(), on: vi.fn() }
     sm = new SessionManager(io as any)
   })
 
@@ -224,6 +224,24 @@ describe('SessionManager (orchestration logic)', () => {
       sm.sessions.set('s1', session)
       sm.resizeSession('s1', 40, 10)
       expect(resizeMock).toHaveBeenCalledWith(40, 10)
+    })
+    it('falls back to a fresh Claude command when resume output fails immediately', async () => {
+      const buildCommand = vi.fn((_agentId: string, mode: string) => mode === 'resume'
+        ? "printf 'No conversation found with session ID: bad\\n'; exit 1"
+        : "printf 'fresh-agent\\n'")
+      const manager = new SessionManager({ emit: vi.fn(), on: vi.fn() } as any, {
+        getAgent: () => ({ modes: { fresh: {}, resume: {} } }),
+        validateConfig: () => ({ valid: true }),
+        buildCommand,
+      } as any)
+      const created = await manager.createRawSession('claude', '/tmp', 'resume-fallback-test')
+      expect(created?.sessionId).toBe('resume-fallback-test')
+      manager.startAgentWithConfig('resume-fallback-test', { agentId: 'claude', mode: 'resume', flags: [], resumeId: 'bad' })
+      await new Promise(resolve => setTimeout(resolve, 500))
+      const session = manager.sessions.get('resume-fallback-test')
+      expect(session?.agentStartConfig?.mode).toBe('fresh')
+      expect(session?.buffer.snapshot()).toContain('fresh-agent')
+      manager.closeSession('resume-fallback-test')
     })
   })
 })

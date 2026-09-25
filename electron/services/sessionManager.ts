@@ -252,6 +252,7 @@ export class SessionManager extends EventEmitter {
   private compressionMode: 'lite' | 'medium' | 'extreme' = 'lite'
   private nativeSessionLookups = new Map<string, Promise<void>>()
   private resumeFailureProbes = new Map<string, { output: string; timer: ReturnType<typeof setTimeout> | null }>()
+  private claudeShellFallbacks = new Map<string, { marker: string; nativeSessionId: string; fallbackScheduled: boolean }>()
   private sessionStateSaveQueue: Promise<void> = Promise.resolve()
 
   constructor(io: any, agentManager?: any, dataDir?: string) {
@@ -865,6 +866,7 @@ export class SessionManager extends EventEmitter {
 
     ptyProcess.onData((data: string) => {
       session.buffer.write(data)
+      this.handleClaudeResumeFallbackMarker(sessionId, data)
       this.maybeRecoverFailedAgentResume(sessionId, data)
       session.lastActivity = Date.now()
       this.orchestrator?.markHealthCheck(sessionId)
@@ -898,6 +900,7 @@ export class SessionManager extends EventEmitter {
       this.flushTerminalOutput(sessionId, true)
       session.slotRelease?.()
       this.clearResumeFailureProbe(sessionId)
+      this.clearClaudeShellFallback(sessionId)
       clearInterval(session.processMonitor!)
       session.status = 'exited'
       this.outputFilter.finalizeCommand(sessionId, exitCode ?? 1)
@@ -1007,6 +1010,7 @@ export class SessionManager extends EventEmitter {
     const session = this.sessions.get(sessionId)
     if (!session) return false
     this.clearResumeFailureProbe(sessionId)
+    this.clearClaudeShellFallback(sessionId)
     this.flushTerminalOutput(sessionId)
     session.slotRelease?.()
     this.sessionHistory.push({
@@ -1639,6 +1643,26 @@ export class SessionManager extends EventEmitter {
     this.resumeFailureProbes.delete(sessionId)
   }
 
+  private clearClaudeShellFallback(sessionId: string) {
+    this.claudeShellFallbacks.delete(sessionId)
+  }
+
+  private handleClaudeResumeFallbackMarker(sessionId: string, data: string) {
+    const fallback = this.claudeShellFallbacks.get(sessionId)
+    if (!fallback || !data.includes(fallback.marker)) return
+    const session = this.sessions.get(sessionId)
+    this.claudeShellFallbacks.delete(sessionId)
+    this.clearResumeFailureProbe(sessionId)
+    if (!session?.agentStartConfig) return
+    session.agentStartConfig = {
+      ...session.agentStartConfig,
+      mode: 'fresh',
+      resumeId: undefined,
+      nativeSessionId: fallback.nativeSessionId,
+    }
+    void this.persistSessionState()
+  }
+
   private beginResumeFailureProbe(sessionId: string) {
     this.clearResumeFailureProbe(sessionId)
     const probe: { output: string; timer: ReturnType<typeof setTimeout> | null } = { output: '', timer: null }
@@ -1657,6 +1681,30 @@ export class SessionManager extends EventEmitter {
     const config = session.agentStartConfig
     if (!config || (config.mode !== 'resume' && config.mode !== 'continue')) return
     if (!/(?:no conversation found|no (?:session|sessions|previous session) found|no session available|session\s+(?:id\s+)?[^\n]*(?:not found|does not exist|unavailable|not available|invalid)|unable to resume (?:session|conversation)|failed to resume (?:session|conversation)|could not find (?:session|conversation)|unknown session)/i.test(probe.output)) return
+
+    const shellFallback = config.agentId === 'claude' ? this.claudeShellFallbacks.get(sessionId) : undefined
+    if (shellFallback) {
+      if (!shellFallback.fallbackScheduled) {
+        shellFallback.fallbackScheduled = true
+        setTimeout(() => {
+          const current = this.sessions.get(sessionId)
+          if (this.claudeShellFallbacks.get(sessionId)?.marker !== shellFallback.marker) return
+          this.claudeShellFallbacks.delete(sessionId)
+          if (!current?.pty || current.agentStartConfig?.mode !== config.mode) return
+          try {
+            this.startAgentWithConfig(sessionId, {
+              ...current.agentStartConfig,
+              mode: 'fresh',
+              resumeId: undefined,
+              nativeSessionId: shellFallback.nativeSessionId,
+            })
+          } catch (error: any) {
+            console.error('resume fallback: fresh Claude start failed:', error?.message || error)
+          }
+        }, 2000)
+      }
+      return
+    }
 
     this.clearResumeFailureProbe(sessionId)
     const fallbackSessionId = config.agentId === 'claude' || config.agentId === 'pi' ? randomUUID() : undefined
@@ -1728,6 +1776,24 @@ export class SessionManager extends EventEmitter {
     }
 
     const command = this.agentManager.buildCommand(startConfig.agentId, startConfig.mode, startConfig)
+    let launchCommand = command
+    const useClaudeShellFallback = startConfig.agentId === 'claude' && startConfig.mode === 'resume' && !!(startConfig.resumeId || startConfig.nativeSessionId)
+    if (useClaudeShellFallback) {
+      const fallbackSessionId = randomUUID()
+      const freshCommand = this.agentManager.buildCommand('claude', 'fresh', {
+        ...startConfig,
+        mode: 'fresh',
+        resumeId: undefined,
+        nativeSessionId: fallbackSessionId,
+      })
+      const marker = `[agntspce:claude-resume-fallback:${sessionId}:${Date.now()}]`
+      launchCommand = process.platform === 'win32'
+        ? `${command}; if ($LASTEXITCODE -ne 0) { Write-Output ${shq(marker)}; ${freshCommand} }`
+        : `(${command}) || { printf '%s\\n' ${shq(marker)}; ${freshCommand}; }`
+      this.claudeShellFallbacks.set(sessionId, { marker, nativeSessionId: fallbackSessionId, fallbackScheduled: false })
+    } else {
+      this.clearClaudeShellFallback(sessionId)
+    }
     const baseCmd = command.split(/\s+/)[0]
     const resolvedPath = resolveAgent(baseCmd)
     if (!resolvedPath) {
@@ -1745,7 +1811,7 @@ export class SessionManager extends EventEmitter {
     session.agentStartConfig = startConfig
     session.autoStarted = true
     session.claudeLaunchState = 'launched'
-    this.writeToSession(sessionId, envPrefix + command + newline)
+    this.writeToSession(sessionId, envPrefix + launchCommand + newline)
 
     // 2.1 dispatch preamble: deliver the shared orchestration state as the
     // agent's first input after it boots (agents are interactive CLIs that
