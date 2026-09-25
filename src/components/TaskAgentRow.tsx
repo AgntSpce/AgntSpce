@@ -182,20 +182,16 @@ function TaskAgentRow({
             <span className="val">{member.status}{sessionStatus ? ` · ${sessionStatus}` : ''}</span>
           </div>
           <div className="orca-agent-detail-row">
-            <span>Output</span>
-            <span className="val">{usage ? `~${fmtTokens(usage.outputTokens)} tok` : '…'}</span>
-          </div>
-          <div className="orca-agent-detail-row">
-            <span>Total</span>
-            <span className="val">{usage ? `~${fmtTokens(usage.totalTokens)} tok` : '…'}</span>
-          </div>
-          <div className="orca-agent-detail-row">
             <span>Input</span>
-            <span className="val muted">n/a</span>
+            <span className="val">{usage ? `~${fmtTokens(usage.inputTokens)} tok` : '—'}</span>
+          </div>
+          <div className="orca-agent-detail-row">
+            <span>Output</span>
+            <span className="val">{usage ? `~${fmtTokens(usage.outputTokens)} tok` : '—'}</span>
           </div>
           <div className="orca-agent-detail-row">
             <span>Context</span>
-            <span className="val muted">n/a</span>
+            <span className="val">{usage ? `~${fmtTokens(usage.totalTokens)} tok used` : '—'}</span>
           </div>
         </div>
       )}

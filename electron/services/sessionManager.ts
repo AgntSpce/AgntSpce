@@ -274,6 +274,12 @@ export class SessionManager extends EventEmitter {
     })
     this.promptHistory.setOnPromptEvent((event) => {
       try {
+        // Count the user's submitted prompt toward the session's input tokens
+        // (only real prompts reach here — recorded on Enter). This is what the
+        // per-agent details view shows as "Input".
+        if (event.originalPrompt) this.tokenUsageTracker.trackInput(event.sessionId, event.originalPrompt)
+      } catch {}
+      try {
         this.io.emit('prompt-compress-event', event)
       } catch {}
     })
