@@ -199,6 +199,9 @@ export interface TaskGroupInfo {
   completedAt: number | null
   /** Non-null while pinned; the timestamp orders pinned tasks (newest pin first). */
   pinnedAt?: number | null
+  /** Set while a conflict-resolved merge waits for the user to land it. */
+  mergeCandidateRef?: string | null
+  mergeCandidateBase?: string | null
   members?: { agentId: string; sessionId: string | null }[]
 }
 

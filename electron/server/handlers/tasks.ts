@@ -325,14 +325,42 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     try {
       const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
       if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
-      // Serialize through the first group's merger (per-merger lock); groups
-      // are expected to share the repo. Mismatched repos merge independently.
+      // Oldest first: each merge advances the integration branch, so every later
+      // task merges against the work already landed. Client order was never a
+      // meaningful contract and made merge-all results depend on click order.
+      const order = new Map(sm.listTaskGroups().map(g => [g.id, g.createdAt ?? 0]))
+      const ordered = [...(taskGroupIds || [])].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
       const results: any[] = []
-      for (const id of taskGroupIds || []) {
-        results.push(await buildMerger(id).executeMerge(id, true))
+      let stopped = false
+      for (const id of ordered) {
+        if (stopped) {
+          results.push({
+            ok: false, skipped: true, needsConfirm: false, taskGroupId: id, branchName: '',
+            diffSummary: '', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [], buildPassed: false,
+            error: 'Skipped — an earlier task failed to merge. Resolve it and run this again.',
+          })
+          continue
+        }
+        const result = await buildMerger(id).executeMerge(id, true)
+        results.push(result)
+        // No rollback: a landed merge stays landed. Stop and report exactly
+        // what made it in so the user can decide, instead of pretending the
+        // whole batch either worked or failed.
+        if (!result.ok) stopped = true
       }
+      const landed = results.filter(r => r.ok).length
+      const pendingConfirm = results.filter(r => r.needsConfirm).length
       ctx.io.emit('task-groups-changed', { workspaceId: '' })
-      if (callback) callback({ ok: true, results })
+      if (callback) {
+        callback({
+          ok: !stopped,
+          landed,
+          pendingConfirm,
+          failed: results.filter(r => !r.ok && !r.skipped).length,
+          skipped: results.filter(r => r.skipped).length,
+          results,
+        })
+      }
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }

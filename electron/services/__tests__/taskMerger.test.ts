@@ -45,6 +45,29 @@ function setupTask(line: string): { repo: string; sm: StateManager; gid: string;
   return { repo, sm, gid: g.id, branch: res.branchName }
 }
 
+/** Same as setupTask, but the integration branch has moved on and both sides
+ *  touched README.md, so the merge conflicts. */
+function setupConflictingTask(): { repo: string; sm: StateManager; gid: string; branch: string } {
+  const s = setupTask('task line')
+  fs.writeFileSync(path.join(s.repo, 'README.md'), '# Test\nintegration line\n')
+  git(['add', '.'], s.repo)
+  git(['commit', '-m', 'integration work'], s.repo)
+  git(['checkout', 'agntspce-integration'], s.repo)
+  git(['merge', 'main', '--no-ff', '-m', 'sync'], s.repo)
+  return s
+}
+
+const RESOLUTION_PATCH = [
+  'diff --git a/README.md b/README.md',
+  '--- a/README.md',
+  '+++ b/README.md',
+  '@@ -1,2 +1,2 @@',
+  ' # Test',
+  '-integration line',
+  '+task line',
+  '',
+].join('\n')
+
 describe('TaskMerger', () => {
   it('previews diffs without merging', () => {
     const { repo, sm, gid } = setupTask('task line')
@@ -120,5 +143,113 @@ describe('TaskMerger', () => {
     // update-ref moves the branch under the checked-out tree; reset to refresh.
     git(['reset', '--hard', 'agntspce-integration'], repo)
     expect(fs.readFileSync(path.join(repo, 'README.md'), 'utf-8')).toContain('task line')
+  })
+
+  it('keeps the prepared candidate in the DB, so a fresh merger can confirm it', async () => {
+    const { repo, sm, gid } = setupConflictingTask()
+    const llm = async () => RESOLUTION_PATCH
+    const res = await new TaskMerger(repo, new WorktreeLifecycle(repo), sm, llm).executeMerge(gid, true)
+    expect(res.needsConfirm).toBe(true)
+
+    // The candidate must live in the DB, not on the instance: the socket layer
+    // builds a new TaskMerger for every event, so an in-memory map made this
+    // step unreachable in the real app.
+    expect(sm.getTaskGroup(gid)!.mergeCandidateRef).toBeTruthy()
+    expect(sm.getTaskGroup(gid)!.mergeCandidateBase).toBeTruthy()
+
+    // A brand-new instance, exactly like the next socket event would build.
+    const fresh = new TaskMerger(repo, new WorktreeLifecycle(repo), sm, llm)
+    expect(fresh.previewMerge(gid).pendingCandidate).toBeTruthy()
+    const confirmed = fresh.confirmMerge(gid)
+    expect(confirmed.ok).toBe(true)
+    expect(sm.getTaskGroup(gid)!.status).toBe('done')
+    expect(sm.getTaskGroup(gid)!.mergeCandidateRef).toBeNull()
+  })
+
+  it('lands an AI-resolved merge as a real two-parent commit and reclaims the branch', async () => {
+    const { repo, sm, gid, branch } = setupConflictingTask()
+    const llm = async () => RESOLUTION_PATCH
+    const merger = new TaskMerger(repo, new WorktreeLifecycle(repo), sm, llm)
+    expect((await merger.executeMerge(gid, true)).needsConfirm).toBe(true)
+    expect(merger.confirmMerge(gid).ok).toBe(true)
+
+    // Two parents: the integration tip and the task branch. A single-parent
+    // commit here used to make `merge-base --is-ancestor` fail during cleanup,
+    // leaking the task branch forever.
+    const parents = git(['rev-list', '--parents', '-n', '1', 'agntspce-integration'], repo).split(/\s+/).filter(Boolean)
+    expect(parents.length).toBe(3) // commit + 2 parents
+    // The task branch is an ancestor now, so cleanup removes it.
+    expect(git(['branch', '--list', branch], repo)).toBe('')
+  })
+
+  it('flags files claimed by other unfinished tasks', () => {
+    const { repo, sm, gid } = setupTask('task line')
+    sm.addSubTask({ taskGroupId: gid, agentId: 'claude', scopeFiles: ['src/a.ts', 'src/b.ts'] })
+    const other = sm.createTaskGroup({ repoPath: repo, title: 'Other', userGoal: 'y' })
+    sm.updateTaskGroup(other.id, { status: 'active' })
+    sm.addSubTask({ taskGroupId: other.id, agentId: 'codex', scopeFiles: ['src/b.ts', 'src/c.ts'] })
+
+    const preview = new TaskMerger(repo, new WorktreeLifecycle(repo), sm).previewMerge(gid)
+    expect(preview.scopeOverlapFiles).toEqual(['src/b.ts'])
+
+    // Finished tasks are not a conflict risk any more.
+    sm.updateTaskGroup(other.id, { status: 'done' })
+    const after = new TaskMerger(repo, new WorktreeLifecycle(repo), sm).previewMerge(gid)
+    expect(after.scopeOverlapFiles).toEqual([])
+  })
+
+  it('finishes a task with nothing to merge instead of erroring', async () => {
+    const { repo, sm, gid } = setupTask('task line')
+    // Fold the task branch into the integration branch behind the merger's back,
+    // so the task has no changes left. This used to fall through to `git commit`
+    // and fail with "nothing to commit, working tree clean".
+    git(['merge', '--no-ff', '-m', 'already landed', 'agntspce-integration'], path.join(repo, '.agntspce', 'tasks', gid))
+    const res = await new TaskMerger(repo, new WorktreeLifecycle(repo), sm).executeMerge(gid, false)
+    expect(res.error).toBeUndefined()
+    expect(res.ok).toBe(true)
+    expect(sm.getTaskGroup(gid)!.status).toBe('done')
+  })
+
+  it('ignores generated task scaffolding but still blocks on real uncommitted work', async () => {
+    const { repo, sm, gid } = setupTask('task line')
+    // Exactly what AgntSpce writes into every task worktree at launch.
+    const wt = path.join(repo, '.agntspce', 'tasks', gid)
+    fs.writeFileSync(path.join(wt, '.task.json'), '{"id":"x"}\n')
+    fs.writeFileSync(path.join(wt, 'COLLAB.md'), '# Team\n')
+    fs.writeFileSync(path.join(wt, 'AGENTS-TASK.md'), '# Briefing\n')
+
+    // Untracked scaffolding alone must not make the task unmergeable.
+    const preview = new TaskMerger(repo, new WorktreeLifecycle(repo), sm).previewMerge(gid)
+    expect(preview.error).toBeUndefined()
+    const res = await new TaskMerger(repo, new WorktreeLifecycle(repo), sm).executeMerge(gid, false)
+    expect(res.error).toBeUndefined()
+    expect(res.ok).toBe(true)
+  })
+
+  it('still refuses to merge when a tracked file has uncommitted edits', async () => {
+    const { repo, sm, gid } = setupTask('task line')
+    const wt = path.join(repo, '.agntspce', 'tasks', gid)
+    fs.writeFileSync(path.join(wt, 'README.md'), '# Test\nhalf-finished work\n')
+    const res = await new TaskMerger(repo, new WorktreeLifecycle(repo), sm).executeMerge(gid, false)
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/uncommitted changes/i)
+    expect(res.error).toContain('README.md')
+  })
+
+  it('blocks a second merge for the same repo while one is resolving', async () => {
+    // Only the AI path is genuinely async, so that is the only place two merges
+    // can interleave. Hold the LLM open to simulate it.
+    const { repo, sm, gid } = setupConflictingTask()
+    let release: (patch: string) => void = () => {}
+    const llm = () => new Promise<string>(resolve => { release = resolve })
+    const pending = new TaskMerger(repo, new WorktreeLifecycle(repo), sm, llm).executeMerge(gid, true)
+    await new Promise(r => setImmediate(r))
+
+    const blocked = await new TaskMerger(repo, new WorktreeLifecycle(repo), sm, llm).executeMerge(gid, true)
+    expect(blocked.ok).toBe(false)
+    expect(blocked.error).toMatch(/already in progress/i)
+
+    release(RESOLUTION_PATCH)
+    expect((await pending).needsConfirm).toBe(true)
   })
 })

@@ -2,6 +2,30 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+/** Per-task scaffolding AgntSpce writes into every task worktree.
+ *
+ *  These are generated, never committed, and are rewritten on every collab
+ *  event, so they always show up as untracked noise. Anything that decides
+ *  "does this worktree have real work in it?" must ignore them — otherwise a
+ *  freshly launched task can never be merged.
+ *
+ *  Writers: `.task.json` → taskPlanner.writeTaskMetaFile, `COLLAB.md` →
+ *  collabShim.COLLAB_MD_FILENAME, `AGENTS-TASK.md` → groupSync.GROUP_BRIEFING_FILENAME. */
+export const TASK_SCAFFOLD_FILES: ReadonlySet<string> = new Set([
+  '.task.json',
+  'COLLAB.md',
+  'AGENTS-TASK.md',
+])
+
+/** True when a `git status --porcelain` line refers only to generated
+ *  scaffolding. Handles the `XY path` and `XY path -> path` (rename) forms. */
+export function isTaskScaffoldStatusLine(line: string): boolean {
+  const raw = line.slice(3).trim()
+  const arrow = raw.indexOf(' -> ')
+  const p = (arrow >= 0 ? raw.slice(0, arrow) : raw).trim().replace(/^"(.*)"$/, '$1')
+  return TASK_SCAFFOLD_FILES.has(p)
+}
+
 function detectPackageManager(repoPath: string): string {
   if (fs.existsSync(path.join(repoPath, 'pnpm-lock.yaml'))) return 'pnpm'
   if (fs.existsSync(path.join(repoPath, 'yarn.lock'))) return 'yarn'

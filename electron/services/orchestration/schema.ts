@@ -159,7 +159,9 @@ export function createSchema(db: Database.Database): void {
       base_sha TEXT,
       created_at INTEGER NOT NULL,
       completed_at INTEGER,
-      pinned_at INTEGER
+      pinned_at INTEGER,
+      merge_candidate_ref TEXT,
+      merge_candidate_base TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_task_groups_workspace ON task_groups(workspace_id);
     CREATE INDEX IF NOT EXISTS idx_task_groups_status ON task_groups(status);
@@ -237,6 +239,15 @@ export function migrateSchema(db: Database.Database): void {
   const taskGroupColumns = db.prepare(`PRAGMA table_info(task_groups)`).all() as { name: string }[]
   if (taskGroupColumns.length > 0 && !taskGroupColumns.some(c => c.name === 'pinned_at')) {
     db.exec(`ALTER TABLE task_groups ADD COLUMN pinned_at INTEGER`)
+  }
+
+  // Pending merge candidate for an AI-resolved conflict. The candidate commit is
+  // parked on merge_candidate_ref (a scratch branch) and was built on
+  // merge_candidate_base (the integration tip at the time), so the confirm step
+  // can survive a process restart instead of living in memory.
+  if (taskGroupColumns.length > 0 && !taskGroupColumns.some(c => c.name === 'merge_candidate_ref')) {
+    db.exec(`ALTER TABLE task_groups ADD COLUMN merge_candidate_ref TEXT`)
+    db.exec(`ALTER TABLE task_groups ADD COLUMN merge_candidate_base TEXT`)
   }
 
   // v2 collab_events.file column (added after step 1 shipped): backfill from

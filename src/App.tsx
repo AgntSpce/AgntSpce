@@ -8,6 +8,7 @@ import AgentModal from './components/AgentModal'
 import CreateWorkspaceModal from './components/CreateWorkspaceModal'
 import CreateTaskModal from './components/CreateTaskModal'
 import TaskChat from './components/TaskChat'
+import TaskMergeDialog from './components/TaskMergeDialog'
 import Settings from './components/Settings'
 import StatusBar from './components/StatusBar'
 import TitleBar from './components/TitleBar'
@@ -164,7 +165,7 @@ function App() {
     taskGroups, listTaskGroups, createTaskGroup, onTaskGroupsChanged,
     renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
-    mergeTask, confirmTaskMerge,
+    mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
@@ -419,6 +420,39 @@ function App() {
     mergeTask,
     confirmTaskMerge,
   }), [getTaskDetail, launchTask, closeTask, taskFollowup, mergeTask, confirmTaskMerge])
+
+  const taskMergeApi = useMemo(() => ({
+    previewTaskMerge,
+    mergeTask,
+    confirmTaskMerge,
+    mergeAllTasks,
+  }), [previewTaskMerge, mergeTask, confirmTaskMerge, mergeAllTasks])
+
+  const [mergeTaskId, setMergeTaskId] = useState<string | null>(null)
+  const mergeDialogTask = useMemo(
+    () => (taskGroups || []).find(t => t.id === mergeTaskId) || null,
+    [taskGroups, mergeTaskId]
+  )
+
+  const handleMergeAllTasks = useCallback(async () => {
+    const ids = (taskGroups || [])
+      .filter(t => !!t.branchName && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef))
+      .map(t => t.id)
+    if (ids.length === 0) return
+    const count = ids.length
+    if (!confirm(`Merge ${count} task${count === 1 ? '' : 's'} into the integration branch, oldest first?`)) return
+    try {
+      const res = await mergeAllTasks(ids)
+      if (res && res.ok === false) {
+        const failed = res.results?.find((r: any) => !r.ok && !r.skipped)
+        alert(`${res.landed ?? 0} of ${count} merged, then stopped.\n\n${failed?.error || 'A task failed to merge.'}${res.pendingConfirm ? `\n\n${res.pendingConfirm} task(s) have a prepared merge waiting for review.` : ''}`)
+      } else {
+        alert(`Merged ${res?.landed ?? count} task(s) into the integration branch.`)
+      }
+    } catch (e: any) {
+      alert(e?.message || 'Merge failed')
+    }
+  }, [taskGroups, mergeAllTasks])
 
   useEffect(() => {
     localStorage.setItem('agent-workspace-theme', theme)
@@ -1932,6 +1966,8 @@ function App() {
               getTokenUsage={getTokenUsage}
               onRenameTask={handleRenameTask}
               onSetTaskPinned={handleSetTaskPinned}
+              onMergeTask={setMergeTaskId}
+              onMergeAllTasks={handleMergeAllTasks}
               onDeleteTask={handleDeleteTask}
               onOpenTaskDetails={setSelectedTaskId}
             />
@@ -2160,6 +2196,15 @@ function App() {
           taskGroupId={selectedTaskId}
           tasksApi={tasksApi}
           onClose={() => setSelectedTaskId(null)}
+        />
+      )}
+      {mergeDialogTask && (
+        <TaskMergeDialog
+          taskGroupId={mergeDialogTask.id}
+          taskTitle={mergeDialogTask.title}
+          api={taskMergeApi}
+          onClose={() => setMergeTaskId(null)}
+          onMerged={() => { if (activeWorkspace?.id) listTaskGroups(activeWorkspace.id).catch(() => {}) }}
         />
       )}
       <InputModal

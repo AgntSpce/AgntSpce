@@ -107,6 +107,10 @@ interface Props {
   onRenameTask?: (taskGroupId: string, title: string) => void
   /** Pin or unpin a task group (pinned tasks sort to the top of the list). */
   onSetTaskPinned?: (taskGroupId: string, pinned: boolean) => void
+  /** Open the merge flow for a task (preview, then confirm). */
+  onMergeTask?: (taskGroupId: string) => void
+  /** Merge every task in the workspace, oldest first. */
+  onMergeAllTasks?: () => void
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -514,6 +518,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   promptHistory,
   onRenameTask,
   onSetTaskPinned,
+  onMergeTask,
+  onMergeAllTasks,
   onDeleteTask,
   onOpenTaskDetails,
 }: {
@@ -572,6 +578,10 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onRenameTask?: (taskGroupId: string, title: string) => void
   /** Pin or unpin a task group (pinned tasks sort to the top of the list). */
   onSetTaskPinned?: (taskGroupId: string, pinned: boolean) => void
+  /** Open the merge flow for a task (preview, then confirm). */
+  onMergeTask?: (taskGroupId: string) => void
+  /** Merge every task in the workspace, oldest first. */
+  onMergeAllTasks?: () => void
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -703,6 +713,15 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     () => orderedTasks.filter(t => t.pinnedAt != null).length,
     [orderedTasks]
   )
+  // A task can merge once it has a branch and is live or already done. A task
+  // holding a prepared conflict resolution counts too — otherwise the "Confirm
+  // & land" step would be unreachable from the sidebar.
+  const canMergeTask = (t: TaskGroupInfo) =>
+    !!t.branchName && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef)
+  const mergeableTasks = useMemo(
+    () => (taskGroups || []).filter(canMergeTask),
+    [taskGroups]
+  )
 
   return (
     <aside className="sidebar orca-workspace-sidebar">
@@ -796,6 +815,15 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
           <div className="workspace-tasks-top">
             <div className="sidebar-header tasks-header">
               <h2>Tasks</h2>
+              {onMergeAllTasks && mergeableTasks.length > 0 && (
+                <button
+                  className="tasks-merge-all"
+                  onClick={onMergeAllTasks}
+                  title={`Merge ${mergeableTasks.length} task${mergeableTasks.length === 1 ? '' : 's'} into the integration branch, oldest first`}
+                >
+                  <i className="codicon codicon-git-merge" /> Merge all
+                </button>
+              )}
             </div>
             <div className="task-list">
               {orderedTasks.map((t, taskIndex) => {
@@ -867,6 +895,15 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           </span>
                         )}
                       </div>
+                      {onMergeTask && canMergeTask(t) && (
+                        <button
+                          className="task-row-merge"
+                          onClick={(e) => { e.stopPropagation(); onMergeTask(t.id) }}
+                          title={`Merge ${t.title}'s changes into the integration branch`}
+                        >
+                          <i className="codicon codicon-git-merge" /> Merge changes
+                        </button>
+                      )}
                     </div>
                     {taskMenuId === t.id && (
                       <div
@@ -903,6 +940,16 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                             onOpenTaskDetails?.(t.id)
                           }}
                         >Details</button>
+                        {onMergeTask && canMergeTask(t) && (
+                          <button
+                            className="workspace-tree-menu-item"
+                            onClick={() => {
+                              setTaskMenuId(null)
+                              setTaskMenuPos(null)
+                              onMergeTask(t.id)
+                            }}
+                          >Merge changes</button>
+                        )}
                         <button
                           className="workspace-tree-menu-item danger"
                           onClick={() => {
@@ -988,7 +1035,7 @@ export default memo(function WorkspaceSidebar({
   onOpenFolderDirect, onCloneDirect,
   activeSessionId, onSelectSession,
   onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, getTokenUsage, promptHistory,
-  onRenameTask, onSetTaskPinned, onDeleteTask, onOpenTaskDetails,
+  onRenameTask, onSetTaskPinned, onMergeTask, onMergeAllTasks, onDeleteTask, onOpenTaskDetails,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -1023,6 +1070,8 @@ export default memo(function WorkspaceSidebar({
         promptHistory={promptHistory}
         onRenameTask={onRenameTask}
         onSetTaskPinned={onSetTaskPinned}
+        onMergeTask={onMergeTask}
+        onMergeAllTasks={onMergeAllTasks}
         onDeleteTask={onDeleteTask}
         onOpenTaskDetails={onOpenTaskDetails}
       />

@@ -81,6 +81,7 @@ interface UseSocketReturn {
   previewTaskMerge: (taskGroupId: string) => Promise<any>
   mergeTask: (taskGroupId: string, autoResolve?: boolean) => Promise<any>
   confirmTaskMerge: (taskGroupId: string) => Promise<any>
+  mergeAllTasks: (taskGroupIds: string[]) => Promise<any>
   groupSessions: (sessionIds: string[], title?: string) => Promise<any>
   joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
   ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
@@ -759,6 +760,10 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('confirm-task-merge', { taskGroupId }, 300000)
   }, [emitAck])
 
+  const mergeAllTasks = useCallback((taskGroupIds: string[]): Promise<any> => {
+    return emitAck('merge-all-tasks', { taskGroupIds }, 1800000)
+  }, [emitAck])
+
   const groupSessions = useCallback((sessionIds: string[], title?: string): Promise<any> => {
     return emitAck('group-sessions', { sessionIds, title }, 120000)
   }, [emitAck])
@@ -1137,6 +1142,7 @@ socket.emit('get-cumulative-stats', {})
     previewTaskMerge,
     mergeTask,
     confirmTaskMerge,
+    mergeAllTasks,
     groupSessions,
     joinGroup,
     ungroupSession,

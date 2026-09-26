@@ -130,6 +130,8 @@ export interface TaskGroupRow {
   created_at: number
   completed_at: number | null
   pinned_at: number | null
+  merge_candidate_ref: string | null
+  merge_candidate_base: string | null
 }
 
 export interface TaskGroupOverview {
@@ -146,6 +148,10 @@ export interface TaskGroupOverview {
   createdAt: number
   completedAt: number | null
   pinnedAt: number | null
+  /** Branch holding a prepared-but-unconfirmed merge commit, if any. */
+  mergeCandidateRef: string | null
+  /** Integration tip the prepared candidate was built on. */
+  mergeCandidateBase: string | null
 }
 
 export interface SubTaskRow {
@@ -743,6 +749,8 @@ export class StateManager {
     title?: string
     userGoal?: string
     pinnedAt?: number | null
+    mergeCandidateRef?: string | null
+    mergeCandidateBase?: string | null
   }): TaskGroupOverview | null {
     const group = this.getTaskGroup(id)
     if (!group) return null
@@ -755,11 +763,13 @@ export class StateManager {
       title: updates.title ?? group.title,
       user_goal: updates.userGoal ?? group.userGoal,
       pinned_at: updates.pinnedAt !== undefined ? updates.pinnedAt : group.pinnedAt,
+      merge_candidate_ref: updates.mergeCandidateRef !== undefined ? updates.mergeCandidateRef : group.mergeCandidateRef,
+      merge_candidate_base: updates.mergeCandidateBase !== undefined ? updates.mergeCandidateBase : group.mergeCandidateBase,
     }
     if (next.status === 'done' && next.completed_at == null) next.completed_at = Date.now()
     this.db.prepare(
-      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ?, title = ?, user_goal = ?, pinned_at = ? WHERE id = ?'
-    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, next.title, next.user_goal, next.pinned_at, id)
+      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ?, title = ?, user_goal = ?, pinned_at = ?, merge_candidate_ref = ?, merge_candidate_base = ? WHERE id = ?'
+    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, next.title, next.user_goal, next.pinned_at, next.merge_candidate_ref, next.merge_candidate_base, id)
     return this.getTaskGroup(id)
   }
 
@@ -789,6 +799,8 @@ export class StateManager {
       createdAt: row.created_at,
       completedAt: row.completed_at,
       pinnedAt: row.pinned_at ?? null,
+      mergeCandidateRef: row.merge_candidate_ref ?? null,
+      mergeCandidateBase: row.merge_candidate_base ?? null,
     }
   }
 
