@@ -167,6 +167,56 @@ function hasFileExtension(name: string): boolean {
   return dot >= 0 && dot < name.length - 1
 }
 
+// VS Code-style inline task rename: the title becomes an input in place.
+// Enter or blur commits; Escape cancels. Mirrors the file explorer's rename
+// input (selects the whole title — task names have no extension to preserve).
+function TaskRenameInput({
+  initialName,
+  onCommit,
+  onCancel,
+}: {
+  initialName: string
+  onCommit: (name: string) => void
+  onCancel: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [value, setValue] = useState(initialName)
+  const committedRef = useRef(false)
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      try { inputRef.current?.focus({ preventScroll: true }); inputRef.current?.select() } catch {}
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const commit = () => {
+    if (committedRef.current) return
+    committedRef.current = true
+    onCommit(inputRef.current?.value ?? value)
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      autoFocus
+      className="file-tree-inline-input"
+      value={value}
+      spellCheck={false}
+      autoComplete="off"
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commit() }
+        else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); committedRef.current = true; onCancel() }
+      }}
+      onBlur={commit}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    />
+  )
+}
+
 // Keep the floating menu on-screen (mirrors FileExplorer's helper).
 function clampContextMenuPos(x: number, y: number, estW = 230, estH = 340) {
   return {
@@ -505,6 +555,12 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   const [membersByTask, setMembersByTask] = useState<Record<string, TaskMember[]>>({})
   const [membersLoadedByTask, setMembersLoadedByTask] = useState<Record<string, boolean>>({})
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
+  // When the task menu is opened via right-click, pin it to the cursor. Null
+  // when opened via the "⋮" button (menu anchors to the button as before).
+  const [taskMenuPos, setTaskMenuPos] = useState<{ x: number; y: number } | null>(null)
+  // Inline (VS Code-style) task rename: { id, name } while the title is being
+  // edited in place, replacing the centered rename modal.
+  const [renamingTask, setRenamingTask] = useState<{ id: string; name: string } | null>(null)
   // Which agent's stats popover is open (its row key). Kept here — not per-row —
   // so only ONE popover can ever be open: clicking a different agent/task
   // switches it instantly instead of leaving the previous agent's stats on
@@ -703,11 +759,35 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                        className={`task-row task-row-card${openTaskId === t.id || selectedTaskId === t.id ? ' active' : ''}`}
                        onClick={(e) => handleTaskRowClick(t.id, e)}
                        onDoubleClick={(e) => { e.stopPropagation(); onSelectTask?.(t.id) }}
+                       onContextMenu={(e) => {
+                         // Right-click opens the same task menu at the cursor.
+                         e.preventDefault()
+                         e.stopPropagation()
+                         if (taskMenuId === t.id && taskMenuPos) {
+                           setTaskMenuId(null)
+                           setTaskMenuPos(null)
+                         } else {
+                           setTaskMenuId(t.id)
+                           setTaskMenuPos({ x: e.clientX, y: e.clientY })
+                         }
+                       }}
                        title={t.userGoal || t.title}
                     >
                       <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
                       <div className="task-row-main">
-                        <span className="task-row-title">{t.title}</span>
+                        {renamingTask?.id === t.id ? (
+                          <TaskRenameInput
+                            initialName={t.title}
+                            onCommit={(name) => {
+                              setRenamingTask(null)
+                              const trimmed = name.trim()
+                              if (trimmed && trimmed !== t.title) onRenameTask?.(t.id, trimmed)
+                            }}
+                            onCancel={() => setRenamingTask(null)}
+                          />
+                        ) : (
+                          <span className="task-row-title">{t.title}</span>
+                        )}
                         {openTaskId !== t.id && liveMembers.length > 0 && (
                           <span className="task-row-logos" title={liveMembers.map(m => m.agentId).join(', ')}>
                             {liveMembers.map(m => (
@@ -718,44 +798,44 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           </span>
                         )}
                       </div>
-                      <span className="workspace-tree-actions" onClick={e => e.stopPropagation()}>
-                        <button
-                          className="workspace-tree-dots"
-                          onClick={e => {
-                            e.stopPropagation()
-                            setTaskMenuId(taskMenuId === t.id ? null : t.id)
-                          }}
-                          title="Task options"
-                        >⋮</button>
-                        {taskMenuId === t.id && (
-                          <div className="workspace-tree-menu" onClick={e => e.stopPropagation()}>
-                            <button
-                              className="workspace-tree-menu-item"
-                              onClick={() => {
-                                setTaskMenuId(null)
-                                onOpenTaskDetails?.(t.id)
-                              }}
-                            >Details</button>
-                            <button
-                              className="workspace-tree-menu-item"
-                              onClick={() => {
-                                setTaskMenuId(null)
-                                showModal('Rename task:', (name) => {
-                                  if (name.trim()) onRenameTask?.(t.id, name.trim())
-                                }, t.title)
-                              }}
-                            >Rename</button>
-                            <button
-                              className="workspace-tree-menu-item danger"
-                              onClick={() => {
-                                setTaskMenuId(null)
-                                if (confirm(`Delete task "${t.title}"? Its agents will be stopped.`)) onDeleteTask?.(t.id)
-                              }}
-                            >Delete</button>
-                          </div>
-                        )}
-                      </span>
                     </div>
+                    {taskMenuId === t.id && (
+                      <div
+                        className="workspace-tree-menu"
+                        onClick={e => e.stopPropagation()}
+                        style={taskMenuPos ? {
+                          position: 'fixed',
+                          left: Math.min(taskMenuPos.x, (typeof window !== 'undefined' ? window.innerWidth : 1920) - 160),
+                          top: Math.min(taskMenuPos.y, (typeof window !== 'undefined' ? window.innerHeight : 1080) - 120),
+                          right: 'auto',
+                        } : undefined}
+                      >
+                        <button
+                          className="workspace-tree-menu-item"
+                          onClick={() => {
+                            setTaskMenuId(null)
+                            setTaskMenuPos(null)
+                            setRenamingTask({ id: t.id, name: t.title })
+                          }}
+                        >Rename</button>
+                        <button
+                          className="workspace-tree-menu-item"
+                          onClick={() => {
+                            setTaskMenuId(null)
+                            setTaskMenuPos(null)
+                            onOpenTaskDetails?.(t.id)
+                          }}
+                        >Details</button>
+                        <button
+                          className="workspace-tree-menu-item danger"
+                          onClick={() => {
+                            setTaskMenuId(null)
+                            setTaskMenuPos(null)
+                            if (confirm(`Delete task "${t.title}"? Its agents will be stopped.`)) onDeleteTask?.(t.id)
+                          }}
+                        >Delete</button>
+                      </div>
+                    )}
                     <div className="task-member-list" role="group" aria-label={`Agents in ${t.title}`}>
                       {!membersLoadedByTask[t.id] ? (
                         <div className="task-member-empty">Loading agents…</div>
