@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
-import type { WorkspaceInfo, SessionState, ExecutionEvent, AgentConfig, CommandEvent, TaskGroupInfo, TerminalOutput } from '../types'
+import type { WorkspaceInfo, SessionState, ExecutionEvent, AgentConfig, CommandEvent, TaskGroupInfo, TerminalOutput, AgentStatusEntry } from '../types'
 import { FileExplorer } from './FileExplorer'
 import { AGENT_TYPE_SET } from '../utils/agentTypes'
 import { getAgentColorImage } from '../agentImages'
@@ -101,6 +101,13 @@ interface Props {
    * to reset that session's buffer + working state.
    */
   onSessionResumed?: (cb: (data: { sessionId: string }) => void) => () => void
+  /**
+   * Structured agent lifecycle status from agent hooks — the authoritative
+   * source for a row's status line. Decoupled from the terminal stream, so
+   * scrolling can't change it. Sessions with no entry fall back to the
+   * terminal-scraped feed. See docs/agent_row_status_roadmap.md.
+   */
+  onAgentStatus?: (cb: (data: { entry: AgentStatusEntry }) => void) => () => void
   /** Pull token usage for a session (output/total/estimated cost). */
   getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
@@ -221,6 +228,81 @@ function clampContextMenuPos(x: number, y: number, estW = 230, estH = 340) {
   }
 }
 
+// ── Agent hook status (the authoritative row status) ────────────────────
+// Agent hooks push a status entry per lifecycle event (prompt submitted, tool
+// started, run stopped). Unlike the terminal-scraped buffer below, this data
+// comes from the agent itself, so nothing the user does to the terminal —
+// scrolling back through a conversation above all — can change what a row
+// shows. This is the Orca model: the current tool call while working, the last
+// assistant message once done.
+function useAgentHookStatus(
+  onAgentStatus: ((cb: (d: { entry: AgentStatusEntry }) => void) => () => void) | undefined,
+  trackedIds: string[],
+): React.MutableRefObject<Record<string, AgentStatusEntry>> {
+  const statusRef = useRef<Record<string, AgentStatusEntry>>({})
+  const trackedRef = useRef<Set<string>>(new Set())
+  trackedRef.current = useMemo(() => new Set(trackedIds), [trackedIds])
+  const [, forceRender] = useState(0)
+
+  useSocketEvent<{ entry: AgentStatusEntry }>(
+    onAgentStatus || (() => () => {}),
+    ({ entry }) => {
+      if (!entry?.sessionId) return
+      if (!trackedRef.current.has(entry.sessionId)) return
+      statusRef.current[entry.sessionId] = entry
+      forceRender(v => v + 1)
+    },
+    [onAgentStatus],
+  )
+
+  // Drop entries for agents no longer on screen so a reopened task never shows
+  // a previous run's answer.
+  useEffect(() => {
+    for (const id of Object.keys(statusRef.current)) {
+      if (!trackedRef.current.has(id)) delete statusRef.current[id]
+    }
+  }, [trackedIds])
+
+  return statusRef
+}
+
+// The row's second line is a STATE WORD, never agent text.
+//
+// This deliberately does not render the agent's reply. Every attempt to pull
+// that text out of a terminal — scraped or structured — eventually shows
+// something that is not the agent's answer: TUI chrome, a half-drawn frame, or
+// (the original bug) text from earlier in the conversation once the user
+// scrolled back. A state word cannot go wrong that way, and it is what the row
+// is actually for: "is this agent busy, and did it finish?"
+//
+// Sources are consulted in order of trustworthiness. Hooks (structured, from
+// the agent itself) win; agents we can't instrument fall back to the
+// stream-derived working/completed flags, which drive the spinner and the check
+// mark and are known to work.
+function agentStatusWord(opts: {
+  hookState: AgentStatusEntry['state'] | undefined
+  isWorking: boolean
+  hasCompletedRun: boolean
+  needsAttention: boolean
+}): string {
+  const { hookState, isWorking, hasCompletedRun, needsAttention } = opts
+  if (hookState === 'working') return 'Thinking…'
+  if (hookState === 'permission') return 'Waiting for input…'
+  if (hookState === 'done') return 'Done'
+  // 'idle' from a hook just means "nothing has happened yet" — let the
+  // stream-derived flags speak rather than blanking the row.
+  if (hookState === 'idle') {
+    if (needsAttention) return 'Waiting for input…'
+    if (isWorking) return 'Thinking…'
+    if (hasCompletedRun) return 'Done'
+    return ''
+  }
+  if (needsAttention) return 'Waiting for input…'
+  if (isWorking) return 'Thinking…'
+  if (hasCompletedRun) return 'Done'
+  return ''
+}
+
 // ── Agent live-output buffer (workspace panel) ──────────────────────────
 // One panel-level subscription to the existing `onTerminalOutput` fan-out keeps
 // a small, capped tail of each task-agent's live terminal output. `useSocket`
@@ -247,6 +329,21 @@ type AgentOutEntry = {
   /** True once the agent has produced at least one line of real (non-chrome)
    *  output — used to show the green "done" dot. */
   hasOutput: boolean
+  /** The agent's own working/idle/permission verdict, parsed from its OSC
+   *  terminal TITLE (see classifyTitleStatus). This is the scroll-proof signal:
+   *  a title is a scalar, so viewport scrolling (which emits no new title
+   *  bytes) can't flip it. */
+  titleStatus: 'working' | 'permission' | 'idle' | null
+  /** Every meaningful line the agent has emitted so far (bounded). A chunk
+   *  whose lines are ALL already here is a terminal repaint (scroll/viewport
+   *  redraw), not new output — so it must not advance the answer line. This is
+   *  what makes the row show only the *live* answer and ignore scrolling. */
+  seen: Set<string>
+  /** The newest line of the CURRENT run (Superset's `currentMessage`: the
+   *  in-flight channel, shown only while the agent is actually responding).
+   *  Reset when the user submits a prompt and moved into `lastLine` when the
+   *  run ends, so nothing a terminal repaint emits can ever rewrite it. */
+  runLine: string
 }
 
 // Strip ANSI/control sequences (keeps \t and \n; folds \r\n → \n) so the feed
@@ -283,21 +380,185 @@ function isChromeOnlyLine(line: string): boolean {
   return false
 }
 
-// The last line that is real agent content (thinking/output), skipping any
-// trailing TUI chrome lines.
-function lastMeaningfulLine(s: string): string {
-  const lines = s.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = lines[i].trim()
-    if (t && !isChromeOnlyLine(t)) return t.length > 160 ? t.slice(0, 160) : t
+// Cap the "seen" set so a long session can't grow it without bound.
+const SEEN_LINES_CAP = 400
+
+// ── Repaint-proof line extraction ───────────────────────────────────────
+// A TUI frame does not scroll — it moves the cursor back UP and rewrites the
+// lines it already drew (ansi-escapes' `eraseLines` emits `ESC[2K` + `ESC[1A`
+// + `ESC[G`, and full repaints use `ESC[H` / `ESC[2J`). Stripping ANSI alone
+// glues those rewritten runs onto whatever preceded them, so a repaint yields
+// a mash string that has never been seen before — and that mash is what used
+// to replace the row's answer with text from earlier in the conversation once
+// the user scrolled back. Treating every cursor-return / erase as a segment
+// boundary makes a repaint yield segments that are already in `seen`, so it is
+// correctly classified as a repaint instead of as new output.
+//
+// Only real cursor-motion verbs are boundaries: SGR (m), erase-line (K) and
+// character-forward (C) stay inside a segment, so a line that merely grows as
+// the agent streams is not chopped into fragments.
+const REPAINT_BOUNDARY_RE = /\x1B\[[0-9;?]*[AEFGHJKsu]/
+
+// Split a raw PTY chunk into the logical lines the agent actually wrote: one
+// per line-feed and one per repaint boundary, ANSI-stripped and trimmed.
+function extractWrittenLines(raw: string): string[] {
+  const lines: string[] = []
+  for (const part of raw.split(REPAINT_BOUNDARY_RE)) {
+    for (const segment of stripAnsi(part).split('\n')) {
+      const line = segment.trim()
+      if (line) lines.push(line)
+    }
   }
-  return ''
+  return lines
+}
+
+// Agent TUIs print their own status/hint strings on the last row ("esc to
+// interrupt", "? for shortcuts", …). Those are chrome, not the agent's answer,
+// so the row must never freeze on one. Match ONLY the exact strings we've
+// observed rather than a broad shape — a real reply could begin with any of
+// these words (Orca's "observed shapes only" rule for harness-injected turns).
+const AGENT_CHROME_LINES = [
+  'esc to interrupt',
+  'ctrl+c to interrupt',
+  'ctrl+c to cancel',
+  '? for shortcuts',
+  'shift+tab to cycle',
+  'tab to cycle',
+  'accept edits',
+  'bypassing permissions',
+]
+
+function isAgentChromeLine(line: string): boolean {
+  const lower = line.toLowerCase()
+  return AGENT_CHROME_LINES.some(c => lower === c)
+}
+
+// A submitted prompt is echoed back by the TUI's input box. Rendering that as
+// the agent's reply makes the row show the question twice, so treat a line that
+// reproduces the prompt as not-agent-output. Only lines of real length count —
+// a one-word line that happens to prefix the prompt is far more likely to be
+// genuine output than an echo.
+function isEchoOfPrompt(line: string, prompt: string): boolean {
+  const p = prompt.replace(/\s+/g, ' ').trim()
+  if (!p) return false
+  const l = line.replace(/\s+/g, ' ').trim()
+  if (l.length < 12) return false
+  // The input box prefixes the prompt with a marker (❯ / > / »).
+  const bare = l.replace(/^[❯>»➜]\s*/, '')
+  return l === p || bare === p || p.startsWith(l) || p.startsWith(bare)
+}
+
+// Add the chunk's meaningful (non-chrome, non-blank, non-echo) lines to `seen`
+// and return the last genuinely-new one, or '' when the chunk was entirely a
+// repaint of lines we've already shown. This is the core of "show only the live
+// answer, ignore scrolling": a redraw re-emits old lines, all of which are
+// already in `seen`.
+function advanceSeenLines(lines: string[], seen: Set<string>, lastPrompt: string): string {
+  let lastNew = ''
+  for (const line of lines) {
+    if (isChromeOnlyLine(line) || isAgentChromeLine(line) || isEchoOfPrompt(line, lastPrompt)) continue
+    const key = line.length > 160 ? line.slice(0, 160) : line
+    if (!seen.has(key)) {
+      seen.add(key)
+      lastNew = key
+    }
+  }
+  // Evict oldest entries once we exceed the cap.
+  if (seen.size > SEEN_LINES_CAP) {
+    const it = seen.values()
+    for (let i = 0; i < seen.size - SEEN_LINES_CAP; i++) {
+      const first = it.next().value
+      if (first === undefined) break
+      seen.delete(first)
+    }
+  }
+  return lastNew
+}
+
+// Extract the window title the agent sets via an OSC sequence
+// (ESC ] 0;<title> BEL  or  ESC ] 2;<title> BEL/ST). Returns the title text, or
+// null if the chunk set no title.
+const OSC_TITLE_RE = /\x1B\][02];([^\x07\x1B]*)(?:\x07|\x1B\\)/g
+function extractOscTitle(raw: string): string | null {
+  if (!raw.includes('\x1B]')) return null
+  let title: string | null = null
+  let m: RegExpExecArray | null
+  OSC_TITLE_RE.lastIndex = 0
+  while ((m = OSC_TITLE_RE.exec(raw)) !== null) {
+    title = m[1]
+  }
+  return title
+}
+
+// Classify a terminal title as 'working' | 'permission' | 'idle' | null.
+// Faithful port of Orca's detectAgentStatusFromTitle, covering every agent
+// family they special-case:
+//   • Gemini — OSC glyphs ✦ (working) / ⏲ (silent working) / ◇ (idle) / ✋ (permission)
+//   • Claude Code — ✳ (settled/idle) and an animated braille spinner (working)
+//   • Pi / OMP-compatible synthetic titles
+//   • generic — braille spinner → working; ". " prefix → working;
+//     "* " prefix → idle; working/thinking/running → working;
+//     ready/idle/done → idle; action required/permission/waiting → permission
+//   • null when the title carries no clear evidence (an unrecognized shell, a
+//     bare agent name, etc.)
+//
+// This is a SCALAR derived from the title, exactly like Orca: scrolling the
+// viewport repaints terminal pixels but emits NO new OSC title bytes, so the
+// working state — and the spinner — never reacts to scrolling.
+type TitleStatus = 'working' | 'permission' | 'idle' | null
+
+const GEMINI_WORKING = '✦' // ✦
+const GEMINI_SILENT_WORKING = '⏲' // ⏲
+const GEMINI_IDLE = '◇' // ◇
+const GEMINI_PERMISSION = '✋' // ✋
+const CLAUDE_IDLE_MARKER = '✳' // ✳
+
+const STRONG_IDLE_KEYWORDS_RE = /(?<![\w./\\-])(ready|idle|done)(?![\w-])/i
+const STRONG_WORKING_KEYWORDS_RE = /(?<![\w./\\-])(working|thinking|running)(?![\w-])/i
+const PERMISSION_KEYWORDS = ['action required', 'permission', 'waiting']
+
+function containsBrailleSpinner(title: string): boolean {
+  for (const char of title) {
+    const cp = char.codePointAt(0)
+    if (cp !== undefined && cp >= 0x2800 && cp <= 0x28ff) return true
+  }
+  return false
+}
+
+function containsAny(title: string, words: readonly string[]): boolean {
+  const lower = title.toLowerCase()
+  return words.some(w => lower.includes(w))
+}
+
+function classifyTitleStatus(title: string): TitleStatus {
+  if (!title) return null
+
+  // Gemini: its OSC glyphs are stronger evidence than any text.
+  if (title.includes(GEMINI_PERMISSION)) return 'permission'
+  if (title.includes(GEMINI_WORKING) || title.includes(GEMINI_SILENT_WORKING)) return 'working'
+  if (title.includes(GEMINI_IDLE)) return 'idle'
+
+  // Claude Code: a settled "✳ …" title means idle; a braille spinner means working.
+  if (title.startsWith(`${CLAUDE_IDLE_MARKER} `) || title === CLAUDE_IDLE_MARKER) return 'idle'
+  if (containsBrailleSpinner(title)) return 'working'
+
+  // Generic, boundary-aware keyword matching (avoids cwd/path false positives).
+  if (STRONG_WORKING_KEYWORDS_RE.test(title)) return 'working'
+  if (STRONG_IDLE_KEYWORDS_RE.test(title)) return 'idle'
+  if (containsAny(title, PERMISSION_KEYWORDS)) return 'permission'
+  if (title.startsWith('. ')) return 'working'
+  if (title.startsWith('* ')) return 'idle'
+
+  return null
 }
 
 function useAgentOutputBuffer(
   onTerminalOutput: ((cb: (d: TerminalOutput) => void) => () => void) | undefined,
   onSessionResumed: ((cb: (d: { sessionId: string }) => void) => () => void) | undefined,
   trackedIds: string[],
+  /** The user's last submitted prompt per session, so the input box's echo is
+   *  never mistaken for the agent's answer. */
+  lastPromptRef: React.MutableRefObject<Record<string, string>>,
 ) {
   const bufRef = useRef<Record<string, AgentOutEntry>>({})
   const trackedRef = useRef<Set<string>>(new Set())
@@ -309,23 +570,36 @@ function useAgentOutputBuffer(
     onTerminalOutput || (() => () => {}),
     (d) => {
       if (!trackedRef.current.has(d.sessionId)) return
-      const clean = stripAnsi(d.data || '')
-      if (!clean) return
+      const raw = d.data || ''
       const prev = bufRef.current[d.sessionId]
-      const text = (prev?.text || '') + clean
-      // The "current line" and the content timestamp both key off REAL agent
-      // output only. A chunk that is pure TUI chrome (loading bar / spinner)
-      // leaves lastLine and contentTs untouched, so a spinning loader can't
-      // masquerade as a live response or pin the working spinner on.
-      const nextLine = lastMeaningfulLine(clean) || prev?.lastLine || ''
-      const contentChanged = nextLine !== (prev?.lastLine || '')
+      // The agent's own working/idle signal, parsed from its OSC terminal title
+      // (Orca's model). A title is a scalar — scrolling the viewport emits no
+      // new title bytes, so this can't be tripped by scrolling.
+      const title = extractOscTitle(raw)
+      const titleStatus = title !== null ? classifyTitleStatus(title) : null
+      const clean = stripAnsi(raw)
+      const prevText = prev?.text || ''
+      const text = prevText + clean
+      // The live answer line advances ONLY on a genuinely new line the agent
+      // hasn't emitted before. A terminal repaint re-emits old lines (all
+      // already in `seen`), so it can't hijack the row — and because the row
+      // falls back to the frozen `lastLine` once the agent stops working, a
+      // repaint can't change the answer after the run either.
+      const seen = prev?.seen ?? new Set<string>()
+      const novelLine = advanceSeenLines(extractWrittenLines(raw), seen, lastPromptRef.current[d.sessionId] || '')
+      const contentChanged = novelLine !== '' && novelLine !== (prev?.lastLine || '')
       bufRef.current[d.sessionId] = {
         text: text.length > AGENT_FEED_CAP ? text.slice(-AGENT_FEED_CAP) : text,
-        lastLine: nextLine,
+        lastLine: prev?.lastLine || '',
+        runLine: novelLine || prev?.runLine || '',
         ts: Date.now(),
         cleanLen: (prev?.cleanLen || 0) + clean.length,
         contentTs: contentChanged ? Date.now() : (prev?.contentTs || Date.now()),
         hasOutput: (prev?.hasOutput || false) || contentChanged,
+        // Only a title that actually classifies overrides; otherwise keep the
+        // last known verdict (an agent that sets a title keeps a stable value).
+        titleStatus: titleStatus ?? prev?.titleStatus ?? null,
+        seen,
       }
       if (!timerRef.current) {
         timerRef.current = setTimeout(() => {
@@ -370,6 +644,23 @@ function useAgentOutputBuffer(
 // pauses between tool calls.
 const AGENT_CONTENT_LIVE_MS = 5000
 
+// Is the agent actively working RIGHT NOW? Follows Orca: the agent's own parsed
+// TITLE status is the primary signal (a scalar — scrolling can't flip it). Only
+// when an agent never sets a title do we fall back to recent novel content.
+// `outstanding` (a prompt is awaiting a response) and a non-exited status are
+// always required.
+function computeIsWorking(
+  entry: AgentOutEntry | undefined,
+  now: number,
+  outstanding: boolean,
+  statusNotExited: boolean,
+): boolean {
+  if (!outstanding || !statusNotExited) return false
+  if (!entry) return false
+  if (entry.titleStatus) return entry.titleStatus === 'working'
+  return now - entry.contentTs < AGENT_CONTENT_LIVE_MS
+}
+
 // ── Agent run/working state ──────────────────────────────────────────
 // Tracks, per session:
 //   working      — a user-submitted prompt is being responded to right now
@@ -388,14 +679,31 @@ type RunState = {
   completedRun: boolean
 }
 
+// Close out a finished run: the last line the agent produced becomes the
+// session's frozen answer, and the live channel empties. After this the row is
+// completely decoupled from the terminal stream, so scrolling back through the
+// conversation (or a spinner/footer redraw) can never rewrite what it shows.
+// Returns true when the frozen answer actually changed.
+function commitRunLine(entry: AgentOutEntry | undefined): boolean {
+  if (!entry || !entry.runLine) return false
+  const changed = entry.lastLine !== entry.runLine
+  entry.lastLine = entry.runLine
+  entry.runLine = ''
+  return changed
+}
+
 function useAgentWorkingFlags(
   promptHistory: PromptHistoryEntry[],
   sessions: Record<string, SessionState>,
   outRef: React.MutableRefObject<Record<string, AgentOutEntry>>,
   onSessionResumed: ((cb: (d: { sessionId: string }) => void) => () => void) | undefined,
-): { working: Record<string, boolean>; completed: Record<string, boolean> } {
+): { working: Record<string, boolean>; completed: Record<string, boolean>; permission: Record<string, boolean> } {
   const stateRef = useRef<Record<string, RunState>>({})
   const [now, setNow] = useState(() => Date.now())
+  // Bumped when a run's frozen answer changes, so the row re-renders on the
+  // same frame the value moves out of the live channel (the 1s tick that drives
+  // `working` can stop at exactly that moment).
+  const [, bumpRender] = useState(0)
 
   // Resuming replays old history, which would look like a burst of "response"
   // and could look "done". Treat it as a fresh start: nothing running, no run.
@@ -450,18 +758,28 @@ function useAgentWorkingFlags(
         st.outstanding = true
         st.hasRun = true
         st.completedRun = false
+        // Start from empty: the live line must be THIS run's output, never
+        // leftovers from the previous turn.
+        const entry = outRef.current[sid]
+        if (entry) entry.runLine = ''
       }
-      // Live "working" for this instant: prompted + recent real content.
+      // Live "working" for this instant: prompted + actively working (title or
+      // content driven).
       const entry = outRef.current[sid]
-      const contentLive = !!entry && now - entry.contentTs < AGENT_CONTENT_LIVE_MS
-      const isWorking = st.outstanding && s.status !== 'exited' && contentLive
+      const isWorking = computeIsWorking(entry, now, st.outstanding, s.status !== 'exited')
       // working → not-working while a run is outstanding means it finished.
-      if (st.prevIsWorking && !isWorking && st.outstanding) st.completedRun = true
+      if (st.prevIsWorking && !isWorking && st.outstanding) {
+        st.completedRun = true
+        if (commitRunLine(entry)) bumpRender(v => v + 1)
+      }
       st.prevIsWorking = isWorking
       // Settling after a run (busy → idle/waiting/exited) also completes it.
       if (st.prevStatus === 'busy' && (s.status === 'idle' || s.status === 'waiting' || s.status === 'exited')) {
         if (st.outstanding) st.completedRun = true
         st.outstanding = false
+        // An agent that never set a working title (so the transition above never
+        // fired) still settles here — freeze whatever it produced.
+        if (commitRunLine(entry)) bumpRender(v => v + 1)
       }
       st.prevStatus = s.status
     }
@@ -478,16 +796,19 @@ function useAgentWorkingFlags(
 
   const working: Record<string, boolean> = {}
   const completed: Record<string, boolean> = {}
+  const permission: Record<string, boolean> = {}
   for (const sid of Object.keys(sessions)) {
     const st = stateRef.current[sid]
-    if (!st) { working[sid] = false; completed[sid] = false; continue }
-    // Recompute live for a responsive spinner (the effect above may lag a frame).
     const entry = outRef.current[sid]
-    const contentLive = !!entry && now - entry.contentTs < AGENT_CONTENT_LIVE_MS
-    working[sid] = st.outstanding && sessions[sid].status !== 'exited' && contentLive
+    if (!st) { working[sid] = false; completed[sid] = false; permission[sid] = false; continue }
+    // Recompute live for a responsive spinner (the effect above may lag a frame).
+    working[sid] = computeIsWorking(entry, now, st.outstanding, sessions[sid].status !== 'exited')
     completed[sid] = st.completedRun
+    // Title says the agent needs input/permission (Gemini ✋, "action required",
+    // …) — show the attention state regardless of outstanding.
+    permission[sid] = !!(entry && entry.titleStatus === 'permission' && sessions[sid].status !== 'exited')
   }
-  return { working, completed }
+  return { working, completed, permission }
 }
 
 const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
@@ -514,6 +835,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onFetchMembers,
   onTerminalOutput,
   onSessionResumed,
+  onAgentStatus,
   getTokenUsage,
   promptHistory,
   onRenameTask,
@@ -572,6 +894,13 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
    * to reset that session's buffer + working state.
    */
   onSessionResumed?: (cb: (data: { sessionId: string }) => void) => () => void
+  /**
+   * Structured agent lifecycle status from agent hooks — the authoritative
+   * source for a row's status line. Decoupled from the terminal stream, so
+   * scrolling can't change it. Sessions with no entry fall back to the
+   * terminal-scraped feed. See docs/agent_row_status_roadmap.md.
+   */
+  onAgentStatus?: (cb: (data: { entry: AgentStatusEntry }) => void) => () => void
   /** Pull token usage for a session (output/total/estimated cost). */
   getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
@@ -659,9 +988,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     }
     return [...set].sort()
   }, [membersByTask])
-  const agentOutRef = useAgentOutputBuffer(onTerminalOutput, onSessionResumed, trackedIds)
-  const { working: workingFlags, completed: completedFlags } = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef, onSessionResumed)
-
   // The "question" line for each agent row: the last message the USER submitted
   // to that session. Slash commands (e.g. "/clear", "/compact") are the agent's
   // own system commands, not a real prompt, so they're skipped. Rendered as a
@@ -678,6 +1004,15 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     }
     return m
   }, [promptHistory])
+
+  // Read by the live-output buffer so it can drop the input box's echo of the
+  // prompt instead of showing it as the agent's answer.
+  const lastPromptRef = useRef<Record<string, string>>({})
+  lastPromptRef.current = lastPromptBySession
+
+  const agentOutRef = useAgentOutputBuffer(onTerminalOutput, onSessionResumed, trackedIds, lastPromptRef)
+  const agentHookRef = useAgentHookStatus(onAgentStatus, trackedIds)
+  const { working: workingFlags, completed: completedFlags, permission: permissionFlags } = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef, onSessionResumed)
 
   // Latest known git branch per workspace, from agent sessions (most recent
   // first). Replaces the old aggregate-status gutter data.
@@ -715,9 +1050,11 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   )
   // A task can merge once it has a branch and is live or already done. A task
   // holding a prepared conflict resolution counts too — otherwise the "Confirm
-  // & land" step would be unreachable from the sidebar.
+  // & land" step would be unreachable from the sidebar. `baseSha` is what
+  // separates a real worktree from the plain-directory fallback used when the
+  // workspace folder is not a git repository — those can never merge.
   const canMergeTask = (t: TaskGroupInfo) =>
-    !!t.branchName && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef)
+    !!t.branchName && !!t.baseSha && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef)
   const mergeableTasks = useMemo(
     () => (taskGroups || []).filter(canMergeTask),
     [taskGroups]
@@ -871,6 +1208,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           {isPinned && (
                             <i className="codicon codicon-pinned task-row-pin" title="Pinned" />
                           )}
+                          {t.worktreeMode === 'none' && (
+                            <i className="codicon codicon-files task-row-no-isolation" title="No isolation — agents share the workspace folder" />
+                          )}
                           {renamingTask?.id === t.id ? (
                             <TaskRenameInput
                               initialName={t.title}
@@ -969,17 +1309,38 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                       {membersLoadedByTask[t.id] && rowMembers.map(m => {
                         const buf = m.sessionId ? agentOutRef.current[m.sessionId] : undefined
                         const rowKey = `${m.agentId}-${m.sessionId || m.subtaskId || m.title}`
+                        // Hooks are the agent's own structured signal, so they
+                        // win when present; agents we can't instrument fall
+                        // back to the stream-derived flags below.
+                        const hookEntry = m.sessionId ? agentHookRef.current[m.sessionId] : undefined
+                        const hookState = hookEntry?.state
+                        const streamWorking = !!(m.sessionId && workingFlags[m.sessionId])
+                        const hasCompletedRun = hookState
+                          ? hookState === 'done'
+                          : !!(m.sessionId && completedFlags[m.sessionId])
+                        const needsAttention = hookState
+                          ? hookState === 'permission'
+                          : !!(m.sessionId && permissionFlags[m.sessionId])
+                        const isWorking = hookState ? hookState === 'working' : streamWorking
+                        // A state word, not agent text — see agentStatusWord.
+                        const previewLine = agentStatusWord({
+                          hookState,
+                          isWorking,
+                          hasCompletedRun,
+                          needsAttention,
+                        })
                         return (
                           <TaskAgentRow
                             key={rowKey}
                             member={m}
                             sessionStatus={m.sessionId ? sessions[m.sessionId]?.status : undefined}
-                            isWorking={!!(m.sessionId && workingFlags[m.sessionId])}
-                            hasCompletedRun={!!(m.sessionId && completedFlags[m.sessionId])}
+                            isWorking={isWorking}
+                            hasCompletedRun={hasCompletedRun}
+                            needsAttention={needsAttention}
                             active={!!(activeSessionId && m.sessionId === activeSessionId)}
-                            previewLine={buf?.lastLine || ''}
+                            previewLine={previewLine}
                             lastPrompt={m.sessionId ? lastPromptBySession[m.sessionId] || '' : ''}
-                            lastLineTs={buf?.ts || 0}
+                            lastLineTs={hookEntry?.updatedAt || buf?.ts || 0}
                             isInOpenTask={openTaskId === t.id}
                             onOpenTask={() => onSelectTask?.(t.id)}
                             detailsOpen={openDetailsKey === rowKey}
@@ -1034,7 +1395,7 @@ export default memo(function WorkspaceSidebar({
   taskGroups, selectedTaskId, openTaskId, onSelectTask,
   onOpenFolderDirect, onCloneDirect,
   activeSessionId, onSelectSession,
-  onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, getTokenUsage, promptHistory,
+  onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, onAgentStatus, getTokenUsage, promptHistory,
   onRenameTask, onSetTaskPinned, onMergeTask, onMergeAllTasks, onDeleteTask, onOpenTaskDetails,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
@@ -1066,6 +1427,7 @@ export default memo(function WorkspaceSidebar({
         onFetchMembers={onFetchMembers}
         onTerminalOutput={onTerminalOutput}
         onSessionResumed={onSessionResumed}
+        onAgentStatus={onAgentStatus}
         getTokenUsage={getTokenUsage}
         promptHistory={promptHistory}
         onRenameTask={onRenameTask}
@@ -1136,6 +1498,18 @@ const WorkspaceSidebarFiles = memo(function WorkspaceSidebarFiles({
   const [createRequests, setCreateRequests] = useState<Record<string, { type: 'file' | 'folder'; nonce: number }>>({})
   const [selectedFolderPath, setSelectedFolderPath] = useState<Record<string, string | null>>({})
   const [refreshSignal, setRefreshSignal] = useState(0)
+
+  // This panel lists exactly one workspace (the active one), so open its tree
+  // on arrival rather than leaving the explorer blank until the user clicks the
+  // chevron. Uses the existing expansion prop — the same call the app already
+  // makes when switching workspaces from here — so the chevron still collapses
+  // it afterwards. Keyed on the workspace only, so it never loops.
+  useEffect(() => {
+    const id = activeWorkspace?.id
+    if (!id) return
+    if (!expandedFolders?.has(wsExpandKey(id))) onExpandFolder?.(wsExpandKey(id))
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the workspace only: adding expandedFolders/onExpandFolder would re-fire on every expand and loop.
+  }, [activeWorkspace?.id])
 
   const closeContextMenu = useCallback(() => { setMenuOpenId(null); setWsMenu(null) }, [])
 
@@ -1225,10 +1599,13 @@ const WorkspaceSidebarFiles = memo(function WorkspaceSidebarFiles({
           )}
         </div>
 
-        {/* Workspace list */}
+        {/* Workspace list — File Explorer shows the CURRENT workspace only.
+            Every workspace ever added stays listed in the Workspace view (where
+            you switch between them); here it would just pile older projects'
+            folders into the explorer. */}
         <div className="workspace-list">
-          {workspaces.map(ws => {
-            const isActive = activeWorkspace?.id === ws.id
+          {workspaces.filter(ws => ws.id === activeWorkspace?.id).map(ws => {
+            const isActive = true
             const isExpanded = expandedFolders?.has(wsExpandKey(ws.id))
             const wsPath = ws.repository?.path || ''
 
@@ -1308,7 +1685,7 @@ const WorkspaceSidebarFiles = memo(function WorkspaceSidebarFiles({
                 </div>
 
                 {/* Inline file tree when expanded */}
-                {isExpanded && wsPath && canShowTree && (
+                {isExpanded && isActive && wsPath && canShowTree && (
                   <div className="workspace-inline-tree">
                     <FileExplorer
                       workspacePath={wsPath}
@@ -1333,7 +1710,7 @@ const WorkspaceSidebarFiles = memo(function WorkspaceSidebarFiles({
                     />
                   </div>
                 )}
-                {isExpanded && !wsPath && (
+                {isExpanded && isActive && !wsPath && (
                   <div className="workspace-inline-tree">
                     <div className="sidebar-empty">No path available</div>
                   </div>

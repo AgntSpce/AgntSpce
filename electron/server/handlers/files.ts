@@ -4,17 +4,37 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import { app } from 'electron'
 
+/** App-internal, gitignored metadata dir: coordinator db, logs, task worktrees. */
+const AGNTSPCE_META_DIR = '.agntspce'
+
 function resolveWorkspaceRoot(ctx: ServerContext): string {
   const ws = ctx.workspaceManager.getActiveWorkspace()
   if (!ws?.repository?.path) return ''
   return path.resolve(ws.repository.path)
 }
 
+/**
+ * True only for paths inside a workspace the user has actually added. The
+ * sidebar renders a tree per workspace row, so this must accept EVERY workspace,
+ * not just the active one — scoping it to the active root made expanding any
+ * other workspace fail the guard outright.
+ *
+ * Traversal protection is unchanged in spirit: the allow-list is still exactly
+ * the user's own workspace roots, so `..` cannot escape one.
+ */
 function isPathInWorkspace(ctx: ServerContext, targetPath: string): boolean {
-  const root = resolveWorkspaceRoot(ctx)
-  if (!root) return false
   const resolvedTarget = path.resolve(targetPath)
-  return resolvedTarget === root || resolvedTarget.startsWith(root + path.sep)
+  let roots: string[] = []
+  try {
+    roots = (ctx.workspaceManager.listWorkspaces() || [])
+      .filter(ws => ws?.repository?.path)
+      .map(ws => path.resolve(ws.repository!.path!))
+  } catch { roots = [] }
+  if (roots.length === 0) {
+    const active = resolveWorkspaceRoot(ctx)
+    if (active) roots = [active]
+  }
+  return roots.some(root => resolvedTarget === root || resolvedTarget.startsWith(root + path.sep))
 }
 
 async function getRepoRoot(wsPath: string): Promise<string> {
@@ -98,7 +118,13 @@ export function registerFileHandlers(ctx: ServerContext, socket: Socket): void {
         if (callback) callback({ ok: false, error: 'Path is outside the workspace' })
         return
       }
-      const root = await getRepoRoot(worktreePath)
+      // Root the tree at EXACTLY the requested path. The client joins its own
+      // `workspacePath` onto the relative paths we return, so if we silently
+      // climbed to a parent git root the client would build absolute paths
+      // that point somewhere else entirely — which the workspace guard then
+      // rejects as "Path is outside the workspace". That is what broke opening
+      // a task's worktree.
+      const root = path.resolve(worktreePath)
       async function readDir(dirPath: string, relativeRoot: string): Promise<any[]> {
         const entries: any[] = []
         const dirEntries = await fs.readdir(dirPath, { withFileTypes: true })
@@ -107,7 +133,12 @@ export function registerFileHandlers(ctx: ServerContext, socket: Socket): void {
           return a.name.localeCompare(b.name)
         })
         for (const entry of dirEntries) {
-          if (entry.name.startsWith('.')) continue
+          // Hidden files and folders ARE shown. The exceptions are tool
+          // internals that aren't the user's project: `.agntspce` (app state —
+          // coordinator db, logs, and every OTHER task's worktree) and `.git`
+          // (VCS object store). Both would otherwise flood the tree with
+          // folders the user never meant to see.
+          if (entry.name === AGNTSPCE_META_DIR || entry.name === '.git') continue
           const fullPath = path.join(dirPath, entry.name)
           const relativePath = path.relative(relativeRoot, fullPath).replace(/\\/g, '/')
           if (entry.isDirectory()) {
