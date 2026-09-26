@@ -704,3 +704,18 @@
 .orca-agent-detail-row .val.muted {
   color: var(--text-dim);
 }
+
+/* ── Task rows: ~50% taller than the default .task-row ─────────────
+   Scoped to the workspace panel so the shared .task-row elsewhere is
+   untouched. More vertical padding + a slightly larger title so the task
+   name reads as a proper row. */
+.orca-workspace-sidebar .task-row {
+  padding: 10px 8px;
+  min-height: 42px;
+  align-items: center;
+}
+
+.orca-workspace-sidebar .task-row-title {
+  font-size: 13px;
+  line-height: 1.4;
+}

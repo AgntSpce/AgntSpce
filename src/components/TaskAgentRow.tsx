@@ -67,13 +67,17 @@ interface TaskAgentRowProps {
    *  (never from typing echo) — drives the "working" spinner. */
   isWorking: boolean
   active: boolean
-  /** One-line latest thinking/output (already ANSI-cleaned + chrome-filtered). */
+  /** One-line latest thinking/output (already ANSI-cleaned + chrome-filtered).
+   *  This is the "answer" line shown under the prompt. */
   previewLine: string
+  /** The last message the user submitted to this agent (slash-commands
+   *  excluded) — the "question" line. Empty when nothing has been asked yet. */
+  lastPrompt: string
   /** Timestamp of the latest output (for the relative-time meta). */
   lastLineTs: number
-  /** True once the agent has produced real (non-chrome) output — drives the
-   *  green "done" tick. */
-  hasOutput: boolean
+  /** True once the agent was given a prompt AND finished that run — the only
+   *  condition that shows the green check mark. */
+  hasCompletedRun: boolean
   getTokenUsage?: (sessionId?: string) => Promise<any>
   onSelectSession?: (sessionId: string) => void
   /** True when this row's task is the one currently open in the main view. */
@@ -97,8 +101,9 @@ function TaskAgentRow({
   isWorking,
   active,
   previewLine,
+  lastPrompt,
   lastLineTs,
-  hasOutput,
+  hasCompletedRun,
   getTokenUsage,
   onSelectSession,
   isInOpenTask,
@@ -110,18 +115,17 @@ function TaskAgentRow({
   const rowRef = useRef<HTMLDivElement | null>(null)
 
   // State → glyph:
-  //   red     — the agent stopped/failed (exited or errored) and gave no output
-  //   spinner — actively producing a response right now
-  //   green   — finished working (it produced output and has settled)
-  //   amber ? — genuinely waiting on input/permission, with nothing produced yet
-  //   grey    — idle: never produced output
-  // The `busy` status alone is NOT trusted (it fires on typing echo and lingers
-  // after a response); `isWorking` is prompt-gated, and "done" additionally
-  // requires real output to have been produced.
+  //   red cross — the agent stopped/failed (exited or errored)
+  //   spinner   — actively working on a prompt the user submitted
+  //   check     — the agent was given a prompt AND finished that run
+  //   amber ?   — waiting on input/permission (no run completed yet)
+  //   grey      — idle: no run given / just opened or resumed
+  // `hasCompletedRun` (not raw output/status) gates the check, so merely opening
+  // or resuming an agent never shows a check mark before real work is done.
   let state: 'working' | 'waiting' | 'done' | 'blocked' | 'idle' = 'idle'
   if (sessionStatus === 'exited' || member.status === 'failed') state = 'blocked'
   else if (isWorking) state = 'working'
-  else if (member.status === 'done' || hasOutput) state = 'done'
+  else if (hasCompletedRun) state = 'done'
   else if (sessionStatus === 'waiting') state = 'waiting'
 
   const glyph = (() => {
@@ -177,8 +181,12 @@ function TaskAgentRow({
         <span className="orca-agent-dot">{glyph}</span>
         <AgentLogo agentId={member.agentId} size={16} />
         <div className="orca-agent-line">
-          <span className={`orca-agent-primary${active ? '-focused' : ''}`}>
-            {displayName}
+          {/* Q&A layout: the last prompt the user gave (the "question") on top,
+              the agent's live output (the "answer") underneath. Both are single
+              lines that ellipsize to the panel width. Falls back to the agent
+              name when nothing has been asked yet. */}
+          <span className={`orca-agent-primary${active ? '-focused' : ''}`} title={lastPrompt || displayName}>
+            {lastPrompt || displayName}
             <span className="orca-agent-model"> · {modelLabel}</span>
           </span>
           <span className="orca-agent-secondary">{preview}</span>

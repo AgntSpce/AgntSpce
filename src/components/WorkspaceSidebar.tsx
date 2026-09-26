@@ -143,16 +143,6 @@ function AgentLogo({ agentId, size = 16 }: { agentId: string; size?: number }) {
   )
 }
 
-// v2 task-group status → dot color.
-const TASK_STATUS_COLORS: Record<string, string> = {
-  planning: '#9aa0a6',
-  active: '#34c759',
-  paused: '#ff9f0a',
-  merging: '#0a84ff',
-  done: '#6e6e6e',
-  abandoned: '#ff453a',
-}
-
 // ── Workspace section (default workspace mode) ─────────────────────────
 // Workspace cards carry a folder gutter, a title and a branch meta row,
 // followed by the v2 Tasks list. Per-agent prompt/status rows were removed;
@@ -376,34 +366,45 @@ function useAgentOutputBuffer(
 // pauses between tool calls.
 const AGENT_CONTENT_LIVE_MS = 5000
 
-// ── "Agent is working" flags ──────────────────────────────────────────
-// An agent counts as working only when ALL of these hold:
-//   1. the USER submitted a prompt (source 'typed') after we started watching —
-//      not the launch 'agent-start' prompt, not leftover history from a prior
-//      use of the session, and not mere keystrokes still being typed;
-//   2. the agent has not settled since (busy → idle/waiting/exited);
-//   3. it produced new response CONTENT within AGENT_CONTENT_LIVE_MS.
-// (3) is what makes the spinner stop the moment the agent stops responding,
-// even while the backend status still reads `busy`.
+// ── Agent run/working state ──────────────────────────────────────────
+// Tracks, per session:
+//   working      — a user-submitted prompt is being responded to right now
+//                  (prompt-gated + recent real content, so typing echo and
+//                   lingering `busy` never spin it).
+//   completedRun — the agent was given a prompt AND finished that run. This is
+//                  the ONLY thing that shows the check mark, so merely opening
+//                  or resuming an agent (no prompt) stays grey/idle.
+// Resuming a session resets both, treating it as a fresh start.
+type RunState = {
+  lastPromptTs: number
+  outstanding: boolean
+  prevStatus?: string
+  prevIsWorking: boolean
+  hasRun: boolean
+  completedRun: boolean
+}
+
 function useAgentWorkingFlags(
   promptHistory: PromptHistoryEntry[],
   sessions: Record<string, SessionState>,
   outRef: React.MutableRefObject<Record<string, AgentOutEntry>>,
   onSessionResumed: ((cb: (d: { sessionId: string }) => void) => () => void) | undefined,
-): Record<string, boolean> {
-  // per session: last typed-prompt timestamp we've accounted for, whether one is
-  // still outstanding, and the last status we observed.
-  const stateRef = useRef<Record<string, { lastPromptTs: number; outstanding: boolean; prevStatus?: string }>>({})
+): { working: Record<string, boolean>; completed: Record<string, boolean> } {
+  const stateRef = useRef<Record<string, RunState>>({})
   const [now, setNow] = useState(() => Date.now())
 
-  // Resuming replays old history, which would look like a burst of "response".
-  // Treat it as a fresh start: no outstanding prompt, so no spinner until the
-  // user actually submits something new.
+  // Resuming replays old history, which would look like a burst of "response"
+  // and could look "done". Treat it as a fresh start: nothing running, no run.
   useSocketEvent<{ sessionId: string }>(
     onSessionResumed || (() => () => {}),
     ({ sessionId }) => {
       const st = stateRef.current[sessionId]
-      if (st) st.outstanding = false
+      if (st) {
+        st.outstanding = false
+        st.hasRun = false
+        st.completedRun = false
+        st.prevIsWorking = false
+      }
       setNow(Date.now())
     },
     [onSessionResumed],
@@ -419,49 +420,70 @@ function useAgentWorkingFlags(
     return m
   }, [promptHistory])
 
+  // Advance the run state machine. Runs on sessions/prompt changes and on the
+  // `now` tick so the working→idle transition (completion) is detected even
+  // without further socket events.
   useEffect(() => {
-    let changed = false
     for (const [sid, s] of Object.entries(sessions)) {
       let st = stateRef.current[sid]
       if (!st) {
-        // First time we see this session: assume any existing prompt history is
-        // already handled, so opening a (possibly reused) assistant never spins.
-        stateRef.current[sid] = { lastPromptTs: latestTyped[sid] || 0, outstanding: false, prevStatus: s.status }
+        // First sight: assume any existing prompt history is already handled, so
+        // opening (or resuming) an agent never spins or shows a check.
+        stateRef.current[sid] = {
+          lastPromptTs: latestTyped[sid] || 0,
+          outstanding: false,
+          prevStatus: s.status,
+          prevIsWorking: false,
+          hasRun: false,
+          completedRun: false,
+        }
         continue
       }
+      // A new user prompt starts a run.
       const maxTyped = latestTyped[sid] || 0
       if (maxTyped > st.lastPromptTs) {
         st.lastPromptTs = maxTyped
         st.outstanding = true
-        changed = true
+        st.hasRun = true
+        st.completedRun = false
       }
+      // Live "working" for this instant: prompted + recent real content.
+      const entry = outRef.current[sid]
+      const contentLive = !!entry && now - entry.contentTs < AGENT_CONTENT_LIVE_MS
+      const isWorking = st.outstanding && s.status !== 'exited' && contentLive
+      // working → not-working while a run is outstanding means it finished.
+      if (st.prevIsWorking && !isWorking && st.outstanding) st.completedRun = true
+      st.prevIsWorking = isWorking
+      // Settling after a run (busy → idle/waiting/exited) also completes it.
       if (st.prevStatus === 'busy' && (s.status === 'idle' || s.status === 'waiting' || s.status === 'exited')) {
+        if (st.outstanding) st.completedRun = true
         st.outstanding = false
-        changed = true
       }
       st.prevStatus = s.status
     }
-    if (changed) setNow(Date.now())
-  }, [sessions, latestTyped])
+  }, [sessions, latestTyped, now, outRef])
 
-  // Tick while anything is outstanding so the spinner switches off on its own
-  // once content goes stale — no further socket event is needed.
+  // Tick while any run is in flight or awaiting completion detection, so the
+  // spinner/completion update on their own.
   useEffect(() => {
-    const anyOutstanding = Object.values(stateRef.current).some(s => s.outstanding)
-    if (!anyOutstanding) return
+    const needsTick = Object.values(stateRef.current).some(s => s.outstanding || (s.hasRun && !s.completedRun))
+    if (!needsTick) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [sessions, latestTyped, now])
 
-  const flags: Record<string, boolean> = {}
+  const working: Record<string, boolean> = {}
+  const completed: Record<string, boolean> = {}
   for (const sid of Object.keys(sessions)) {
     const st = stateRef.current[sid]
-    if (!st || !st.outstanding) { flags[sid] = false; continue }
+    if (!st) { working[sid] = false; completed[sid] = false; continue }
+    // Recompute live for a responsive spinner (the effect above may lag a frame).
     const entry = outRef.current[sid]
     const contentLive = !!entry && now - entry.contentTs < AGENT_CONTENT_LIVE_MS
-    flags[sid] = sessions[sid].status !== 'exited' && contentLive
+    working[sid] = st.outstanding && sessions[sid].status !== 'exited' && contentLive
+    completed[sid] = st.completedRun
   }
-  return flags
+  return { working, completed }
 }
 
 const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
@@ -628,7 +650,24 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
     return [...set].sort()
   }, [membersByTask])
   const agentOutRef = useAgentOutputBuffer(onTerminalOutput, onSessionResumed, trackedIds)
-  const workingFlags = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef, onSessionResumed)
+  const { working: workingFlags, completed: completedFlags } = useAgentWorkingFlags(promptHistory || [], sessions, agentOutRef, onSessionResumed)
+
+  // The "question" line for each agent row: the last message the USER submitted
+  // to that session. Slash commands (e.g. "/clear", "/compact") are the agent's
+  // own system commands, not a real prompt, so they're skipped. Rendered as a
+  // single truncated line (the row's CSS ellipsizes it), with the agent's live
+  // output shown underneath as the "answer".
+  const lastPromptBySession = useMemo(() => {
+    const m: Record<string, string> = {}
+    const list = [...(promptHistory || [])].sort((a, b) => a.timestamp - b.timestamp)
+    for (const p of list) {
+      if (p.source !== 'typed') continue
+      const text = (p.originalPrompt || '').trim()
+      if (!text || text.startsWith('/')) continue
+      m[p.sessionId] = text
+    }
+    return m
+  }, [promptHistory])
 
   // Latest known git branch per workspace, from agent sessions (most recent
   // first). Replaces the old aggregate-status gutter data.
@@ -799,7 +838,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                        }}
                        title={t.userGoal || t.title}
                     >
-                      <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
                       <div className="task-row-main">
                         <span className="task-row-title-line">
                           {isPinned && (
@@ -890,10 +928,11 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                             member={m}
                             sessionStatus={m.sessionId ? sessions[m.sessionId]?.status : undefined}
                             isWorking={!!(m.sessionId && workingFlags[m.sessionId])}
+                            hasCompletedRun={!!(m.sessionId && completedFlags[m.sessionId])}
                             active={!!(activeSessionId && m.sessionId === activeSessionId)}
                             previewLine={buf?.lastLine || ''}
+                            lastPrompt={m.sessionId ? lastPromptBySession[m.sessionId] || '' : ''}
                             lastLineTs={buf?.ts || 0}
-                            hasOutput={!!buf?.hasOutput}
                             isInOpenTask={openTaskId === t.id}
                             onOpenTask={() => onSelectTask?.(t.id)}
                             detailsOpen={openDetailsKey === rowKey}
