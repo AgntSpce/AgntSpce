@@ -118,6 +118,9 @@ interface Props {
   onMergeTask?: (taskGroupId: string) => void
   /** Merge every task in the workspace, oldest first. */
   onMergeAllTasks?: () => void
+  /** Fast-forward the checked-out branch onto the integration branch. */
+  onApplyIntegration?: () => void
+  applyingIntegration?: boolean
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -842,6 +845,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onSetTaskPinned,
   onMergeTask,
   onMergeAllTasks,
+  onApplyIntegration,
+  applyingIntegration,
   onDeleteTask,
   onOpenTaskDetails,
 }: {
@@ -911,6 +916,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onMergeTask?: (taskGroupId: string) => void
   /** Merge every task in the workspace, oldest first. */
   onMergeAllTasks?: () => void
+  /** Fast-forward the checked-out branch onto the integration branch. */
+  onApplyIntegration?: () => void
+  applyingIntegration?: boolean
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -1152,6 +1160,21 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
           <div className="workspace-tasks-top">
             <div className="sidebar-header tasks-header">
               <h2>Tasks</h2>
+              {/* Merging parks work on the integration branch, so the user's
+                  own checkout does not change until they ask for it. Verified
+                  dead end: "Merge all" had no follow-up, leaving merged files
+                  invisible in the folder with no way to bring them over. */}
+              {onApplyIntegration && (
+                <button
+                  className="tasks-merge-all"
+                  onClick={onApplyIntegration}
+                  disabled={applyingIntegration}
+                  title={`Fast-forward your checked-out branch onto the integration branch, so merged task files appear in this folder`}
+                >
+                  <i className="codicon codicon-git-merge" />
+                  {applyingIntegration ? 'Applying…' : 'Apply to my branch'}
+                </button>
+              )}
               {onMergeAllTasks && mergeableTasks.length > 0 && (
                 <button
                   className="tasks-merge-all"
@@ -1397,6 +1420,7 @@ export default memo(function WorkspaceSidebar({
   activeSessionId, onSelectSession,
   onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, onAgentStatus, getTokenUsage, promptHistory,
   onRenameTask, onSetTaskPinned, onMergeTask, onMergeAllTasks, onDeleteTask, onOpenTaskDetails,
+  onApplyIntegration, applyingIntegration,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -1434,6 +1458,8 @@ export default memo(function WorkspaceSidebar({
         onSetTaskPinned={onSetTaskPinned}
         onMergeTask={onMergeTask}
         onMergeAllTasks={onMergeAllTasks}
+        onApplyIntegration={onApplyIntegration}
+        applyingIntegration={applyingIntegration}
         onDeleteTask={onDeleteTask}
         onOpenTaskDetails={onOpenTaskDetails}
       />

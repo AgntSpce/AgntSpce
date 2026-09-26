@@ -35,7 +35,10 @@ export interface PlanContext {
   userGoal: string
   branchName: string
   worktreePath: string
-  worktreeMode: 'worktree' | 'in-repo'
+  worktreeMode: 'worktree' | 'in-repo' | 'none'
+  /** Branch that peers' committed work lands on. Agents need the name so they
+   *  can pull it in instead of reporting a peer's file as missing. */
+  integrationBranch?: string
 }
 
 // Static capability notes layered on top of agentManager configs. The planner
@@ -65,12 +68,50 @@ export function buildAssignmentPrompt(
   doneCriteria: string
 ): string {
   const scope = scopeFiles.length > 0 ? scopeFiles.join(', ') : '(no fixed scope — coordinate via COLLAB.md)'
-  const shared = ctx.worktreeMode === 'worktree' ? 'Shared worktree' : 'Shared checkout'
+  // In 'none' mode there is no worktree and no branch: agents share the
+  // workspace folder itself, so the isolation wording would be a lie.
+  const shared = ctx.worktreeMode === 'worktree' ? 'Shared worktree' : ctx.worktreeMode === 'in-repo' ? 'Shared checkout' : 'Shared workspace (no isolation)'
+  const place = ctx.worktreeMode === 'none'
+    ? `${shared}: ${ctx.worktreePath}. Other agents are editing these same files right now — claim every file before you touch it, and expect conflicting edits.`
+    : `${shared}: ${ctx.worktreePath} (branch ${ctx.branchName}). Do NOT cd outside it. Do NOT \`git checkout\` any other branch.`
+  // Verified failure: agents wrote their output and stopped, never committing,
+  // so the merge had nothing to land and the files stayed invisible in the
+  // worktree. State the requirement explicitly, in the mode the agent is in.
+  const gitRules = ctx.worktreeMode === 'none'
+    ? [
+        `  This is a shared folder with no branch of your own. \`git commit\` your work anyway so each agent's`,
+        `  changes stay attributable and reversible. Never \`git checkout\`, \`git reset --hard\`, or revert a peer's work.`,
+      ]
+    : [
+        `  You MUST \`git add -A && git commit\` your work before you finish. Uncommitted work cannot be merged and`,
+        `  will not appear in the user's folder. Commit in logical steps, not one giant commit at the end.`,
+        `  Do NOT merge, rebase, or \`git checkout\` any other branch — AgntSpce does that.`,
+      ]
+  // Verified failure: an agent looked for a file a peer had created, did not
+  // find it, and told the user it did not exist. The peer HAD committed it — it
+  // was sitting on the integration branch, which this worktree does not have
+  // until it syncs. Give the agent the exact command instead of letting it
+  // report a phantom missing file.
+  const peerSync = ctx.worktreeMode === 'worktree' && ctx.integrationBranch
+    ? [
+        ``,
+        `PEER WORK:`,
+        `  Other tasks in this workspace land their committed work on the \`${ctx.integrationBranch}\` branch.`,
+        `  Your worktree does not have it. If you need a file or API a peer created:`,
+        `      git merge ${ctx.integrationBranch} --no-edit`,
+        `  then continue. Never rebase, never cherry-pick, never \`git checkout\` another branch.`,
+        `  If the merge conflicts, resolve it, \`git add\` the resolved files, and commit.`,
+      ]
+    : []
   return [
     `You are ${agent.agentId}${agent.model ? ` (${agent.model})` : ''} working on subtask "${subtaskTitle}" of task "${ctx.taskTitle}".`,
     `Goal: ${ctx.userGoal}`,
     `Your scope: ${scope}. Others: ${peerSummary}.`,
-    `${shared}: ${ctx.worktreePath} (branch ${ctx.branchName}). Do NOT cd outside it. Do NOT \`git checkout\` any other branch.`,
+    place,
+    ``,
+    `VERSION CONTROL (mandatory):`,
+    ...gitRules,
+    ...peerSync,
     ``,
     `COLLABORATION (mandatory):`,
     `- Read COLLAB.md in the task root before editing any file another agent also owns, to see current conventions and progress.`,

@@ -31,6 +31,9 @@ interface CreateTaskModalProps {
   repoPath: string
   /** Mixed-repo workspaces: pinned-repo choices. ≤1 choice hides the picker. */
   availableRepos?: { name: string; path: string }[]
+  /** Isolation mode implied by the workspace's git consent. 'none' means the
+   *  folder has no usable repo, so the task runs with no worktree and no merge. */
+  worktreeMode?: 'worktree' | 'none'
 }
 
 let rowKey = 0
@@ -42,7 +45,7 @@ const STEP_LABELS: { id: Step; label: string }[] = [
   { id: 'progress', label: 'Create' },
 ]
 
-export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, agentsList, repoName, repoPath, availableRepos }: CreateTaskModalProps) {
+export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, agentsList, repoName, repoPath, availableRepos, worktreeMode = 'worktree' }: CreateTaskModalProps) {
   const installed = agentsList.length > 0 ? agentsList : [{ id: 'claude', name: 'Claude Code', icon: '🤖' }]
   const [step, setStep] = useState<Step>('goal')
   const [goal, setGoal] = useState('')
@@ -119,7 +122,9 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, a
     setStep('progress')
     setProgress([
       { label: 'Creating task', state: 'active' },
-      { label: 'Creating isolated git worktree', state: 'pending' },
+      worktreeMode === 'none'
+        ? { label: 'Preparing workspace folder (no isolation)', state: 'pending' }
+        : { label: 'Creating isolated git worktree', state: 'pending' },
     ])
     const mark = (idx: number, patch: Partial<ProgressItem>) =>
       setProgress(prev => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)))
@@ -127,13 +132,25 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, a
       const created = await onCreate({
         title: trimmedTitle,
         userGoal: goal.trim(),
-        worktreeMode: 'worktree',
+        worktreeMode,
         agents,
-        ...(pinnedRepo ? { repoPath: pinnedRepo } : {}),
+        ...(pinnedRepo ? { repoPath: pinnedRepo } : { }),
       })
       if (!created?.ok || !created.taskGroup) throw new Error(created?.error || 'Failed to create task')
+      // The server re-checks git readiness and may pick a different mode than
+      // the dialog guessed (a folder that gained real files since mount now
+      // deserves isolation). Report what actually happened.
+      const actualMode = created.taskGroup.worktreeMode || worktreeMode
       mark(0, { state: 'done', detail: trimmedTitle })
-      mark(1, { state: 'done', detail: created.taskGroup.branchName || 'ready' })
+      mark(1, {
+        label: actualMode === 'none'
+          ? 'Running in the workspace folder (no isolation)'
+          : 'Created isolated git worktree',
+        state: 'done',
+        detail: actualMode === 'none'
+          ? 'files appear directly in this folder'
+          : (created.taskGroup.branchName || 'ready'),
+      })
       setDoneId(created.taskGroup.id)
     } catch (e: any) {
       setProgress(prev => prev.map(p => (p.state === 'active' ? { ...p, state: 'error' } : p)))

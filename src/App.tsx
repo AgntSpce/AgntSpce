@@ -9,6 +9,7 @@ import CreateWorkspaceModal from './components/CreateWorkspaceModal'
 import CreateTaskModal from './components/CreateTaskModal'
 import TaskChat from './components/TaskChat'
 import TaskMergeDialog from './components/TaskMergeDialog'
+import GitConsentDialog from './components/GitConsentDialog'
 import Settings from './components/Settings'
 import StatusBar from './components/StatusBar'
 import TitleBar from './components/TitleBar'
@@ -154,7 +155,7 @@ const NOOP = () => {}
 function App() {
   const {
     sessions, workspaces, activeWorkspace: _globalActiveWorkspace,
-    onTerminalOutput, onSessionResumed, sendTerminalInput, sendTerminalResize,
+    onTerminalOutput, onSessionResumed, onAgentStatus, sendTerminalInput, sendTerminalResize,
     restartSession, resumeSession, switchWorkspace, createWorkspace,
     deleteWorkspace, listDeletedWorkspaces, restoreWorkspace, permanentDeleteWorkspace,
     closeTab, startAgent, fetchAgentConfigs, fetchInstalledAgents, createRawSession, createAgentSession,
@@ -165,7 +166,7 @@ function App() {
     taskGroups, listTaskGroups, createTaskGroup, onTaskGroupsChanged,
     renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
-    mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks,
+    mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks, checkGitRepo, initGitRepo, syncTaskBranch, applyTaskBranch,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
@@ -387,11 +388,24 @@ function App() {
     }
   }, [onTaskGroupsChanged, activeWorkspace?.id, listTaskGroups])
 
-  const handleCreateTaskGroup = useCallback(async (input: { title: string; userGoal: string; worktreeMode: 'worktree' | 'in-repo'; agents: { agentId: string; model?: string }[]; repoPath?: string }) => {
-    const res = await createTaskGroup({ ...input, workspaceId: activeWorkspace?.id })
+  const handleCreateTaskGroup = useCallback(async (input: { title: string; userGoal: string; worktreeMode: 'worktree' | 'in-repo' | 'none'; agents: { agentId: string; model?: string }[]; repoPath?: string }) => {
+    // Re-probe instead of trusting the mode computed at mount: the first task
+    // of a fresh repo runs in the folder, and the very act of running it (agent
+    // commits an index.html) is what makes the next task worth isolating. A
+    // cached `isFresh` would keep sending every later task to the shared folder.
+    let worktreeMode = input.worktreeMode
+    try {
+      const probe = await checkGitRepo(activeWorkspace?.id, input.repoPath ?? activeWorkspace?.repository?.path)
+      if (probe?.ok) {
+        const isFresh = probe.isFresh !== false
+        setGitRepoState({ isRepo: !!probe.isRepo, hasCommits: !!probe.hasCommits, isFresh })
+        worktreeMode = probe.isRepo && probe.hasCommits && !isFresh ? 'worktree' : 'none'
+      }
+    } catch { /* keep the mode the dialog showed */ }
+    const res = await createTaskGroup({ ...input, worktreeMode, workspaceId: activeWorkspace?.id })
     if (res?.ok) listTaskGroups(activeWorkspace?.id).catch(() => {})
     return res ?? { ok: false, error: 'No response from server' }
-  }, [createTaskGroup, activeWorkspace?.id, listTaskGroups])
+  }, [createTaskGroup, activeWorkspace?.id, activeWorkspace?.repository?.path, listTaskGroups, checkGitRepo])
 
   // Mixed-repo workspaces carry per-terminal repositories; offer them as
   // pinned-repo choices. Single-repo workspaces hide the picker.
@@ -426,17 +440,112 @@ function App() {
     mergeTask,
     confirmTaskMerge,
     mergeAllTasks,
-  }), [previewTaskMerge, mergeTask, confirmTaskMerge, mergeAllTasks])
+    syncTaskBranch,
+    applyTaskBranch,
+  }), [previewTaskMerge, mergeTask, confirmTaskMerge, mergeAllTasks, syncTaskBranch, applyTaskBranch])
 
   const [mergeTaskId, setMergeTaskId] = useState<string | null>(null)
+
+  // ── Git readiness + consent ────────────────────────────────────────────
+  // Worktrees need a git repo that already has a commit. When the workspace
+  // folder has neither, ask once per workspace instead of silently degrading
+  // tasks into a mode that cannot isolate anything.
+  const GIT_CONSENT_KEY = 'agntspce-git-consent'
+  const [gitRepoState, setGitRepoState] = useState<{ isRepo: boolean; hasCommits: boolean; isFresh: boolean } | null>(null)
+  const [gitConsentOpen, setGitConsentOpen] = useState(false)
+  const [gitConsentBusy, setGitConsentBusy] = useState(false)
+  const [gitConsentError, setGitConsentError] = useState('')
+
+  useEffect(() => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) { setGitRepoState(null); return }
+    let cancelled = false
+    checkGitRepo(wsId, activeWorkspace?.repository?.path)
+      .then(res => {
+        if (cancelled || !res?.ok) return
+        setGitRepoState({ isRepo: !!res.isRepo, hasCommits: !!res.hasCommits, isFresh: res.isFresh !== false })
+        // Ask only when we genuinely cannot isolate, and only until answered.
+        const ready = res.isRepo && res.hasCommits
+        const answered = (() => {
+          try { return localStorage.getItem(`${GIT_CONSENT_KEY}:${wsId}`) != null } catch { return false }
+        })()
+        if (!ready && !answered) setGitConsentOpen(true)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [activeWorkspace?.id, activeWorkspace?.repository?.path, checkGitRepo])
+
+  // Isolation is only worth its cost once there is something to protect.
+  //
+  // A folder we just initialized commits almost nothing (`.gitignore`,
+  // `.mcp.json`), so a worktree of it is a near-empty checkout: the agent works
+  // in `.agntspce/tasks/<id>/`, its output is invisible in the folder the user
+  // is looking at, and there is nothing to conflict with anyway. So the first
+  // task in an empty repo runs in the folder itself; once real files exist, we
+  // isolate. A repo with no commit still cannot isolate either.
+  const taskWorktreeMode: 'worktree' | 'none' =
+    gitRepoState?.isRepo && gitRepoState?.hasCommits && !gitRepoState?.isFresh ? 'worktree' : 'none'
+
+  const rememberGitConsent = useCallback((wsId: string, value: 'initialized' | 'accepted') => {
+    try { localStorage.setItem(`${GIT_CONSENT_KEY}:${wsId}`, value) } catch {}
+  }, [])
+
+  const handleInitializeGit = useCallback(async () => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    setGitConsentBusy(true)
+    setGitConsentError('')
+    try {
+      const res = await initGitRepo(wsId, activeWorkspace?.repository?.path)
+      if (!res?.ok) { setGitConsentError(res?.error || 'Could not initialize git'); return }
+      setGitRepoState({ isRepo: true, hasCommits: true, isFresh: true })
+      rememberGitConsent(wsId, 'initialized')
+      setGitConsentOpen(false)
+    } catch (e: any) {
+      setGitConsentError(e?.message || 'Could not initialize git')
+    } finally {
+      setGitConsentBusy(false)
+    }
+  }, [activeWorkspace?.id, activeWorkspace?.repository?.path, initGitRepo, rememberGitConsent])
+
+  const handleAcceptNoGit = useCallback(() => {
+    const wsId = activeWorkspace?.id
+    if (!wsId) return
+    setGitRepoState({ isRepo: false, hasCommits: false, isFresh: true })
+    rememberGitConsent(wsId, 'accepted')
+    setGitConsentOpen(false)
+  }, [activeWorkspace?.id, rememberGitConsent])
+
   const mergeDialogTask = useMemo(
     () => (taskGroups || []).find(t => t.id === mergeTaskId) || null,
     [taskGroups, mergeTaskId]
   )
 
+// Fast-forward the checked-out branch onto the integration branch. This is the
+  // only step that makes merged work visible in the workspace folder.
+  const [applyingIntegration, setApplyingIntegration] = useState(false)
+  const handleApplyIntegration = useCallback(async (): Promise<boolean> => {
+    setApplyingIntegration(true)
+    try {
+      const res = await applyTaskBranch()
+      if (res && res.ok === false) {
+        alert(res.error || 'Could not apply the integration branch')
+        return false
+      }
+      if (res?.upToDate) alert(`${res.branch || 'Your branch'} is already up to date.`)
+      else alert(`Applied to ${res?.branch || 'your branch'} — ${res?.files?.length ?? 0} file(s) are now in your folder.`)
+      return true
+    } catch (e: any) {
+      alert(e?.message || 'Could not apply the integration branch')
+      return false
+    } finally {
+      setApplyingIntegration(false)
+    }
+  }, [applyTaskBranch])
+
   const handleMergeAllTasks = useCallback(async () => {
     const ids = (taskGroups || [])
-      .filter(t => !!t.branchName && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef))
+      .filter(t => !!t.branchName && !!t.baseSha && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef))
       .map(t => t.id)
     if (ids.length === 0) return
     const count = ids.length
@@ -446,13 +555,19 @@ function App() {
       if (res && res.ok === false) {
         const failed = res.results?.find((r: any) => !r.ok && !r.skipped)
         alert(`${res.landed ?? 0} of ${count} merged, then stopped.\n\n${failed?.error || 'A task failed to merge.'}${res.pendingConfirm ? `\n\n${res.pendingConfirm} task(s) have a prepared merge waiting for review.` : ''}`)
-      } else {
-        alert(`Merged ${res?.landed ?? count} task(s) into the integration branch.`)
+      } else if ((res?.landed ?? count) > 0) {
+        // Merging only moves the integration branch, so the folder the user is
+        // looking at is still unchanged. Verified dead end: this used to end at
+        // "Merged N tasks" with no way to bring the files over.
+        if (confirm(`Merged ${res?.landed ?? count} task(s) into the integration branch.\n\nBring them into your current branch now?`)) {
+          await handleApplyIntegration()
+        }
       }
     } catch (e: any) {
       alert(e?.message || 'Merge failed')
     }
-  }, [taskGroups, mergeAllTasks])
+  }, [taskGroups, mergeAllTasks, handleApplyIntegration])
+
 
   useEffect(() => {
     localStorage.setItem('agent-workspace-theme', theme)
@@ -753,7 +868,7 @@ function App() {
         res = await createTaskGroup({
           title: 'Unnamed task',
           userGoal: '',
-          worktreeMode: 'worktree',
+          worktreeMode: taskWorktreeMode,
           agents: [],
           workspaceId: activeWorkspace.id,
         })
@@ -845,7 +960,7 @@ function App() {
       const res = await createTaskGroup({
         title,
         userGoal: '',
-        worktreeMode: 'worktree',
+        worktreeMode: taskWorktreeMode,
         agents: [],
         workspaceId: activeWorkspace?.id,
       })
@@ -1202,7 +1317,9 @@ function App() {
       try {
         const res = await getTaskDetail(groupId)
         const taskGroup = res?.detail?.group
-        cwd = taskGroup?.worktreePath || (taskGroup?.worktreeMode === 'in-repo' ? taskGroup?.repoPath : null) || null
+        cwd = taskGroup?.worktreePath
+          || (taskGroup?.worktreeMode === 'in-repo' || taskGroup?.worktreeMode === 'none' ? taskGroup?.repoPath : null)
+          || null
         if (cwd) setOpenGroupWorktree(cwd)
       } catch {}
       if (!cwd) await new Promise(resolve => setTimeout(resolve, 100))
@@ -1963,11 +2080,14 @@ function App() {
               onFetchMembers={fetchGroupMembers}
               onTerminalOutput={onTerminalOutput}
               onSessionResumed={onSessionResumed}
+              onAgentStatus={onAgentStatus}
               getTokenUsage={getTokenUsage}
               onRenameTask={handleRenameTask}
               onSetTaskPinned={handleSetTaskPinned}
               onMergeTask={setMergeTaskId}
               onMergeAllTasks={handleMergeAllTasks}
+              onApplyIntegration={handleApplyIntegration}
+              applyingIntegration={applyingIntegration}
               onDeleteTask={handleDeleteTask}
               onOpenTaskDetails={setSelectedTaskId}
             />
@@ -2190,6 +2310,7 @@ function App() {
         repoName={activeWorkspace?.name || ''}
         repoPath={activeWorkspace?.repository?.path || ''}
         availableRepos={taskRepoChoices}
+        worktreeMode={taskWorktreeMode}
       />
       {selectedTaskId && (
         <TaskChat
@@ -2205,6 +2326,16 @@ function App() {
           api={taskMergeApi}
           onClose={() => setMergeTaskId(null)}
           onMerged={() => { if (activeWorkspace?.id) listTaskGroups(activeWorkspace.id).catch(() => {}) }}
+        />
+      )}
+      {gitConsentOpen && activeWorkspace && (
+        <GitConsentDialog
+          workspaceName={activeWorkspace.name || activeWorkspace.repository?.path || 'Workspace'}
+          onInitialize={handleInitializeGit}
+          onAcceptNoGit={handleAcceptNoGit}
+          onClose={() => setGitConsentOpen(false)}
+          busy={gitConsentBusy}
+          error={gitConsentError}
         />
       )}
       <InputModal

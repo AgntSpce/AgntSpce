@@ -12,6 +12,12 @@ export interface TaskMergePreview {
   conflictFiles: string[]
   /** Files this task claims that other unfinished tasks also claim. */
   scopeOverlapFiles: string[]
+  /** The branch this task will merge into, so the UI can name it. */
+  integrationBranch?: string
+  /** Commits landed on the integration branch that this task does not have. */
+  behindCount?: number
+  /** Of this task's changed files, the ones another task has since touched. */
+  behindFiles?: string[]
   /** A prepared-but-unlanded merge already exists for this task. */
   pendingCandidate?: { ref: string; diff: string } | null
   error?: string
@@ -191,6 +197,7 @@ export class TaskMerger {
         pendingCandidate = null
       }
     }
+    const integrationBranch = this.stateManager.getIntegrationBranch()
     return {
       taskGroupId,
       branchName: group.branchName ?? '',
@@ -198,8 +205,126 @@ export class TaskMerger {
       actualFiles: collected.actualFiles,
       conflictFiles: collected.conflictFiles,
       scopeOverlapFiles: this.scopeOverlapFiles(taskGroupId),
+      integrationBranch,
+      ...this.driftSince(taskGroupId, integrationBranch, collected.actualFiles),
       pendingCandidate,
     }
+  }
+
+  /** How far this task has fallen behind the integration branch, and which of
+   *  its own files another task has touched since it branched.
+   *
+   *  This is the "keep yourself updated" signal: a task that is behind but does
+   *  not yet conflict is cheap to fix now and expensive to fix after the merge
+   *  starts rewriting the same lines. */
+  private driftSince(taskGroupId: string, integrationBranch: string, actualFiles: string[]): { behindCount: number; behindFiles: string[] } {
+    try {
+      const branchName = this.stateManager.getTaskGroup(taskGroupId)?.branchName
+      if (!branchName) return { behindCount: 0, behindFiles: [] }
+      const behind = Number(this.execGit(['rev-list', '--count', `${branchName}..${integrationBranch}`]) || 0)
+      if (!behind || actualFiles.length === 0) return { behindCount: behind || 0, behindFiles: [] }
+      const mergeBase = this.execGit(['merge-base', branchName, integrationBranch])
+      const moved = this.execGit(['diff', '--name-only', `${mergeBase}..${integrationBranch}`]).split('\n').filter(Boolean)
+      const mine = new Set(actualFiles)
+      return { behindCount: behind, behindFiles: moved.filter(f => mine.has(f)) }
+    } catch {
+      return { behindCount: 0, behindFiles: [] }
+    }
+  }
+
+  /** Pull the integration branch into this task's own worktree so its next
+   *  merge is clean. Never touches the user's checkout, and never creates a
+   *  commit the merge gate would not also verify — on conflict it aborts and
+   *  reports the files. */
+  syncTaskOntoIntegration(taskGroupId: string): { ok: boolean; error?: string; mergedFiles?: string[] } {
+    const group = this.groupOrThrow(taskGroupId)
+    if (!group.worktreePath || !fs.existsSync(group.worktreePath)) {
+      return { ok: false, error: 'This task has no worktree to sync (it is running without isolation).' }
+    }
+    if (!group.branchName) return { ok: false, error: 'This task has no branch yet — launch it first.' }
+    const dirty = this.dirtyWorktreeError(group, 'sync')
+    if (dirty) return { ok: false, error: dirty }
+
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    const behind = Number(this.execGit(['rev-list', '--count', `${group.branchName}..${integrationBranch}`]) || 0)
+    if (behind === 0) return { ok: true, mergedFiles: [] }
+
+    const before = this.execGit(['diff', '--name-only'], group.worktreePath)
+    try {
+      this.execGit(['merge', integrationBranch, '--no-edit'], group.worktreePath)
+    } catch {
+      let conflicts: string[] = []
+      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U'], group.worktreePath).split('\n').filter(Boolean) } catch {}
+      try { this.execGit(['merge', '--abort'], group.worktreePath) } catch {}
+      return {
+        ok: false,
+        error: conflicts.length
+          ? `Syncing onto ${integrationBranch} conflicts in: ${conflicts.join(', ')}. Resolve them in the task worktree, or merge the task as-is.`
+          : `Could not sync onto ${integrationBranch}. Merge the task as-is, or resolve the task worktree first.`,
+      }
+    }
+    const after = this.execGit(['diff', '--name-only'], group.worktreePath)
+    const touched = new Set([...before.split('\n'), ...after.split('\n')].filter(Boolean))
+    return { ok: true, mergedFiles: [...touched] }
+  }
+
+  /** Fast-forward the user's own checked-out branch onto the integration branch.
+   *
+   *  Merges land on `<workspace>_agntspce` on purpose: the user keeps control of
+   *  when their branch moves. But with nothing bridging the two, merged work
+   *  stayed stranded on a branch the user had no reason to know about and the
+   *  folder they were looking at never changed — the exact "my file never
+   *  appeared" confusion this closes.
+   *
+   *  Deliberately a fast-forward only. If the user's branch has commits the
+   *  integration branch does not contain, this refuses and says so rather than
+   *  creating a merge commit in someone's checkout, and it never touches a
+   *  dirty tree. */
+  applyIntegrationToBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; upToDate?: boolean } {
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    let current = ''
+    try { current = this.execGit(['symbolic-ref', '--short', 'HEAD']) } catch {
+      return { ok: false, error: 'HEAD is detached, so there is no branch to apply onto. Check out a branch first.' }
+    }
+    const target = (targetBranch ?? current).trim()
+    if (!target) return { ok: false, error: 'Could not determine which branch to apply onto.' }
+    if (target === integrationBranch) {
+      return { ok: true, branch: target, files: [], upToDate: true }
+    }
+    // The user may be sitting on a task branch (in-repo mode checks one out).
+    // Moving that would rewrite their task, which is not what "apply" means.
+    if (target.startsWith('task/')) {
+      return { ok: false, error: `You are on the task branch ${target}. Check out your own branch first, then apply.` }
+    }
+    if (target !== current) {
+      return { ok: false, error: `${target} is not the branch you have checked out (you are on ${current}). Apply only affects the current branch.` }
+    }
+    const status = this.execGit(['status', '--porcelain'])
+    if (status) {
+      return { ok: false, error: `Your working tree has uncommitted changes, so ${integrationBranch} cannot be applied onto ${target} without risking them:\n${status.split('\n').filter(Boolean).join('\n')}\n\nCommit or stash them, then apply.` }
+    }
+    let integrationSha = ''
+    try { integrationSha = this.execGit(['rev-parse', integrationBranch]) } catch {
+      return { ok: false, error: `No ${integrationBranch} branch exists yet — merge a task first.` }
+    }
+    const targetSha = this.execGit(['rev-parse', target])
+    if (targetSha === integrationSha) return { ok: true, branch: target, files: [], upToDate: true }
+    // Fast-forward is only possible when the target is an ancestor of the
+    // integration branch. Anything else has diverged and needs a real merge.
+    const isAncestor = this.probeGit(['merge-base', '--is-ancestor', target, integrationBranch]) !== null
+    if (!isAncestor) {
+      return {
+        ok: false,
+        error: `${target} has commits that ${integrationBranch} does not, so it cannot be fast-forwarded. Merge ${integrationBranch} into ${target} yourself (or rebase) — AgntSpce will not rewrite your branch.`,
+      }
+    }
+    const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
+    try {
+      this.execGit(['merge', '--ff-only', integrationBranch])
+    } catch {
+      return { ok: false, error: `Could not fast-forward ${target} onto ${integrationBranch}.` }
+    }
+    return { ok: true, branch: target, files }
   }
 
   /** Read-only preview: clean check + diff stat + trial merge for conflicts. */
@@ -231,13 +356,34 @@ export class TaskMerger {
    *  Generated scaffolding (COLLAB.md, .task.json, AGENTS-TASK.md) is written
    *  by AgntSpce itself and is untracked in every task worktree, so counting it
    *  as "uncommitted changes" made every freshly launched task unmergeable. */
-  private dirtyWorktreeError(group: TaskGroupOverview): string | null {
+  private dirtyWorktreeError(group: TaskGroupOverview, action: 'merge' | 'sync' = 'merge'): string | null {
     if (!group.worktreePath || !fs.existsSync(group.worktreePath)) return null
     const wtStatus = this.execGit(['status', '--porcelain'], group.worktreePath)
     if (!wtStatus) return null
     const blocking = wtStatus.split('\n').filter(Boolean).filter(line => !isTaskScaffoldStatusLine(line))
     if (blocking.length === 0) return null
-    return `Worktree has uncommitted changes:\n${blocking.join('\n')}\n\nCommit them in the task worktree (or discard them) and merge again.`
+    // "Uncommitted changes" reads as a broken app. The useful framing is that
+    // there is simply nothing to merge yet, plus the exact command that fixes
+    // it - the agent almost never committed, and the user cannot see that from
+    // a git status line.
+    const untracked = blocking.filter(l => l.startsWith('??'))
+    const tracked = blocking.filter(l => !l.startsWith('??'))
+    const parts: string[] = []
+    if (untracked.length) parts.push(`New files, never committed:\n${untracked.join('\n')}`)
+    if (tracked.length) parts.push(`Modified, never committed:\n${tracked.join('\n')}`)
+    const headline = action === 'merge'
+      ? `This task's work has not been committed, so there is nothing to merge yet.`
+      : `This task's worktree has uncommitted work, so syncing the integration branch into it could clobber it.`
+    return [
+      headline,
+      ``,
+      ...parts,
+      ``,
+      `Ask the task's agent to commit its work, or commit it yourself:`,
+      `  cd ${group.worktreePath} && git add -A && git commit -m "wip: task output"`,
+      ``,
+      action === 'merge' ? `Then merge again.` : `Then sync again.`,
+    ].join('\n')
   }
 
   /** Execute a merge. Clean path auto-promotes; conflict path either resolves

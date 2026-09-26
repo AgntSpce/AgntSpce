@@ -133,7 +133,13 @@ export function createSchema(db: Database.Database): void {
       value TEXT NOT NULL
     );
 
-    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('integration_branch', 'agntspce-integration');
+    -- Left empty on purpose: an empty value means "not chosen yet", so
+    -- StateManager derives a per-workspace branch name (see
+    -- StateManager.defaultIntegrationBranchName). Seeding a fixed name here
+    -- would make the row always present and the derived name unreachable.
+    -- Existing databases keep whatever they already stored — we never rename
+    -- a branch that merged work may already live on.
+    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('integration_branch', '');
     INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('source_branch', '');
 
     CREATE TABLE IF NOT EXISTS task_summaries (

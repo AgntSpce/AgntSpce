@@ -284,6 +284,34 @@ export class WorktreeLifecycle {
     return slug
   }
 
+  /** True when `cwd` is inside a git working tree. Quiet by design: this is a
+   *  capability probe for folders that may not be repos at all, so it must not
+   *  print `fatal: not a git repository` into the host terminal. */
+  static isGitRepository(cwd: string): boolean {
+    try {
+      const out = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+        cwd, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'],
+      }).toString().trim()
+      return out === 'true'
+    } catch {
+      return false
+    }
+  }
+
+  /** True when the repo has at least one commit. `git worktree add -b` cannot
+   *  branch from an unborn HEAD, so a freshly `git init`-ed folder is a repo but
+   *  still cannot host worktrees. */
+  static hasCommits(cwd: string): boolean {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+        cwd, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   buildTaskBranchName(taskId: string, slug: string): string {
     const short = taskId.replace(/-/g, '').slice(0, 8)
     return `task/${slug}-${short}`

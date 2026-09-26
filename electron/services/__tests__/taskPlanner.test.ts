@@ -51,6 +51,27 @@ describe('taskPlanner', () => {
     expect(planner).toContain('scopeFiles')
   })
 
+  it('tells worktree agents that uncommitted work cannot be merged', () => {
+    // Verified failure: an agent wrote its output, never committed, and the
+    // merge had nothing to land. The prompt has to say so up front.
+    const p = buildAssignmentPrompt(CTX, AGENTS[0]!, 'DB slice', ['src/db.ts'], '', 'db done')
+    expect(p).toMatch(/VERSION CONTROL/i)
+    expect(p).toContain('git add -A && git commit')
+    expect(p).toMatch(/cannot be merged/i)
+    // It must also stop the agent from doing the merge itself.
+    expect(p).toMatch(/do NOT merge/i)
+  })
+
+  it('asks shared-folder agents to commit without implying a branch', () => {
+    const noneCtx: PlanContext = { ...CTX, worktreeMode: 'none', branchName: '' }
+    const p = buildAssignmentPrompt(noneCtx, AGENTS[0]!, 'DB slice', ['src/db.ts'], '', 'db done')
+    expect(p).toMatch(/VERSION CONTROL/i)
+    expect(p).toMatch(/git commit/i)
+    // No branch exists in this mode, so do not claim one.
+    expect(p).not.toContain('branch task/login-abc')
+    expect(p).toMatch(/shared workspace/i)
+  })
+
   it('parses fenced and raw JSON plans', () => {
     const body = '{"todoList": ["a"], "subtasks": [{"agentId": "claude", "title": "DB", "scopeFiles": ["src/db.ts"]}]}'
     expect(parsePlanJson('```json\n' + body + '\n```')?.subtasks).toHaveLength(1)

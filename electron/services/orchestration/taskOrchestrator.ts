@@ -95,6 +95,17 @@ export class TaskOrchestrator {
     }
   }
 
+  /** Integration branch name for the agent prompt, or undefined when this
+   *  workspace has no usable git repo — the prompt only mentions peer work when
+   *  there is a branch to merge from. */
+  private integrationBranchOrUndefined(): string | undefined {
+    try {
+      return this.sm.getIntegrationBranch() || undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /** Full launch: plan → worktree/branch → meta+seed → reserve → spawn.
    *  Only 'planning' (or 'paused' after a failed launch) groups launch. */
   async launchTask(taskGroupId: string): Promise<LaunchResult> {
@@ -115,7 +126,14 @@ export class TaskOrchestrator {
     let worktreePath: string | null = group.worktreePath
     let baseSha = group.baseSha
     if (!branchName) {
-      if (group.worktreeMode === 'in-repo') {
+      if (group.worktreeMode === 'none') {
+        // Explicitly accepted "no git" mode: agents run directly in the
+        // workspace folder. No branch, no worktree, nothing to merge — and
+        // crucially no empty directory pretending to be isolation.
+        branchName = null
+        worktreePath = null
+        baseSha = null
+      } else if (group.worktreeMode === 'in-repo') {
         branchName = wtl.deduplicateBranchName(wtl.buildTaskBranchName(group.id, slug))
         const ref = this.sourceRef()
         wtl.createTaskBranchInRepo(branchName, ref)
@@ -217,6 +235,7 @@ export class TaskOrchestrator {
         branchName: group.branchName ?? '',
         worktreePath: group.worktreePath ?? group.repoPath,
         worktreeMode: group.worktreeMode,
+        integrationBranch: this.integrationBranchOrUndefined(),
       },
       agents,
       this.repoTreeFor(group.worktreePath ?? group.repoPath),
@@ -357,7 +376,9 @@ export class TaskOrchestrator {
     const wtl = new WorktreeLifecycle(group.repoPath)
     const slug = WorktreeLifecycle.sanitizeTaskSlug(group.title)
     const branchName = group.branchName ?? wtl.buildTaskBranchName(group.id, slug)
-    const worktreePath = group.worktreePath ?? (group.worktreeMode === 'in-repo' ? group.repoPath : wtl.getTaskWorktreePath(group.id))
+    // 'none' has no worktree at all — the agent's cwd is the workspace folder.
+    const worktreePath = group.worktreePath
+      ?? (group.worktreeMode === 'in-repo' || group.worktreeMode === 'none' ? group.repoPath : wtl.getTaskWorktreePath(group.id))
     return planTask(
       {
         taskTitle: group.title,
@@ -365,6 +386,7 @@ export class TaskOrchestrator {
         branchName,
         worktreePath,
         worktreeMode: group.worktreeMode,
+        integrationBranch: this.integrationBranchOrUndefined(),
       },
       shells.map(s => ({ agentId: s.agentId, model: s.model, reasoning: s.reasoning, verbosity: s.verbosity })),
       this.repoTreeFor(group.repoPath),

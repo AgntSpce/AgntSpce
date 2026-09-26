@@ -40,10 +40,42 @@ export function CodeEditor({
   const onSaveRef = useRef(onSave)
   onSaveRef.current = onSave
   const isUpdatingPositionRef = useRef(false)
+  // The saved cursor position must only be replayed once per file, never on
+  // every `scrollPosition` update. `onScrollChange` reports *every* cursor move
+  // (each step of a mouse drag included), so re-applying it would call
+  // setPosition() on top of the user's own selection and collapse it — which
+  // is what made drag-select and the context menu's Select All do nothing.
+  const filePathRef = useRef(filePath)
+  filePathRef.current = filePath
+  const savedPositionRef = useRef(scrollPosition)
+  savedPositionRef.current = scrollPosition
+  const restoredPathRef = useRef<string | null>(null)
+
+  const restoreSavedPosition = useCallback(() => {
+    const position = savedPositionRef.current
+    const editorInstance = editorRef.current
+    if (!position || !editorInstance) return
+    restoredPathRef.current = filePathRef.current
+    isUpdatingPositionRef.current = true
+    editorInstance.revealPositionInCenter({
+      lineNumber: position.line,
+      column: position.column,
+    })
+    editorInstance.setPosition({
+      lineNumber: position.line,
+      column: position.column,
+    })
+    requestAnimationFrame(() => {
+      isUpdatingPositionRef.current = false
+    })
+  }, [])
 
   const handleEditorDidMount: OnMount = useCallback((editorInstance, monaco) => {
     editorRef.current = editorInstance
     monacoRef.current = monaco as unknown as typeof import('monaco-editor')
+    // Monaco mounts asynchronously, so the saved position is replayed here when
+    // a file is opened; the effect below covers a file change without a remount.
+    restoreSavedPosition()
 
     editorInstance.addAction({
       id: 'save-file',
@@ -62,7 +94,7 @@ export function CodeEditor({
         onScrollChange(e.position.lineNumber, e.position.column)
       }
     })
-  }, [onScrollChange])
+  }, [restoreSavedPosition, onScrollChange])
 
   const handleBeforeMount = useCallback(
     (monaco: any) => {
@@ -99,21 +131,9 @@ export function CodeEditor({
   )
 
   useEffect(() => {
-    if (editorRef.current && scrollPosition && !isUpdatingPositionRef.current) {
-      isUpdatingPositionRef.current = true
-      editorRef.current.revealPositionInCenter({
-        lineNumber: scrollPosition.line,
-        column: scrollPosition.column,
-      })
-      editorRef.current.setPosition({
-        lineNumber: scrollPosition.line,
-        column: scrollPosition.column,
-      })
-      requestAnimationFrame(() => {
-        isUpdatingPositionRef.current = false
-      })
-    }
-  }, [filePath, scrollPosition])
+    if (restoredPathRef.current === filePath) return
+    restoreSavedPosition()
+  }, [filePath, scrollPosition, restoreSavedPosition])
 
   const monacoLanguage = language === 'typescript' ? 'typescript' :
     language === 'javascript' ? 'javascript' :

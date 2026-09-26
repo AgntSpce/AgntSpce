@@ -34,6 +34,31 @@ afterEach(() => {
 })
 
 describe('v2 task groups', () => {
+  it('derives a per-workspace integration branch name, sanitized for git', () => {
+    const dir = tmpDir()
+    const sm = new StateManager(path.join(dir, 'c.db'), dir)
+    // The DB lives outside the repo here, so drive the name off repoPath.
+    expect(sm.defaultIntegrationBranchName()).toMatch(/^[A-Za-z0-9._-]+_agntspce$/)
+
+    const spaced = new StateManager(path.join(dir, 'a.db'), '/tmp/my app')
+    expect(spaced.defaultIntegrationBranchName()).toBe('my-app_agntspce')
+
+    const bare = new StateManager(path.join(dir, 'b.db'), '/tmp/repo.git')
+    expect(bare.defaultIntegrationBranchName()).toBe('repo_agntspce')
+
+    const unicode = new StateManager(path.join(dir, 'c.db'), '/tmp/проект')
+    expect(unicode.defaultIntegrationBranchName()).toBe('workspace_agntspce')
+  })
+
+  it('keeps an integration branch the workspace already recorded', () => {
+    const dir = tmpDir()
+    const sm = new StateManager(path.join(dir, 'c.db'), dir)
+    // Simulate a workspace that predates the derived name. Written straight to
+    // the config row because the rename must never touch an existing value.
+    sm.getDb().prepare("UPDATE workspace_config SET value = ? WHERE key = 'integration_branch'").run('agntspce-integration')
+    expect(sm.getIntegrationBranch()).toBe('agntspce-integration')
+  })
+
   it('creates, lists, and updates task groups pinned to one repo', () => {
     const dir = tmpDir()
     const sm = new StateManager(path.join(dir, 'c.db'), dir)

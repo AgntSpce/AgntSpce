@@ -95,7 +95,7 @@ export default function TaskChat({ taskGroupId, tasksApi, onClose }: TaskChatPro
             <h3 className="modal-title">{group?.title || 'Task'}</h3>
             {group && (
               <p className="modal-subtitle">
-                {group.status}{group.branchName ? ` · ${group.branchName}` : ''}{group.worktreeMode === 'in-repo' ? ' · in-repo' : ''}
+                {group.status}{group.branchName ? ` · ${group.branchName}` : ''}{group.worktreeMode === 'in-repo' ? ' · in-repo' : ''}{group.worktreeMode === 'none' ? ' · no isolation' : ''}
               </p>
             )}
           </div>
@@ -139,10 +139,17 @@ export default function TaskChat({ taskGroupId, tasksApi, onClose }: TaskChatPro
               {busy === 'close' ? 'Pausing…' : 'Pause agents'}
             </button>
           )}
-          {group && tasksApi.mergeTask && (group.status === 'active' || group.status === 'done') && (
+          {group && tasksApi.mergeTask && group.baseSha && (group.status === 'active' || group.status === 'done') && (
             <button className="modal-btn" disabled={!!busy} onClick={runMerge}>
               {busy === 'merge' ? 'Merging…' : 'Merge task'}
             </button>
+          )}
+          {group && !group.baseSha && (
+            <p className="task-chat-note">
+              {group.worktreeMode === 'none'
+                ? 'This task has no isolation: its agents work directly in the workspace folder, so there is no branch to merge.'
+                : 'This task has no branch to merge yet.'}
+            </p>
           )}
           {group && group.status !== 'done' && group.status !== 'abandoned' && (
             <button

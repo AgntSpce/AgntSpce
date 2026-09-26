@@ -146,3 +146,83 @@ describe('agntspce-collab CLI', () => {
     expect(sm.getCollabEvents(g.id).some(e => e.kind === 'progress')).toBe(true)
   })
 })
+
+// Regression: agents invoke `agntspce-collab` as an ordinary shell command,
+// because the Electron host prepends bin/ to the PTY PATH. The tests above all
+// call the .mjs by absolute path, so they passed while the command did not
+// exist for any real agent - no claims, no COLLAB.md progress, no done.
+describe('agntspce-collab launcher (resolved through PATH, as an agent does)', () => {
+  const BIN = path.join(__dirname, '..', '..', '..', 'bin')
+  const POSIX = path.join(BIN, 'agntspce-collab')
+  const WIN = path.join(BIN, 'agntspce-collab.cmd')
+
+  function setupRepo(): { repo: string; sm: StateManager; g: any; a: any; b: any } {
+    const repo = tmpDir()
+    initRepo(repo)
+    fs.mkdirSync(path.join(repo, '.agntspce'), { recursive: true })
+    const sm = new StateManager(path.join(repo, '.agntspce', 'coordinator.db'), repo)
+    const g = sm.createTaskGroup({ repoPath: repo, title: 'Launcher task' })
+    const a = sm.addSubTask({ taskGroupId: g.id, agentId: 'claude' })
+    const b = sm.addSubTask({ taskGroupId: g.id, agentId: 'opencode' })
+    return { repo, sm, g, a, b }
+  }
+
+  // Spawn the bare command name with bin/ on PATH - the same lookup a shell in
+  // the agent's PTY performs.
+  function runLauncher(repo: string, taskId: string, subtaskId: string, args: string[]): { code: number; out: string } {
+    const pathKey = Object.keys(process.env).find(k => /^path$/i.test(k)) || 'PATH'
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      [pathKey]: BIN + path.delimiter + (process.env[pathKey] || ''),
+      AGNTSPCE_TASK_ID: taskId,
+      AGNTSPCE_SUBTASK_ID: subtaskId,
+    }
+    const isWin = process.platform === 'win32'
+    try {
+      const out = execFileSync(isWin ? WIN : 'agntspce-collab', args, {
+        cwd: repo,
+        env,
+        encoding: 'utf-8',
+        timeout: 60000,
+        shell: isWin,
+      })
+      return { code: 0, out: String(out) }
+    } catch (e: any) {
+      return { code: e?.status ?? 1, out: String(e?.stdout || '') + String(e?.stderr || '') + String(e?.message || '') }
+    }
+  }
+
+  it('ships a launcher for the platform', () => {
+    const launcher = process.platform === 'win32' ? WIN : POSIX
+    expect(fs.existsSync(launcher)).toBe(true)
+    if (process.platform !== 'win32') {
+      // Must be executable, or the shell reports "permission denied".
+      expect(fs.statSync(POSIX).mode & 0o111).toBeGreaterThan(0)
+    }
+  })
+
+  it('posts progress through the launcher and regenerates COLLAB.md', () => {
+    const { repo, sm, g, a } = setupRepo()
+    const r = runLauncher(repo, g.id, a.id, ['post', 'touched schema via launcher'])
+    expect(r.code).toBe(0)
+    expect(sm.getCollabEvents(g.id).some(e => e.kind === 'progress')).toBe(true)
+    const md = fs.readFileSync(path.join(repo, 'COLLAB.md'), 'utf-8')
+    expect(md).toContain('touched schema via launcher')
+  })
+
+  it('serialises file claims across launcher invocations', () => {
+    const { repo, sm, g, a, b } = setupRepo()
+    expect(runLauncher(repo, g.id, a.id, ['claim', 'src/y.ts']).code).toBe(0)
+    const blocked = runLauncher(repo, g.id, b.id, ['claim', 'src/y.ts'])
+    expect(blocked.code).toBe(1)
+    expect(blocked.out).toMatch(/claimed by/i)
+    expect(sm.getFileClaimHolder(g.id, 'src/y.ts')?.subtaskId).toBe(a.id)
+  })
+
+  it('marks a subtask done through the launcher', () => {
+    const { repo, sm, g, a } = setupRepo()
+    const r = runLauncher(repo, g.id, a.id, ['done', 'finished via launcher'])
+    expect(r.code).toBe(0)
+    expect(sm.getSubTask(a.id)?.status).toBe('done')
+  })
+})

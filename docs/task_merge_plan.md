@@ -73,7 +73,27 @@ We keep ours and fix the holes.
    with `TASK_SCAFFOLD_FILES` + `isTaskScaffoldStatusLine()` in
    `worktreeLifecycle.ts`; the gate now ignores only those, and still refuses on
    real edits. Covered by two tests.
-2. **Merge dialog hung on "Checking what would land…".** `TaskMergeDialog` used
+2. **Task creation in a non-git folder was noisy and confusing.** A plain folder
+   has no integration branch, so `getIntegrationBranchSha()` returned `''` (it
+   *returns* empty rather than throwing, so the caller's `try/catch` did
+   nothing), which reached `git rev-parse ''` and produced the meaningless
+   `git rev-parse  failed: empty revision argument`. Four `fatal: not a git
+   repository` lines leaked to the terminal because `StateManager`'s git calls
+   didn't pipe stderr. Fixed by:
+   - `WorktreeLifecycle.isGitRepository()` — a quiet capability probe; both
+     creation paths (`create-task-group`, `group-sessions`) now skip git entirely
+     for a non-repo folder and log one explanatory line,
+   - a private `StateManager.gitOut()` that pipes stderr for every git call,
+   - `initIntegrationBranch()` no longer *caches* a branch git never created —
+     previously it persisted `agntspce-integration` into `workspace_config` even
+     on failure, so a folder that was `git init`-ed later kept failing against a
+     stale row.
+3. **Merge was offered for tasks that can never merge.** A plain-dir task has
+   `baseSha = null` and no branch, but it does get a `branchName` string, so the
+   new "Merge changes" button and `TaskChat`'s "Merge task" both appeared and
+   then failed with raw git errors. Both now require `baseSha`, and `TaskChat`
+   says why.
+4. **Merge dialog hung on "Checking what would land…".** `TaskMergeDialog` used
    a `useRef` "am I mounted" guard. Under `StrictMode` (`src/main.tsx` enables
    it) React runs effect → cleanup → effect, so the cleanup latched the flag
    `false` for the life of the instance and every response was dropped —

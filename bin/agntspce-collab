@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# agntspce-collab - Collaboration CLI launcher (POSIX)
+#
+# Agents call this as a plain shell command: the Electron host prepends bin/ to
+# the PTY PATH, so this launcher is what makes `agntspce-collab` resolvable.
+# Without it the command does not exist, and agents silently skip
+# claim/post/done - no file claims, no COLLAB.md progress, and subtasks that
+# never complete.
+#
+# The CLI is written against node:sqlite (Node >= 22.5) rather than
+# better-sqlite3, because the repo's better-sqlite3 binary targets Electron's
+# ABI and cannot load under the system node agents run. So we prefer the
+# system node and only fall back to Electron's binary (via
+# AGNTSPCE_NODE_PATH + ELECTRON_RUN_AS_NODE) when no usable system node exists.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLI="$SCRIPT_DIR/agntspce-collab.mjs"
+
+if [ ! -f "$CLI" ]; then
+  echo "agntspce-collab: missing $CLI" >&2
+  exit 127
+fi
+
+# Makes the Electron binary behave as plain Node. Harmless for real node.
+export ELECTRON_RUN_AS_NODE=1
+
+# A node that can actually load node:sqlite?
+has_sqlite() {
+  [ -n "$1" ] || return 1
+  command -v "$1" >/dev/null 2>&1 || return 1
+  "$1" -e 'import("node:sqlite").then(()=>process.exit(0)).catch(()=>process.exit(1))' >/dev/null 2>&1
+}
+
+# bin/ is on PATH, so a hypothetical bin/node wrapper would resolve to us and
+# recurse. Reject any candidate living in this directory.
+not_self() {
+  case "$1" in
+    "$SCRIPT_DIR"/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+NODE=""
+if command -v node >/dev/null 2>&1; then
+  CANDIDATE="$(command -v node)"
+  if not_self "$CANDIDATE" && has_sqlite "$CANDIDATE"; then
+    NODE="$CANDIDATE"
+  fi
+fi
+
+if [ -z "$NODE" ] && [ -n "${AGNTSPCE_NODE_PATH:-}" ] && [ -x "${AGNTSPCE_NODE_PATH}" ]; then
+  if has_sqlite "$AGNTSPCE_NODE_PATH"; then
+    NODE="$AGNTSPCE_NODE_PATH"
+  fi
+fi
+
+if [ -z "$NODE" ]; then
+  # Last resort: a node without node:sqlite still beats no output at all; the
+  # CLI itself prints a clear "need Node >= 22.5" message.
+  if command -v node >/dev/null 2>&1; then
+    NODE="$(command -v node)"
+  else
+    echo "agntspce-collab: no Node.js found (need Node >= 22.5 for node:sqlite)" >&2
+    exit 127
+  fi
+fi
+
+exec "$NODE" "$CLI" "$@"

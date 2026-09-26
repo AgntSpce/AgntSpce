@@ -91,7 +91,7 @@ export interface CreateTaskGroupInput {
   repoPath?: string
   title?: string
   userGoal?: string
-  worktreeMode?: 'worktree' | 'in-repo'
+  worktreeMode?: 'worktree' | 'in-repo' | 'none'
   agents?: { agentId: string; model?: string; reasoning?: string; verbosity?: string }[]
 }
 
@@ -153,7 +153,7 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
         repoPath,
         title,
         userGoal,
-        worktreeMode: data.worktreeMode === 'in-repo' ? 'in-repo' : 'worktree',
+        worktreeMode: data.worktreeMode === 'in-repo' ? 'in-repo' : data.worktreeMode === 'none' ? 'none' : 'worktree',
       })
       const subtasks = agents.map(a =>
         sm.addSubTask({
@@ -171,31 +171,60 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
       if (callback) callback({ ok: true, taskGroup: group, subtasks })
       setImmediate(() => {
         try {
-          const setup = (worktreePath: string, branchName: string, baseSha: string | null) => {
-            sm.updateTaskGroup(group.id, { branchName, worktreePath, baseSha, status: 'active' })
-            writeTaskMetaFile(worktreePath, {
+          const mode = group.worktreeMode
+          // Writes the task's metadata and briefing into `dir`. For 'none' that
+          // is the workspace folder itself, so the agent sees them in its cwd.
+          const setup = (dir: string, branchName: string | null, baseSha: string | null) => {
+            sm.updateTaskGroup(group.id, { branchName, worktreePath: dir, baseSha, status: 'active' })
+            writeTaskMetaFile(dir, {
               taskGroupId: group.id,
-              branchName,
+              branchName: branchName ?? '',
               baseSha,
-              worktreeMode: 'worktree',
+              worktreeMode: mode,
               todoList: userGoal ? [userGoal] : [title],
               subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
             })
             syncGroupFiles(sm, group.id, repoPath)
           }
+          if (mode === 'none') {
+            // User explicitly accepted running without git: no worktree, no
+            // branch, no merge, and agents share the workspace folder.
+            sm.updateTaskGroup(group.id, { worktreePath: null, status: 'active' })
+            writeTaskMetaFile(repoPath, {
+              taskGroupId: group.id,
+              branchName: '',
+              baseSha: null,
+              worktreeMode: mode,
+              todoList: userGoal ? [userGoal] : [title],
+              subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
+            })
+            syncGroupFiles(sm, group.id, repoPath)
+            ctx.io.emit('task-groups-changed', { workspaceId: ws.id })
+            return
+          }
           const wtl = new WorktreeLifecycle(repoPath)
           const slug = WorktreeLifecycle.sanitizeTaskSlug(title)
-          try {
-            let ref = 'HEAD'
-            try { ref = sm.getIntegrationBranchSha() } catch {}
-            const res = wtl.createTaskWorktree(group.id, slug, ref)
-            setup(res.worktreePath, res.branchName, res.branchPoint)
-          } catch (e: any) {
-            console.warn('[tasks] git worktree setup failed, trying plain dir:', e?.message || e)
+          // Only reached for a real git repo now. A repo with no commit still
+          // cannot be branched from, so fall back to the shared checkout rather
+          // than an empty directory pretending to be isolation.
+          const inRepoFallback = () => {
             const branchName = wtl.deduplicateBranchName(wtl.buildTaskBranchName(group.id, slug))
-            const dir = wtl.getTaskWorktreePath(group.id)
-            fs.mkdirSync(dir, { recursive: true })
-            setup(dir, branchName, null)
+            setup(repoPath, branchName, null)
+          }
+          if (!WorktreeLifecycle.isGitRepository(repoPath)) {
+            console.warn(`[tasks] ${repoPath} is not a git repository — task runs in the workspace folder (no worktree, no merge)`)
+            inRepoFallback()
+          } else if (!WorktreeLifecycle.hasCommits(repoPath)) {
+            console.warn(`[tasks] ${repoPath} has no commits yet — task runs in the workspace folder (no worktree, no merge)`)
+            inRepoFallback()
+          } else {
+            try {
+              const res = wtl.createTaskWorktree(group.id, slug, sm.getIntegrationBranchSha() || 'HEAD')
+              setup(res.worktreePath, res.branchName, res.branchPoint)
+            } catch (e: any) {
+              console.warn('[tasks] git worktree setup failed, falling back to the shared folder:', e?.message || e)
+              inRepoFallback()
+            }
           }
           ctx.io.emit('task-groups-changed', { workspaceId: ws.id })
         } catch (e: any) {
@@ -321,6 +350,29 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     }
   })
 
+  socket.on('sync-task-branch', async ({ taskGroupId }: { taskGroupId: string }, callback?: Function) => {
+    try {
+      const result = buildMerger(taskGroupId).syncTaskOntoIntegration(taskGroupId)
+      if (callback) callback({ ok: result.ok, error: result.error, mergedFiles: result.mergedFiles })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  // Fast-forward the user's checked-out branch onto the integration branch, so
+  // merged task work actually shows up in the folder they are looking at.
+  socket.on('apply-task-branch', async ({ branchName }: { branchName?: string } = {}, callback?: Function) => {
+    try {
+      const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      const result = new TaskMerger(sm.getRepoPath(), new WorktreeLifecycle(sm.getRepoPath()), sm)
+        .applyIntegrationToBranch(branchName)
+      if (callback) callback(result)
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
   socket.on('merge-all-tasks', async ({ taskGroupIds }: { taskGroupIds: string[] }, callback?: Function) => {
     try {
       const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
@@ -408,21 +460,30 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
       // worktree, meta file, and shared briefing files.
       setImmediate(() => {
         try {
-          let ref = 'HEAD'
-          try { ref = sm.getIntegrationBranchSha() } catch {}
           const wtl = new WorktreeLifecycle(repoPath)
           const slug = WorktreeLifecycle.sanitizeTaskSlug(group.title)
           let branchName = sm.getTaskGroup(group.id)?.branchName ?? null
           let worktreePath: string | null = sm.getTaskGroup(group.id)?.worktreePath ?? null
           let baseSha: string | null = sm.getTaskGroup(group.id)?.baseSha ?? null
           if (!branchName) {
-            try {
-              const res = wtl.createTaskWorktree(group.id, slug, ref)
-              branchName = res.branchName
-              worktreePath = res.worktreePath
-              baseSha = res.branchPoint
-            } catch {
-              // Non-git folder fallback: plain isolated directory.
+            // Non-git folder: skip the worktree attempt entirely (see the
+            // create-task-group handler) and use a plain isolated directory.
+            if (!WorktreeLifecycle.isGitRepository(repoPath)) {
+              console.warn(`[tasks] ${repoPath} is not a git repository — grouped agents run in a plain folder (no worktree, no merge)`)
+            } else {
+              try {
+                const res = wtl.createTaskWorktree(group.id, slug, sm.getIntegrationBranchSha() || 'HEAD')
+                branchName = res.branchName
+                worktreePath = res.worktreePath
+                baseSha = res.branchPoint
+              } catch {
+                // Git repo, but worktree setup failed: plain isolated directory.
+                branchName = wtl.deduplicateBranchName(wtl.buildTaskBranchName(group.id, slug))
+                worktreePath = wtl.getTaskWorktreePath(group.id)
+                try { fs.mkdirSync(worktreePath, { recursive: true }) } catch {}
+              }
+            }
+            if (!branchName) {
               branchName = wtl.deduplicateBranchName(wtl.buildTaskBranchName(group.id, slug))
               worktreePath = wtl.getTaskWorktreePath(group.id)
               try { fs.mkdirSync(worktreePath, { recursive: true }) } catch {}

@@ -5,6 +5,7 @@ import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import Database from 'better-sqlite3'
 import { AgentOrchestrator } from '../agentOrchestrator'
+import { WorktreeLifecycle } from '../orchestration/worktreeLifecycle'
 import { registerTaskHandlers } from '../../server/handlers/tasks'
 
 const tmpDirs: string[] = []
@@ -90,6 +91,81 @@ describe('create-task-group against a pre-migration DB file', () => {
     const group = await waitForWorktree(handlers, res.taskGroup.id)
     expect(group.branchName).toMatch(/^task\//)
     expect(group.status).toBe('active')
+  })
+})
+
+describe('create-task-group in a folder that is not a git repository', () => {
+  it('creates a plain-dir task quietly, with no branch and no base sha', async () => {
+    const dir = tmpDir()
+    // Deliberately NOT git init — this is a plain folder workspace.
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'hello\n')
+
+    const { handlers } = setupHandler(dir)
+    const res = await call(handlers, 'create-task-group', {
+      title: 'No git here',
+      userGoal: 'work without a repo',
+      worktreeMode: 'worktree',
+      agents: [],
+      workspaceId: 'ws1',
+    })
+    expect(res.ok).toBe(true)
+
+    // The slow setup runs after the ack; poll for the deferred write.
+    const group = await (async () => {
+      const deadline = Date.now() + 10000
+      for (;;) {
+        const listed = await call(handlers, 'list-task-groups', { workspaceId: 'ws1' })
+        const g = (listed.taskGroups || []).find((x: any) => x.id === res.taskGroup.id)
+        if (g?.worktreePath) return g
+        if (Date.now() > deadline) throw new Error('timed out waiting for task setup')
+        await new Promise(r => setTimeout(r, 50))
+      }
+    })()
+
+    // Plain-dir fallback: a directory exists, but there is nothing to merge.
+    expect(group.worktreePath).toBeTruthy()
+    expect(fs.existsSync(group.worktreePath)).toBe(true)
+    expect(group.baseSha).toBeNull()
+    // No bogus integration branch is remembered for a folder git never saw.
+    expect(WorktreeLifecycle.isGitRepository(dir)).toBe(false)
+  })
+})
+
+describe('create-task-group in worktreeMode "none" (accepted no-git mode)', () => {
+  it('runs the task in the workspace folder with no branch, no worktree, no merge', async () => {
+    const dir = tmpDir()
+    fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1)\n')
+
+    const { handlers } = setupHandler(dir)
+    const res = await call(handlers, 'create-task-group', {
+      title: 'No isolation',
+      userGoal: 'just work here',
+      worktreeMode: 'none',
+      agents: [],
+      workspaceId: 'ws1',
+    })
+    expect(res.ok).toBe(true)
+    expect(res.taskGroup.worktreeMode).toBe('none')
+
+    const group = await (async () => {
+      const deadline = Date.now() + 10000
+      for (;;) {
+        const listed = await call(handlers, 'list-task-groups', { workspaceId: 'ws1' })
+        const g = (listed.taskGroups || []).find((x: any) => x.id === res.taskGroup.id)
+        if (g && g.status === 'active') return g
+        if (Date.now() > deadline) throw new Error('timed out waiting for task setup')
+        await new Promise(r => setTimeout(r, 50))
+      }
+    })()
+
+    // No isolation means no branch, no worktree path and no base to merge
+    // against — and crucially no empty directory pretending to be a worktree.
+    expect(group.branchName).toBeNull()
+    expect(group.worktreePath).toBeNull()
+    expect(group.baseSha).toBeNull()
+    expect(fs.existsSync(path.join(dir, '.agntspce', 'tasks', res.taskGroup.id, '.task.json'))).toBe(false)
+    // The agent's cwd is the workspace folder, so its briefing lives there.
+    expect(fs.existsSync(path.join(dir, 'COLLAB.md'))).toBe(true)
   })
 })
 

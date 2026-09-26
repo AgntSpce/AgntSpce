@@ -78,6 +78,9 @@ interface TaskAgentRowProps {
   /** True once the agent was given a prompt AND finished that run — the only
    *  condition that shows the green check mark. */
   hasCompletedRun: boolean
+  /** True when the agent's own title says it needs input/permission (Gemini ✋,
+   *  "action required", …) — shows the amber attention state. */
+  needsAttention: boolean
   getTokenUsage?: (sessionId?: string) => Promise<any>
   onSelectSession?: (sessionId: string) => void
   /** True when this row's task is the one currently open in the main view. */
@@ -104,6 +107,7 @@ function TaskAgentRow({
   lastPrompt,
   lastLineTs,
   hasCompletedRun,
+  needsAttention,
   getTokenUsage,
   onSelectSession,
   isInOpenTask,
@@ -125,6 +129,7 @@ function TaskAgentRow({
   let state: 'working' | 'waiting' | 'done' | 'blocked' | 'idle' = 'idle'
   if (sessionStatus === 'exited' || member.status === 'failed') state = 'blocked'
   else if (isWorking) state = 'working'
+  else if (needsAttention) state = 'waiting'
   else if (hasCompletedRun) state = 'done'
   else if (sessionStatus === 'waiting') state = 'waiting'
 

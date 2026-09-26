@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { io, Socket } from 'socket.io-client'
-import type { WorkspaceInfo, SessionState, TerminalOutput, StatusChange, BranchChange, WorkspaceChange, AgentConfig, AgentStartConfig, FilterEvent, FilterStats, CommandEvent, ExecutionEvent, ChatModelInfo, ChatThread, ChatAttachment, TaskGroupInfo, CreateTaskGroupInput } from '../types'
+import type { WorkspaceInfo, SessionState, TerminalOutput, StatusChange, BranchChange, WorkspaceChange, AgentConfig, AgentStartConfig, FilterEvent, FilterStats, CommandEvent, ExecutionEvent, ChatModelInfo, ChatThread, ChatAttachment, TaskGroupInfo, CreateTaskGroupInput, AgentStatusEntry } from '../types'
 import { SERVER_URL, getServerAuthToken, apiHeaders } from '../utils/serverAuth'
 
 export type CompressionMode = 'lite' | 'medium' | 'extreme'
@@ -56,6 +56,9 @@ interface UseSocketReturn {
   activeWorkspace: WorkspaceInfo | null
   onTerminalOutput: (cb: (data: TerminalOutput) => void) => () => void
   onSessionResumed: (cb: (data: { sessionId: string }) => void) => () => void
+  /** Structured agent lifecycle status pushed from agent hooks. Preferred over
+   *  the terminal-scraped fallback for the agent rows' status line. */
+  onAgentStatus: (cb: (data: { entry: AgentStatusEntry }) => void) => () => void
   onStatusChange: (cb: (data: StatusChange) => void) => () => void
   onBranchChange: (cb: (data: BranchChange) => void) => () => void
   onWorkspaceChanged: (cb: (data: WorkspaceChange) => void) => () => void
@@ -82,6 +85,10 @@ interface UseSocketReturn {
   mergeTask: (taskGroupId: string, autoResolve?: boolean) => Promise<any>
   confirmTaskMerge: (taskGroupId: string) => Promise<any>
   mergeAllTasks: (taskGroupIds: string[]) => Promise<any>
+  checkGitRepo: (workspaceId?: string, repoPath?: string) => Promise<any>
+  initGitRepo: (workspaceId?: string, repoPath?: string) => Promise<any>
+  syncTaskBranch: (taskGroupId: string) => Promise<any>
+  applyTaskBranch: (branchName?: string) => Promise<any>
   groupSessions: (sessionIds: string[], title?: string) => Promise<any>
   joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
   ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
@@ -189,6 +196,7 @@ export function useSocket(): UseSocketReturn {
   const sessionCompressionCbs = useRef<((sessionId: string, mode: CompressionMode) => void)[]>([])
   const terminalOutputCbs = useRef<((data: TerminalOutput) => void)[]>([])
   const sessionResumedCbs = useRef<((data: { sessionId: string }) => void)[]>([])
+  const agentStatusCbs = useRef<((data: { entry: AgentStatusEntry }) => void)[]>([])
   const lastStatsFetchAt = useRef(0)
   const statusChangeCbs = useRef<((data: StatusChange) => void)[]>([])
   const branchChangeCbs = useRef<((data: BranchChange) => void)[]>([])
@@ -439,6 +447,12 @@ socket.emit('get-cumulative-stats', {})
       }
     })
 
+    socket.on('agent-status', (data: { entry: AgentStatusEntry }) => {
+      for (const cb of agentStatusCbs.current) {
+        try { cb({ entry: data.entry }) } catch {}
+      }
+    })
+
     socket.on('error', (err: any) => {
       console.error('[socket error]', err?.message || err)
     })
@@ -558,6 +572,13 @@ socket.emit('get-cumulative-stats', {})
     sessionResumedCbs.current.push(cb)
     return () => {
       sessionResumedCbs.current = sessionResumedCbs.current.filter(c => c !== cb)
+    }
+  }, [])
+
+  const onAgentStatus = useCallback((cb: (data: { entry: AgentStatusEntry }) => void) => {
+    agentStatusCbs.current.push(cb)
+    return () => {
+      agentStatusCbs.current = agentStatusCbs.current.filter(c => c !== cb)
     }
   }, [])
 
@@ -762,6 +783,24 @@ socket.emit('get-cumulative-stats', {})
 
   const mergeAllTasks = useCallback((taskGroupIds: string[]): Promise<any> => {
     return emitAck('merge-all-tasks', { taskGroupIds }, 1800000)
+  }, [emitAck])
+
+  const checkGitRepo = useCallback((workspaceId?: string, repoPath?: string): Promise<any> => {
+    return emitAck('check-git-repo', { workspaceId, repoPath }, 30000)
+  }, [emitAck])
+
+  const initGitRepo = useCallback((workspaceId?: string, repoPath?: string): Promise<any> => {
+    return emitAck('init-git-repo', { workspaceId, repoPath }, 180000)
+  }, [emitAck])
+
+  const syncTaskBranch = useCallback((taskGroupId: string): Promise<any> => {
+    return emitAck('sync-task-branch', { taskGroupId }, 300000)
+  }, [emitAck])
+
+  // Fast-forward the user's checked-out branch onto the integration branch, so
+  // merged task work lands in the folder they are looking at.
+  const applyTaskBranch = useCallback((branchName?: string): Promise<any> => {
+    return emitAck('apply-task-branch', { branchName }, 300000)
   }, [emitAck])
 
   const groupSessions = useCallback((sessionIds: string[], title?: string): Promise<any> => {
@@ -1117,6 +1156,7 @@ socket.emit('get-cumulative-stats', {})
     activeWorkspace,
     onTerminalOutput,
     onSessionResumed,
+    onAgentStatus,
     onStatusChange,
     onBranchChange,
     onWorkspaceChanged,
@@ -1143,6 +1183,10 @@ socket.emit('get-cumulative-stats', {})
     mergeTask,
     confirmTaskMerge,
     mergeAllTasks,
+    checkGitRepo,
+    initGitRepo,
+    syncTaskBranch,
+    applyTaskBranch,
     groupSessions,
     joinGroup,
     ungroupSession,

@@ -49,6 +49,17 @@ export interface StatusChange {
   status: string
 }
 
+/** Mirrors AgentStatusEntry in electron/services/agentStatus.ts. */
+export interface AgentStatusEntry {
+  sessionId: string
+  state: 'idle' | 'working' | 'permission' | 'done'
+  prompt: string
+  toolName: string
+  toolInput: string
+  lastAssistantMessage: string
+  updatedAt: number
+}
+
 export interface BranchChange {
   sessionId: string
   branch: string
@@ -191,7 +202,7 @@ export interface TaskGroupInfo {
   title: string
   userGoal: string
   status: string
-  worktreeMode: 'worktree' | 'in-repo'
+  worktreeMode: 'worktree' | 'in-repo' | 'none'
   branchName: string | null
   worktreePath: string | null
   baseSha: string | null
@@ -234,7 +245,11 @@ export interface CreateTaskGroupInput {
   repoPath?: string
   title: string
   userGoal: string
-  worktreeMode: 'worktree' | 'in-repo'
+  /** 'worktree' = isolated git worktree (needs a git repo with a commit).
+   *  'in-repo'  = branch in the shared checkout. 'none' = no git at all:
+   *  agents run directly in the workspace folder, with no isolation and
+   *  nothing to merge. */
+  worktreeMode: 'worktree' | 'in-repo' | 'none'
   agents: TaskAgentSelection[]
 }
 

@@ -55,7 +55,11 @@ describe('task pipeline e2e', () => {
 
     const sm = (() => {
       fs.mkdirSync(path.join(repo, '.agntspce'), { recursive: true })
-      return new StateManager(path.join(repo, '.agntspce', 'coordinator.db'), repo)
+      const m = new StateManager(path.join(repo, '.agntspce', 'coordinator.db'), repo)
+      // Pin the integration branch name for this test's assertions; the derived
+      // per-workspace name is covered in taskGroups.test.ts.
+      m.getDb().prepare("UPDATE workspace_config SET value = ? WHERE key = 'integration_branch'").run('agntspce-integration')
+      return m
     })()
     const created = sm.createTaskGroup({ workspaceId: 'ws1', repoPath: repo, title: 'Login Page', userGoal: 'login with db' })
     const dbSub = sm.addSubTask({ taskGroupId: created.id, agentId: 'claude', model: 'opus' })

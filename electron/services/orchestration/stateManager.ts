@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import * as path from 'node:path'
 import Database from 'better-sqlite3'
 import { v4 as uuid } from 'uuid'
 import { createSchema, migrateSchema } from './schema'
@@ -123,7 +124,7 @@ export interface TaskGroupRow {
   title: string
   user_goal: string
   status: 'planning' | 'active' | 'paused' | 'merging' | 'done' | 'abandoned'
-  worktree_mode: 'worktree' | 'in-repo'
+  worktree_mode: 'worktree' | 'in-repo' | 'none'
   branch_name: string | null
   worktree_path: string | null
   base_sha: string | null
@@ -141,7 +142,7 @@ export interface TaskGroupOverview {
   title: string
   userGoal: string
   status: string
-  worktreeMode: 'worktree' | 'in-repo'
+  worktreeMode: 'worktree' | 'in-repo' | 'none'
   branchName: string | null
   worktreePath: string | null
   baseSha: string | null
@@ -348,6 +349,17 @@ export class StateManager {
     return this.initIntegrationBranch()
   }
 
+  /** Run git with piped stdio. These are best-effort capability probes (a
+   *  workspace folder may not be a repo at all), so they must never print
+   *  `fatal: not a git repository` into the host terminal — the message is
+   *  folded into the thrown error instead. */
+  private gitOut(args: string[], timeout = 5000): string {
+    return execFileSync('git', args, {
+      cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).toString().trim()
+  }
+
   getSourceBranch(): string {
     const row = this.db.prepare("SELECT value FROM workspace_config WHERE key = 'source_branch'").get() as { value: string } | undefined
     if (row?.value) return row.value
@@ -356,7 +368,7 @@ export class StateManager {
 
   private detectSourceBranch(): string {
     try {
-      const head = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 }).trim()
+      const head = this.gitOut(['symbolic-ref', '--short', 'HEAD'])
       this.db.prepare("UPDATE workspace_config SET value = ? WHERE key = 'source_branch'").run(head)
       return head
     } catch {
@@ -364,44 +376,71 @@ export class StateManager {
     }
   }
 
+  /** The branch every task in this workspace merges into.
+   *
+   *  Named after the workspace folder so the user can see it in `git branch`
+   *  and merge it into their own branch themselves — an internal fixed name
+   *  gave them no way to know it existed. Sanitized to a valid git ref: no
+   *  spaces, no `..`, no leading/trailing punctuation. Unicode-only names
+   *  collapse to the `workspace` fallback rather than producing a ref that is
+   *  awkward in a terminal. */
+  defaultIntegrationBranchName(): string {
+    const base = path.basename(this.workspaceRepoPath.replace(/[\\/]+$/, '')).replace(/\.git$/i, '')
+    const sanitized = base
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[.-]+/, '')
+      .replace(/[.-]+$/, '')
+      .slice(0, 48)
+    return `${sanitized || 'workspace'}_agntspce`
+  }
+
   initIntegrationBranch(): string {
-    const integrationBranch = 'agntspce-integration'
+    const integrationBranch = this.defaultIntegrationBranchName()
+    let exists = false
     try {
-      execFileSync('git', ['rev-parse', '--verify', integrationBranch], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 })
+      this.gitOut(['rev-parse', '--verify', integrationBranch])
+      exists = true
     } catch {
       const sourceBranch = this.getSourceBranch()
       try {
-        const sourceSha = execFileSync('git', ['rev-parse', sourceBranch], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 }).trim()
-        execFileSync('git', ['branch', integrationBranch, sourceSha], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 })
+        const sourceSha = this.gitOut(['rev-parse', sourceBranch])
+        this.gitOut(['branch', integrationBranch, sourceSha])
+        exists = true
       } catch {}
     }
-    this.db.prepare("UPDATE workspace_config SET value = ? WHERE key = 'integration_branch'").run(integrationBranch)
+    // Only remember the branch once git actually has it. Caching a branch that
+    // was never created leaves a stale config row that keeps failing — even
+    // after the folder is `git init`-ed later.
+    if (exists) {
+      this.db.prepare("UPDATE workspace_config SET value = ? WHERE key = 'integration_branch'").run(integrationBranch)
+    }
     return integrationBranch
   }
 
   getIntegrationBranchSha(): string {
     const branch = this.getIntegrationBranch()
     try {
-      return execFileSync('git', ['rev-parse', branch], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 }).trim()
+      return this.gitOut(['rev-parse', branch])
     } catch {
       return ''
     }
   }
 
   configureIntegrationBranch(branch: string): string {
-    const sha = execFileSync('git', ['rev-parse', branch], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 }).trim()
+    const sha = this.gitOut(['rev-parse', branch])
     this.db.prepare("UPDATE workspace_config SET value = ? WHERE key = 'integration_branch'").run(branch)
 
-    const existing = execFileSync('git', ['rev-parse', '--verify', branch], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 }).trim()
+    const existing = this.gitOut(['rev-parse', '--verify', branch])
     if (!existing) {
-      execFileSync('git', ['branch', branch, sha], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 })
+      this.gitOut(['branch', branch, sha])
     }
     return sha
   }
 
   validateRef(ref: string): string | null {
     try {
-      return execFileSync('git', ['rev-parse', '--verify', ref], { cwd: this.workspaceRepoPath, encoding: 'utf-8', timeout: 5000 }).trim()
+      return this.gitOut(['rev-parse', '--verify', ref])
     } catch {
       return null
     }
@@ -662,7 +701,6 @@ export class StateManager {
       agentId: row.agent_id,
       createdAt: row.created_at,
       completedAt: row.completed_at,
-      failureCount: row.failure_count,
     }
   }
 
@@ -705,7 +743,7 @@ export class StateManager {
     repoPath: string
     title: string
     userGoal?: string
-    worktreeMode?: 'worktree' | 'in-repo'
+    worktreeMode?: 'worktree' | 'in-repo' | 'none'
   }): TaskGroupOverview {
     const id = uuid()
     const now = Date.now()
