@@ -9,6 +9,7 @@ import { createRequire } from 'node:module'
 
 const _require = createRequire(import.meta.url)
 import { AGENT_TYPES, type Session, type SessionConfig, type SavedSessionData, type Worktree, type Workspace } from './types'
+import { SERVER_PORT } from '../config'
 import { StatusDetector } from './statusDetector'
 import { GitHelper } from './gitHelper'
 import { WorktreeHelper } from './worktreeHelper'
@@ -1909,7 +1910,12 @@ export class SessionManager extends EventEmitter {
     const taskEnv = session.config.taskGroupId && session.config.subtaskId
       ? ` export AGNTSPCE_TASK_ID=${shq(session.config.taskGroupId)}; export AGNTSPCE_SUBTASK_ID=${shq(session.config.subtaskId)};`
       : ''
-    const envPrefix = `export AGNTSPCE_ENABLED=1; export AGNTSPCE_WRAPPER_PATH="${wrapperPathEnv}"; export AGNTSPCE_RTK_SESSION="${rtkManager.generateRtkToken()}"; export PATH="${binDir}:$PATH";${taskEnv} `
+    // AGNTSPCE_SESSION_ID lets the agent's hook subprocesses (see
+    // bin/agntspce-agent-hook) attribute lifecycle events back to this exact
+    // session without the user having to configure anything. AGNTSPCE_HOOK_URL
+    // points them at our own server so they need no host/port discovery.
+    const sessionEnv = ` export AGNTSPCE_SESSION_ID=${shq(sessionId)}; export AGNTSPCE_HOOK_URL="http://127.0.0.1:${SERVER_PORT}/api/agent-status";`
+    const envPrefix = `export AGNTSPCE_ENABLED=1; export AGNTSPCE_WRAPPER_PATH="${wrapperPathEnv}"; export AGNTSPCE_RTK_SESSION="${rtkManager.generateRtkToken()}"; export PATH="${binDir}:$PATH";${sessionEnv}${taskEnv} `
     session.agentStartConfig = startConfig
     session.autoStarted = true
     session.claudeLaunchState = 'launched'

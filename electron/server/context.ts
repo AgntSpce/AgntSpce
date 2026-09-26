@@ -9,6 +9,7 @@ import { GitHelper } from '../services/gitHelper'
 import { WorktreeHelper } from '../services/worktreeHelper'
 import { AgentOrchestrator } from '../services/agentOrchestrator'
 import { ChatManager } from '../services/chatManager'
+import { AgentStatusService } from '../services/agentStatus'
 import { getMaxConcurrentSessions } from '../config'
 import type { StateManager } from '../services/orchestration/stateManager'
 
@@ -24,6 +25,9 @@ export interface ServerContext {
   worktreeHelper: WorktreeHelper
   agentOrchestrator: AgentOrchestrator
   chatManager: ChatManager
+  /** Structured agent lifecycle status, fed by agent hooks (see
+   *  services/agentStatus.ts). Backs the agent rows' status line. */
+  agentStatus: AgentStatusService
   autoSaveSessions: () => Promise<void>
   rebuildMenu: () => void
 }
@@ -47,6 +51,7 @@ export function createServerContext(opts: CreateServerContextOptions): ServerCon
   const agentOrchestrator = new AgentOrchestrator(opts.io, getMaxConcurrentSessions())
   agentOrchestrator.setStateManager(opts.stateManager ?? null)
   const chatManager = new ChatManager()
+  const agentStatus = new AgentStatusService()
 
   sessionManager.setStatusDetector(statusDetector)
   sessionManager.setGitHelper(gitHelper)
@@ -71,6 +76,7 @@ export function createServerContext(opts: CreateServerContextOptions): ServerCon
     worktreeHelper,
     agentOrchestrator,
     chatManager,
+    agentStatus,
     autoSaveSessions,
     rebuildMenu: opts.rebuildMenu,
   }

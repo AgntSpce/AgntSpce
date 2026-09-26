@@ -44,7 +44,96 @@ export AGNTSPCE_ENABLED="1"
 export AGNTSPCE_WRAPPER_PATH="${AGNTSPCE_WRAPPER_PATH:-${SCRIPT_DIR}/agntspce}"
 export PATH="${SCRIPT_DIR}:${PATH}"
 
+# ── Agent status hooks ──────────────────────────────────────────────────
+# When launched from inside the app, AGNTSPCE_SESSION_ID is set. We use it to
+# register a lifecycle hook that reports prompt/tool/run-end events back to the
+# app, which is what the sidebar's agent rows display (see
+# electron/services/agentStatus.ts and docs/agent_row_status_roadmap.md).
+#
+# The settings file is passed per-invocation with --settings. We never write to
+# the user's ~/.claude/settings.json, so nothing leaks outside this session and
+# uninstalling removes it completely.
+#
+# If anything here fails we still exec the real binary — a status hook must
+# never be able to stop the agent from starting.
+agntspce_hooks_settings=""
+agntspce_prepare_hooks() {
+  [ -n "${AGNTSPCE_SESSION_ID:-}" ] || return 0
+  [ -n "${AGNTSPCE_HOOK_URL:-}" ] || return 0
+
+  local hook_script=""
+  # In a packaged app bin/ lives inside app.asar, where SCRIPT_DIR can't be
+  # cd'd into — but the same files are also unpacked next to the agntspce
+  # binary (see extraResources in package.json). Check both.
+  for cand in "${SCRIPT_DIR}/agntspce-agent-hook.mjs" \
+              "${AGNTSPCE_WRAPPER_PATH:+$(dirname "${AGNTSPCE_WRAPPER_PATH}")/agntspce-agent-hook.mjs}"; do
+    if [ -f "$cand" ]; then
+      hook_script="$cand"
+      break
+    fi
+  done
+  [ -n "$hook_script" ] || return 0
+
+  # Resolve a node binary: the app's own first, then PATH.
+  local node_bin=""
+  if [ -n "${AGNTSPCE_NODE:-}" ] && [ -x "${AGNTSPCE_NODE}" ]; then
+    node_bin="${AGNTSPCE_NODE}"
+  elif command -v node >/dev/null 2>&1; then
+    node_bin="$(command -v node)"
+  else
+    return 0
+  fi
+
+  # One shared command for every event; the event name rides in the stdin JSON.
+  local hook_cmd
+  hook_cmd="\"${node_bin}\" \"${hook_script}\""
+  # JSON-escape the command for the settings file.
+  local escaped
+  escaped="$(printf '%s' "$hook_cmd" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+
+  # ${TMPDIR%/} — macOS sets TMPDIR with a trailing slash, which would yield a
+  # double slash in the path.
+  local settings_file="${TMPDIR:-/tmp}"
+  settings_file="${settings_file%/}/agntspce-claude-hooks.json"
+  local settings_content
+  settings_content="$(cat <<EOF
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "${escaped}" }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "${escaped}" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "${escaped}" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "${escaped}" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "${escaped}" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "${escaped}" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "${escaped}" }] }]
+  }
+}
+EOF
+)"
+
+  # Only rewrite when the content actually changed — avoids touching the file
+  # (and invalidating anything that watches it) on every launch.
+  if [ ! -f "$settings_file" ] || [ "$(cat "$settings_file" 2>/dev/null)" != "$settings_content" ]; then
+    printf '%s\n' "$settings_content" > "$settings_file" 2>/dev/null || return 0
+  fi
+  agntspce_hooks_settings="$settings_file"
+}
+
+agntspce_prepare_hooks
+
+agntspce_args=("$@")
+# Don't stack --settings if the user already passed one.
+for a in "${agntspce_args[@]+"${agntspce_args[@]}"}"; do
+  if [ "$a" = "--settings" ]; then
+    agntspce_hooks_settings=""
+    break
+  fi
+done
+if [ -n "$agntspce_hooks_settings" ]; then
+  agntspce_args+=("--settings" "$agntspce_hooks_settings")
+fi
+
 # Emit the RTK marker to stdout so it's visible in terminal output
 echo "agntspce \$ ${AGENT} $*"
 
-exec "$REAL_BIN" "$@"
+exec "$REAL_BIN" ${agntspce_args[@]+"${agntspce_args[@]}"}

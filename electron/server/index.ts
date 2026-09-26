@@ -5,6 +5,7 @@ import { isAllowedCorsOrigin, MAX_JSON_BODY_SIZE, MAX_PORT_RETRIES, SERVER_HOST,
 import { createServerContext, type ServerContext } from './context'
 import { registerApiRoutes } from './api'
 import { registerAllHandlers } from './handlers'
+import { registerAgentStatusRoute } from './handlers/agentStatus'
 import type { StateManager } from '../services/orchestration/stateManager'
 
 export interface ServerHandle {
@@ -75,6 +76,9 @@ export function bootstrapServer(userDataPath: string, rebuildMenu: () => void, s
   const ctx = createServerContext({ io, httpServer, expressApp, userDataPath, rebuildMenu, stateManager })
 
   registerApiRoutes(expressApp, ctx)
+  // Hook ingest lives outside registerAllHandlers because that runs per socket
+  // connection; an Express route must be added exactly once.
+  registerAgentStatusRoute(ctx)
 
   io.on('connection', (socket) => {
     const activeWs = ctx.workspaceManager.getActiveWorkspace()

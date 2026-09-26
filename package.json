@@ -93,7 +93,8 @@
           "rtk.exe",
           "agntspce",
           "agntspce.exe",
-          "agntspce.mjs"
+          "agntspce.mjs",
+          "agntspce-agent-hook.mjs"
         ]
       },
       {
