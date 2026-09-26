@@ -197,6 +197,8 @@ export interface TaskGroupInfo {
   baseSha: string | null
   createdAt: number
   completedAt: number | null
+  /** Non-null while pinned; the timestamp orders pinned tasks (newest pin first). */
+  pinnedAt?: number | null
   members?: { agentId: string; sessionId: string | null }[]
 }
 

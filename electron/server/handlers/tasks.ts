@@ -451,6 +451,21 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     }
   })
 
+  socket.on('set-task-pinned', async ({ taskGroupId, pinned }: { taskGroupId: string; pinned: boolean }, callback?: Function) => {
+    try {
+      const sm = smForTask(ctx, taskGroupId) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      // Pinning stamps "now" so the most recently pinned task sorts first;
+      // unpinning clears it and drops the task back into creation order.
+      const updated = sm.updateTaskGroup(taskGroupId, { pinnedAt: pinned ? Date.now() : null })
+      if (!updated) throw new Error(`Task ${taskGroupId} not found`)
+      ctx.io.emit('task-groups-changed', { workspaceId: '' })
+      if (callback) callback({ ok: true, taskGroup: updated })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
   socket.on('delete-task-group', async ({ taskGroupId }: { taskGroupId: string }, callback?: Function) => {
     try {
       const sm = smForTask(ctx, taskGroupId) ?? ctx.agentOrchestrator.getStateManager()

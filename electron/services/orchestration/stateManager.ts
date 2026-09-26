@@ -129,6 +129,7 @@ export interface TaskGroupRow {
   base_sha: string | null
   created_at: number
   completed_at: number | null
+  pinned_at: number | null
 }
 
 export interface TaskGroupOverview {
@@ -144,6 +145,7 @@ export interface TaskGroupOverview {
   baseSha: string | null
   createdAt: number
   completedAt: number | null
+  pinnedAt: number | null
 }
 
 export interface SubTaskRow {
@@ -722,10 +724,13 @@ export class StateManager {
     return this.rowToTaskGroup(row)
   }
 
+  // Pinned tasks first (most recently pinned first), then the rest in creation
+  // order. `(pinned_at IS NULL)` is 0 for pinned rows, so ASC floats them up.
   listTaskGroups(workspaceId?: string): TaskGroupOverview[] {
+    const order = 'ORDER BY (pinned_at IS NULL) ASC, pinned_at DESC, created_at ASC'
     const rows = workspaceId
-      ? (this.db.prepare('SELECT * FROM task_groups WHERE workspace_id = ? ORDER BY created_at ASC').all(workspaceId) as TaskGroupRow[])
-      : (this.db.prepare('SELECT * FROM task_groups ORDER BY created_at ASC').all() as TaskGroupRow[])
+      ? (this.db.prepare(`SELECT * FROM task_groups WHERE workspace_id = ? ${order}`).all(workspaceId) as TaskGroupRow[])
+      : (this.db.prepare(`SELECT * FROM task_groups ${order}`).all() as TaskGroupRow[])
     return rows.map(r => this.rowToTaskGroup(r))
   }
 
@@ -737,6 +742,7 @@ export class StateManager {
     completedAt?: number | null
     title?: string
     userGoal?: string
+    pinnedAt?: number | null
   }): TaskGroupOverview | null {
     const group = this.getTaskGroup(id)
     if (!group) return null
@@ -748,11 +754,12 @@ export class StateManager {
       completed_at: updates.completedAt !== undefined ? updates.completedAt : group.completedAt,
       title: updates.title ?? group.title,
       user_goal: updates.userGoal ?? group.userGoal,
+      pinned_at: updates.pinnedAt !== undefined ? updates.pinnedAt : group.pinnedAt,
     }
     if (next.status === 'done' && next.completed_at == null) next.completed_at = Date.now()
     this.db.prepare(
-      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ?, title = ?, user_goal = ? WHERE id = ?'
-    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, next.title, next.user_goal, id)
+      'UPDATE task_groups SET status = ?, branch_name = ?, worktree_path = ?, base_sha = ?, completed_at = ?, title = ?, user_goal = ?, pinned_at = ? WHERE id = ?'
+    ).run(next.status, next.branch_name, next.worktree_path, next.base_sha, next.completed_at, next.title, next.user_goal, next.pinned_at, id)
     return this.getTaskGroup(id)
   }
 
@@ -781,6 +788,7 @@ export class StateManager {
       baseSha: row.base_sha,
       createdAt: row.created_at,
       completedAt: row.completed_at,
+      pinnedAt: row.pinned_at ?? null,
     }
   }
 

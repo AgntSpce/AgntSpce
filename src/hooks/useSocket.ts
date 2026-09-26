@@ -85,6 +85,7 @@ interface UseSocketReturn {
   joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
   ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
   renameTaskGroup: (taskGroupId: string, title: string) => Promise<any>
+  setTaskPinned: (taskGroupId: string, pinned: boolean) => Promise<any>
   deleteTaskGroup: (taskGroupId: string) => Promise<any>
   closeTab: (sessionIds: string[]) => void
   startAgent: (sessionId: string, config: AgentStartConfig) => void
@@ -774,6 +775,10 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('rename-task-group', { taskGroupId, title })
   }, [emitAck])
 
+  const setTaskPinned = useCallback((taskGroupId: string, pinned: boolean): Promise<any> => {
+    return emitAck('set-task-pinned', { taskGroupId, pinned })
+  }, [emitAck])
+
   const deleteTaskGroup = useCallback((taskGroupId: string): Promise<any> => {
     return emitAck('delete-task-group', { taskGroupId }, 120000)
   }, [emitAck])
@@ -1136,6 +1141,7 @@ socket.emit('get-cumulative-stats', {})
     joinGroup,
     ungroupSession,
     renameTaskGroup,
+    setTaskPinned,
     deleteTaskGroup,
     closeTab,
     startAgent,

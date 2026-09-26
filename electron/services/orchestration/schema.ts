@@ -158,7 +158,8 @@ export function createSchema(db: Database.Database): void {
       worktree_path TEXT,
       base_sha TEXT,
       created_at INTEGER NOT NULL,
-      completed_at INTEGER
+      completed_at INTEGER,
+      pinned_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_task_groups_workspace ON task_groups(workspace_id);
     CREATE INDEX IF NOT EXISTS idx_task_groups_status ON task_groups(status);
@@ -229,6 +230,13 @@ export function migrateSchema(db: Database.Database): void {
   }
   if (!sessionColumns.some(c => c.name === 'subtask_id')) {
     db.exec(`ALTER TABLE sessions ADD COLUMN subtask_id TEXT`)
+  }
+
+  // task_groups.pinned_at — NULL = unpinned; the timestamp orders pinned tasks
+  // (most recently pinned first) and survives a restart.
+  const taskGroupColumns = db.prepare(`PRAGMA table_info(task_groups)`).all() as { name: string }[]
+  if (taskGroupColumns.length > 0 && !taskGroupColumns.some(c => c.name === 'pinned_at')) {
+    db.exec(`ALTER TABLE task_groups ADD COLUMN pinned_at INTEGER`)
   }
 
   // v2 collab_events.file column (added after step 1 shipped): backfill from

@@ -4732,6 +4732,29 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+}
+
+/* Title + optional pin marker share one line so the pin sits left of the name. */
+.task-row-title-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.task-row-pin {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+}
+
+/* Separator drawn between the pinned block and the rest of the task list. */
+.task-list-divider {
+  height: 1px;
+  flex-shrink: 0;
+  margin: 5px 4px;
+  background: var(--border);
 }
 
 /* ── Open group banner ──────────────── */

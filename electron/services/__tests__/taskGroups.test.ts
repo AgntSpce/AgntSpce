@@ -188,6 +188,50 @@ describe('v2 task worktrees', () => {
     expect(sm.deleteTaskGroup(g.id)).toBe(false)
   })
 
+  it('floats pinned task groups to the top, newest pin first, unpin restores order', () => {
+    const dir = tmpDir()
+    const sm = new StateManager(path.join(dir, 'c.db'), dir)
+    const a = sm.createTaskGroup({ workspaceId: 'ws1', repoPath: '/repo/a', title: 'Task A' })
+    const b = sm.createTaskGroup({ workspaceId: 'ws1', repoPath: '/repo/a', title: 'Task B' })
+    const c = sm.createTaskGroup({ workspaceId: 'ws1', repoPath: '/repo/a', title: 'Task C' })
+    const titles = () => sm.listTaskGroups('ws1').map(g => g.title)
+
+    expect(titles()).toEqual(['Task A', 'Task B', 'Task C'])
+    expect(sm.listTaskGroups('ws1').every(g => g.pinnedAt == null)).toBe(true)
+
+    // Multiple pins are allowed and stack newest-first.
+    expect(sm.updateTaskGroup(a.id, { pinnedAt: 1000 })?.pinnedAt).toBe(1000)
+    expect(titles()).toEqual(['Task A', 'Task B', 'Task C'])
+    sm.updateTaskGroup(b.id, { pinnedAt: 2000 })
+    expect(titles()).toEqual(['Task B', 'Task A', 'Task C'])
+
+    // Re-pinning an already pinned task makes it the newest pin.
+    sm.updateTaskGroup(a.id, { pinnedAt: 3000 })
+    expect(titles()).toEqual(['Task A', 'Task B', 'Task C'])
+
+    // Unpinning clears the stamp and drops it back into creation order.
+    expect(sm.updateTaskGroup(a.id, { pinnedAt: null })?.pinnedAt).toBeNull()
+    expect(titles()).toEqual(['Task B', 'Task A', 'Task C'])
+    expect(sm.listTaskGroups('ws1').find(g => g.id === c.id)?.pinnedAt).toBeNull()
+  })
+
+  it('adds pinned_at to pre-pinning task_groups tables', () => {
+    const dir = tmpDir()
+    const dbPath = path.join(dir, 'legacy.db')
+    // DB written before the pinned_at column existed.
+    const raw = new Database(dbPath)
+    raw.exec(`CREATE TABLE task_groups (id TEXT PRIMARY KEY, workspace_id TEXT, repo_path TEXT NOT NULL, title TEXT NOT NULL, user_goal TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'planning', worktree_mode TEXT NOT NULL DEFAULT 'worktree', branch_name TEXT, worktree_path TEXT, base_sha TEXT, created_at INTEGER NOT NULL, completed_at INTEGER)`)
+    raw.exec(`INSERT INTO task_groups (id, repo_path, title, created_at) VALUES ('g1', '/repo/a', 'Legacy', 1000)`)
+    raw.close()
+
+    // The StateManager constructor migrates, so the old row stays readable.
+    const sm = new StateManager(dbPath, dir)
+    const migrated = sm.getTaskGroup('g1')!
+    expect(migrated.title).toBe('Legacy')
+    expect(migrated.pinnedAt).toBeNull()
+    expect(sm.updateTaskGroup('g1', { pinnedAt: 5000 })?.pinnedAt).toBe(5000)
+  })
+
   it('deduplicates branch names', () => {
     const repo = tmpDir()
     const defaultBranch = initRepo(repo)

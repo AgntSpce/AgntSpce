@@ -162,7 +162,7 @@ function App() {
     getGitFullStatus, gitStageFile, gitUnstageFile, gitCommit, gitPull, gitPush, gitFetch,
     setUserSettings, updateWorkspaceConfig, refreshWorkspaces,
     taskGroups, listTaskGroups, createTaskGroup, onTaskGroupsChanged,
-    renameTaskGroup, deleteTaskGroup,
+    renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
     mergeTask, confirmTaskMerge,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
@@ -783,6 +783,13 @@ function App() {
       listTaskGroups(activeWorkspace?.id).catch(() => {})
     } catch {}
   }, [renameTaskGroup, activeWorkspace?.id, listTaskGroups])
+
+  const handleSetTaskPinned = useCallback(async (taskGroupId: string, pinned: boolean) => {
+    try {
+      await setTaskPinned(taskGroupId, pinned)
+      listTaskGroups(activeWorkspace?.id).catch(() => {})
+    } catch {}
+  }, [setTaskPinned, activeWorkspace?.id, listTaskGroups])
 
   const handleDeleteTask = useCallback(async (taskGroupId: string) => {
     try {
@@ -1924,6 +1931,7 @@ function App() {
               onSessionResumed={onSessionResumed}
               getTokenUsage={getTokenUsage}
               onRenameTask={handleRenameTask}
+              onSetTaskPinned={handleSetTaskPinned}
               onDeleteTask={handleDeleteTask}
               onOpenTaskDetails={setSelectedTaskId}
             />

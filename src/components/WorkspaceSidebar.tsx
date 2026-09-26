@@ -105,6 +105,8 @@ interface Props {
   getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
   onRenameTask?: (taskGroupId: string, title: string) => void
+  /** Pin or unpin a task group (pinned tasks sort to the top of the list). */
+  onSetTaskPinned?: (taskGroupId: string, pinned: boolean) => void
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -489,6 +491,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   getTokenUsage,
   promptHistory,
   onRenameTask,
+  onSetTaskPinned,
   onDeleteTask,
   onOpenTaskDetails,
 }: {
@@ -545,6 +548,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   getTokenUsage?: (sessionId?: string) => Promise<any>
   /** Rename a task group. */
   onRenameTask?: (taskGroupId: string, title: string) => void
+  /** Pin or unpin a task group (pinned tasks sort to the top of the list). */
+  onSetTaskPinned?: (taskGroupId: string, pinned: boolean) => void
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -643,6 +648,23 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
 
   const closeMenu = useCallback(() => setMenuOpenId(null), [])
 
+  // Pinned tasks float to the top, most recently pinned first; the rest keep
+  // their backend order (creation order). Re-sorted here too so the grouping
+  // holds even against a stale main process.
+  const orderedTasks = useMemo(() => {
+    return [...(taskGroups || [])].sort((a, b) => {
+      const ap = a.pinnedAt != null
+      const bp = b.pinnedAt != null
+      if (ap !== bp) return ap ? -1 : 1
+      if (ap && bp) return b.pinnedAt! - a.pinnedAt!
+      return a.createdAt - b.createdAt
+    })
+  }, [taskGroups])
+  const pinnedTaskCount = useMemo(
+    () => orderedTasks.filter(t => t.pinnedAt != null).length,
+    [orderedTasks]
+  )
+
   return (
     <aside className="sidebar orca-workspace-sidebar">
       <div className="sidebar-top">
@@ -737,7 +759,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
               <h2>Tasks</h2>
             </div>
             <div className="task-list">
-              {(taskGroups || []).map(t => {
+              {orderedTasks.map((t, taskIndex) => {
+                 const isPinned = t.pinnedAt != null
                  const members = membersByTask[t.id] || []
                  const isLiveMember = (member: { sessionId: string | null }) => {
                    if (!member.sessionId) return false
@@ -755,6 +778,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                  const rowMembers = members.filter(isLiveMember)
                 return (
                   <div key={t.id}>
+                    {pinnedTaskCount > 0 && taskIndex === pinnedTaskCount && (
+                      <div className="task-list-divider" role="separator" />
+                    )}
                     <div
                        className={`task-row task-row-card${openTaskId === t.id || selectedTaskId === t.id ? ' active' : ''}`}
                        onClick={(e) => handleTaskRowClick(t.id, e)}
@@ -775,19 +801,24 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                     >
                       <span className="task-status-dot" style={{ background: TASK_STATUS_COLORS[t.status] ?? '#9aa0a6' }} />
                       <div className="task-row-main">
-                        {renamingTask?.id === t.id ? (
-                          <TaskRenameInput
-                            initialName={t.title}
-                            onCommit={(name) => {
-                              setRenamingTask(null)
-                              const trimmed = name.trim()
-                              if (trimmed && trimmed !== t.title) onRenameTask?.(t.id, trimmed)
-                            }}
-                            onCancel={() => setRenamingTask(null)}
-                          />
-                        ) : (
-                          <span className="task-row-title">{t.title}</span>
-                        )}
+                        <span className="task-row-title-line">
+                          {isPinned && (
+                            <i className="codicon codicon-pinned task-row-pin" title="Pinned" />
+                          )}
+                          {renamingTask?.id === t.id ? (
+                            <TaskRenameInput
+                              initialName={t.title}
+                              onCommit={(name) => {
+                                setRenamingTask(null)
+                                const trimmed = name.trim()
+                                if (trimmed && trimmed !== t.title) onRenameTask?.(t.id, trimmed)
+                              }}
+                              onCancel={() => setRenamingTask(null)}
+                            />
+                          ) : (
+                            <span className="task-row-title">{t.title}</span>
+                          )}
+                        </span>
                         {openTaskId !== t.id && liveMembers.length > 0 && (
                           <span className="task-row-logos" title={liveMembers.map(m => m.agentId).join(', ')}>
                             {liveMembers.map(m => (
@@ -810,6 +841,14 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           right: 'auto',
                         } : undefined}
                       >
+                        <button
+                          className="workspace-tree-menu-item"
+                          onClick={() => {
+                            setTaskMenuId(null)
+                            setTaskMenuPos(null)
+                            onSetTaskPinned?.(t.id, !isPinned)
+                          }}
+                        >{isPinned ? 'Unpin task' : 'Pin task'}</button>
                         <button
                           className="workspace-tree-menu-item"
                           onClick={() => {
@@ -910,7 +949,7 @@ export default memo(function WorkspaceSidebar({
   onOpenFolderDirect, onCloneDirect,
   activeSessionId, onSelectSession,
   onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, getTokenUsage, promptHistory,
-  onRenameTask, onDeleteTask, onOpenTaskDetails,
+  onRenameTask, onSetTaskPinned, onDeleteTask, onOpenTaskDetails,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -944,6 +983,7 @@ export default memo(function WorkspaceSidebar({
         getTokenUsage={getTokenUsage}
         promptHistory={promptHistory}
         onRenameTask={onRenameTask}
+        onSetTaskPinned={onSetTaskPinned}
         onDeleteTask={onDeleteTask}
         onOpenTaskDetails={onOpenTaskDetails}
       />
