@@ -135,6 +135,10 @@
 
 /* ── Animation System ───────────────────── */
 :root {
+  /* The window title bar's own height. Full-height overlays are offset by this
+     so they never cover the close/minimise/fullscreen controls. Kept in sync
+     with `.title-bar` below. */
+  --titlebar-height: 33px;
   --anim-duration: 150ms;
   --anim-duration-fast: 100ms;
   --anim-duration-normal: 200ms;
@@ -203,8 +207,9 @@
 
 /* ── Title Bar ──────────────────────────── */
 .title-bar {
-  /* 30px + 5% breathing room above and below the title-bar actions (33px) */
-  height: 33px;
+  /* 30px + 5% breathing room above and below the title-bar actions (33px).
+     Must match --titlebar-height above. */
+  height: var(--titlebar-height, 33px);
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -11051,8 +11056,15 @@
    ------------------------------------------------------------------ */
 .solver-overlay {
   position: fixed;
-  inset: 0;
+  /* Start below the window title bar. `inset: 0` covered it, so on macOS the
+     traffic lights and on Windows the close/minimise/fullscreen buttons were
+     painted over and unusable while this was open. */
+  top: var(--titlebar-height, 33px);
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 300;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--bg-primary, #0d1117);
@@ -11064,7 +11076,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px;
+  height: 40px;
+  padding: 0 10px 0 14px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -11097,7 +11110,55 @@
   gap: 10px;
   overflow: auto;
 }
-.solver-right { min-height: 0; }
+.solver-right { min-height: 0; overflow: hidden; }
+.solver-right .git-diff-root { height: 100%; }
+.solver-right .git-diff-body { flex: 1; min-height: 0; }
+
+/* A real, clickable close button. The previous one was a bare `×` glyph with no
+   hit area of its own, and reads as decoration rather than a control. */
+.solver-headtext { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.solver-headbtns { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.solver-x {
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.solver-x:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-dim); }
+.solver-x:disabled { opacity: 0.5; cursor: default; }
+
+.solver-filesblock { flex-shrink: 0; }
+.solver-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 7px 9px;
+  background: var(--bg-elevated);
+}
+.solver-raw {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
 
 .solver-block { flex-shrink: 0; }
 .solver-grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }

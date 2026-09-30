@@ -170,7 +170,7 @@ function App() {
     renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
     mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks, checkGitRepo, initGitRepo, syncTaskBranch, applyTaskBranch, discardLocalEdits,
-    getConflictContext, createSolverSession,
+    getConflictContext,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
@@ -450,10 +450,9 @@ function App() {
   const [mergeTaskId, setMergeTaskId] = useState<string | null>(null)
   const [syncConflict, setSyncConflict] = useState<SyncConflictState | null>(null)
   // Conflict solver: its own session, deliberately not part of any task.
-  const [solver, setSolver] = useState<{ context: any; sessionId: string | null; agentId: string } | null>(null)
+  const [solver, setSolver] = useState<{ context: any } | null>(null)
   const [solverBusy, setSolverBusy] = useState(false)
   const [solverError, setSolverError] = useState('')
-  const [solverStatus, setSolverStatus] = useState('')
   const [syncBusy, setSyncBusy] = useState(false)
   const [syncError, setSyncError] = useState('')
 
@@ -1237,12 +1236,6 @@ function App() {
     [sessions]
   )
 
-  // Only agents actually installed, for the solver's picker.
-  const installedAgentsList = useMemo(
-    () => AGENTS_LIST.filter(a => installedAgents.has(a.id)),
-    [installedAgents]
-  )
-
   // ---------------- Conflict solver ----------------
   // The solver's agent is independent of the task on purpose. It runs in the
   // task's worktree (that is where the files being merged live) but is its own
@@ -1250,50 +1243,21 @@ function App() {
   // its slots, so solving a conflict cannot hijack a task agent's terminal.
   const openSolver = useCallback(async (taskGroupId: string, conflictFiles: string[]) => {
     setSolverError('')
-    setSolverStatus('Loading conflict…')
     try {
       const res = await getConflictContext(taskGroupId, conflictFiles || [])
       if (res?.ok === false) { setSolverError(res.error || 'Could not read the conflict'); return }
-      const agentId = installedAgentsList[0]?.id || 'claude'
-      setSolver({ context: res.context, sessionId: null, agentId })
-      setSolverStatus('')
+      setSolver({ context: res.context })
       setMergeTaskId(null)
     } catch (e: any) {
       setSolverError(e?.message || 'Could not read the conflict')
     }
-  }, [getConflictContext, installedAgentsList])
-
-  const startSolverAgent = useCallback((agentId: string) => {
-    if (!solver?.context?.worktreePath) {
-      setSolverError('This task has no worktree for the solver to work in.')
-      return
-    }
-    setSolverBusy(true)
-    setSolverError('')
-    setSolverStatus(`Starting ${agentId}…`)
-    let cancelled = false
-    const brief = solver.context.brief || ''
-    ;(async () => {
-      const sid = await createSolverSession(agentId, solver.context.worktreePath)
-      if (cancelled || !sid) { setSolverBusy(false); return }
-      setSolver(s => (s ? { ...s, sessionId: sid, agentId } : s))
-      setSolverStatus(`${agentId} is starting`)
-      // Hand over the whole conflict as the first thing it reads, so the user
-      // does not have to paste context in themselves.
-      if (brief) setTimeout(() => sendTerminalInput(sid, brief.replace(/\n/g, '\r') + '\r'), 1500)
-    })()
-    return () => { cancelled = true }
-  }, [solver, createSolverSession, sendTerminalInput])
+  }, [getConflictContext])
 
   const closeSolver = useCallback(() => {
-    // Closing the panel closes the agent: it exists to solve this one conflict.
-    const sid = solver?.sessionId
-    if (sid) closeTab([sid])
     setSolver(null)
     setSolverError('')
-    setSolverStatus('')
     setSolverBusy(false)
-  }, [solver, closeTab])
+  }, [])
 
   const solverKeep = useCallback((side: 'task' | 'integration') => {
     if (!solver?.context) return
@@ -2667,20 +2631,10 @@ function App() {
       {solver?.context && (
         <ConflictSolverPanel
           context={solver.context}
-          solverSessionId={solver.sessionId}
-          installedAgents={Object.fromEntries(AGENTS_LIST.map(a => [a.id, installedAgents.has(a.id)]))}
-          agentConfigs={agentConfigs}
-          sessions={sessions}
+          theme={theme}
           busy={solverBusy}
           error={solverError}
-          statusText={solverStatus}
-          onInput={sendTerminalInput}
-          onResize={sendTerminalResize}
-          onStartAgent={(sessionId, config) => startAgent(sessionId, config)}
-          onShowAgentModal={() => {}}
-          onRestart={() => closeSolver()}
-          onCloseSession={() => closeSolver()}
-          onOpenSolver={(agentId) => startSolverAgent(agentId)}
+          onRefresh={() => openSolver(solver.context.taskId, solver.context.conflictFiles)}
           onKeepTask={() => solverKeep('task')}
           onKeepMerged={() => solverKeep('integration')}
           onClose={closeSolver}

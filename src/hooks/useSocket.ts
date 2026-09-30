@@ -91,7 +91,6 @@ interface UseSocketReturn {
   applyTaskBranch: (branchName?: string) => Promise<any>
   discardLocalEdits: (files: string[]) => Promise<any>
   getConflictContext: (taskGroupId: string, files: string[]) => Promise<any>
-  createSolverSession: (agentId: string, cwd: string) => Promise<string | null>
   groupSessions: (sessionIds: string[], title?: string) => Promise<any>
   joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
   ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
@@ -815,18 +814,6 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('get-conflict-context', { taskGroupId, files }, 120000)
   }, [emitAck])
 
-  // A throwaway agent session for the conflict solver: created in the worktree
-  // being resolved and started immediately. It is NOT linked to a task group,
-  // so it never appears in the task's agent roster and never takes a slot.
-  const createSolverSession = useCallback((agentId: string, cwd: string): Promise<string | null> => {
-    return emitAck('create-agent-session', {
-      type: agentId,
-      workspacePath: cwd,
-      config: { agentId, mode: 'fresh', flags: [] },
-      // No taskGroupId: independent of the task by design.
-    }, 30000).then((res: any) => res?.sessionId ?? null)
-  }, [emitAck])
-
   const applyTaskBranch = useCallback((branchName?: string): Promise<any> => {
     return emitAck('apply-task-branch', { branchName }, 300000)
   }, [emitAck])
@@ -1217,7 +1204,6 @@ socket.emit('get-cumulative-stats', {})
     applyTaskBranch,
     discardLocalEdits,
     getConflictContext,
-    createSolverSession,
     groupSessions,
     joinGroup,
     ungroupSession,

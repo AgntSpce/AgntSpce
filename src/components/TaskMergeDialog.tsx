@@ -200,6 +200,13 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
       ? <button className="modal-btn" disabled={busy} onClick={() => onOpenSolver(preview?.conflictFiles || [])}>Open Conflict solver</button>
       : <button className="modal-btn" disabled={busy} onClick={() => runMerge(undefined, true)}>Let the AI resolve it</button>
 
+  // The preview is a trial merge computed at open time. If the integration
+  // branch moved since then — typically because you merged a peer in the other
+  // window moments earlier — the first view can understate the conflict and only
+  // a second attempt shows it. Refetching on demand turns that from a
+  // close-and-reopen dance into one click.
+  const refresh = useCallback(() => setRetryTick(t => t + 1), [])
+
   return (
     <div className="modal-overlay" onClick={busy ? undefined : onClose}>
       <div className="modal task-merge-modal" onClick={e => e.stopPropagation()}>
@@ -211,7 +218,12 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
               {preview?.branchName ? ` · ${preview.branchName}` : ''}
             </p>
           </div>
-          <button className="task-chat-close" onClick={onClose} disabled={busy} title="Close">×</button>
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            <button className="modal-btn" onClick={refresh} disabled={busy || stage === 'previewing'} title="Re-check for conflicts against the current integration branch">
+              {stage === 'previewing' ? 'Checking…' : 'Refresh'}
+            </button>
+            <button className="task-chat-close" onClick={onClose} disabled={busy} title="Close">×</button>
+          </div>
         </div>
 
         {stage === 'previewing' && (
