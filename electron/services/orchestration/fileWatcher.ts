@@ -131,9 +131,9 @@ export class FileWatcher {
     return null
   }
 
-  // Reuses the merge-time scope-overlap check (mergeGate.ts:104-128): the
-  // changed file is an overlap if any OTHER active task has it in its declared
-  // or actual scope.
+  // Live file-claim overlap: the changed file overlaps if any OTHER active task
+  // has claimed it. Claims are declared by the agents themselves as they work,
+  // so this stays accurate without any planner.
   private checkOverlap(repoRel: string, editorTaskId: string, editorAgentId: string): void {
     const now = Date.now()
     const last = this.lastEmitAt[editorTaskId + ':' + repoRel] || 0

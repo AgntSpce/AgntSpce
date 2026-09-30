@@ -40,38 +40,35 @@ describe('workspace git readiness', () => {
   })
 })
 
-// Fix 3: a repo of nothing but dotfiles has nothing worth isolating. Verified
-// case: `demotest2` was initialized with only `.gitignore` + `.mcp.json`, so the
-// task worktree was a near-empty checkout and the agent's index.html was hidden
-// in `.agntspce/tasks/<id>/` with no conflict risk to justify it.
-describe('fresh-repo detection (drives the isolation choice)', () => {
-  it('treats a non-repo as fresh so the first task runs in the folder', () => {
+// A repo of nothing but dotfiles still gets an isolated worktree. It used to be
+// treated as "too empty to isolate", which removed the branch and the worktree
+// together — so a fresh workspace had no Merge button, no Update button, and the
+// agent's file landed untracked in the user's own folder, refusing every apply.
+describe('fresh-repo detection (reported, but no longer used to skip isolation)', () => {
+  it('treats a non-repo as fresh', () => {
     expect(inspectGitFolder(tmpDir()).isFresh).toBe(true)
   })
 
-  it('treats a dotfiles-only repo as fresh', () => {
+  it('reports a dotfiles-only repo as fresh', () => {
     const dir = tmpDir()
-    // Exactly what initGitFolder produces for a brand-new empty folder.
     initGitFolder(dir)
     const state = inspectGitFolder(dir)
     expect(state.hasCommits).toBe(true)
     expect(state.isFresh).toBe(true)
+    // Still fully isolated: a worktree can branch from this repo, so the task
+    // gets a branch and can be merged.
+    expect(WorktreeLifecycle.isGitRepository(dir)).toBe(true)
+    expect(WorktreeLifecycle.hasCommits(dir)).toBe(true)
   })
 
   it('stops being fresh as soon as a real file is committed', () => {
     const dir = tmpDir()
     initGitFolder(dir)
     expect(inspectGitFolder(dir).isFresh).toBe(true)
-
-    // First task in the folder produces a real file and commits it; the next
-    // task is now worth isolating.
     fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html>\n')
     git(['add', '-A'], dir)
     git(['commit', '-m', 'add page'], dir)
-
-    const state = inspectGitFolder(dir)
-    expect(state.isFresh).toBe(false)
-    expect(state.hasCommits).toBe(true)
+    expect(inspectGitFolder(dir).isFresh).toBe(false)
   })
 
   it('treats a nested project file as real content', () => {

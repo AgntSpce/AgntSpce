@@ -9,6 +9,9 @@ import CreateWorkspaceModal from './components/CreateWorkspaceModal'
 import CreateTaskModal from './components/CreateTaskModal'
 import TaskChat from './components/TaskChat'
 import TaskMergeDialog from './components/TaskMergeDialog'
+import { TaskSyncDialog, type SyncConflictState } from './components/TaskSyncDialog'
+import { RiskConfirmDialog } from './components/RiskConfirmDialog'
+import { ConflictSolverPanel } from './components/ConflictSolverPanel'
 import GitConsentDialog from './components/GitConsentDialog'
 import Settings from './components/Settings'
 import StatusBar from './components/StatusBar'
@@ -166,7 +169,8 @@ function App() {
     taskGroups, listTaskGroups, createTaskGroup, onTaskGroupsChanged,
     renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
-    mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks, checkGitRepo, initGitRepo, syncTaskBranch, applyTaskBranch,
+    mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks, checkGitRepo, initGitRepo, syncTaskBranch, applyTaskBranch, discardLocalEdits,
+    getConflictContext, createSolverSession,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
     emit, chatGetModels, chatSendStream, chatStopStream, chatGetHistory, chatDeleteThread,
@@ -397,9 +401,8 @@ function App() {
     try {
       const probe = await checkGitRepo(activeWorkspace?.id, input.repoPath ?? activeWorkspace?.repository?.path)
       if (probe?.ok) {
-        const isFresh = probe.isFresh !== false
-        setGitRepoState({ isRepo: !!probe.isRepo, hasCommits: !!probe.hasCommits, isFresh })
-        worktreeMode = probe.isRepo && probe.hasCommits && !isFresh ? 'worktree' : 'none'
+        setGitRepoState({ isRepo: !!probe.isRepo, hasCommits: !!probe.hasCommits, isFresh: probe.isFresh !== false })
+        worktreeMode = probe.isRepo && probe.hasCommits ? 'worktree' : 'none'
       }
     } catch { /* keep the mode the dialog showed */ }
     const res = await createTaskGroup({ ...input, worktreeMode, workspaceId: activeWorkspace?.id })
@@ -445,6 +448,14 @@ function App() {
   }), [previewTaskMerge, mergeTask, confirmTaskMerge, mergeAllTasks, syncTaskBranch, applyTaskBranch])
 
   const [mergeTaskId, setMergeTaskId] = useState<string | null>(null)
+  const [syncConflict, setSyncConflict] = useState<SyncConflictState | null>(null)
+  // Conflict solver: its own session, deliberately not part of any task.
+  const [solver, setSolver] = useState<{ context: any; sessionId: string | null; agentId: string } | null>(null)
+  const [solverBusy, setSolverBusy] = useState(false)
+  const [solverError, setSolverError] = useState('')
+  const [solverStatus, setSolverStatus] = useState('')
+  const [syncBusy, setSyncBusy] = useState(false)
+  const [syncError, setSyncError] = useState('')
 
   // ── Git readiness + consent ────────────────────────────────────────────
   // Worktrees need a git repo that already has a commit. When the workspace
@@ -475,16 +486,21 @@ function App() {
     return () => { cancelled = true }
   }, [activeWorkspace?.id, activeWorkspace?.repository?.path, checkGitRepo])
 
-  // Isolation is only worth its cost once there is something to protect.
+  // A repo with a commit always gets an isolated worktree.
   //
-  // A folder we just initialized commits almost nothing (`.gitignore`,
-  // `.mcp.json`), so a worktree of it is a near-empty checkout: the agent works
-  // in `.agntspce/tasks/<id>/`, its output is invisible in the folder the user
-  // is looking at, and there is nothing to conflict with anyway. So the first
-  // task in an empty repo runs in the folder itself; once real files exist, we
-  // isolate. A repo with no commit still cannot isolate either.
+  // This used to make a brand-new folder run its tasks in the workspace folder
+  // itself, on the reasoning that there was nothing to isolate yet. That was
+  // self-defeating: with no branch and no worktree there is nothing to merge and
+  // nothing to update from, so the Merge and Update buttons never appeared, and
+  // the agent's files landed untracked in the user's own checkout where they
+  // blocked "Apply to main". Verified on a fresh workspace: both tasks came back
+  // as mode "none" with a null branch, no merge button, and an untracked
+  // index.html refusing every apply.
+  //
+  // 'none' is now only for a user who explicitly accepted running without git,
+  // which is the one case where there is genuinely nothing to merge.
   const taskWorktreeMode: 'worktree' | 'none' =
-    gitRepoState?.isRepo && gitRepoState?.hasCommits && !gitRepoState?.isFresh ? 'worktree' : 'none'
+    gitRepoState?.isRepo && gitRepoState?.hasCommits ? 'worktree' : 'none'
 
   const rememberGitConsent = useCallback((wsId: string, value: 'initialized' | 'accepted') => {
     try { localStorage.setItem(`${GIT_CONSENT_KEY}:${wsId}`, value) } catch {}
@@ -524,49 +540,267 @@ function App() {
 // Fast-forward the checked-out branch onto the integration branch. This is the
   // only step that makes merged work visible in the workspace folder.
   const [applyingIntegration, setApplyingIntegration] = useState(false)
-  const handleApplyIntegration = useCallback(async (): Promise<boolean> => {
+  const applyIntegrationNow = useCallback(async (): Promise<boolean> => {
     setApplyingIntegration(true)
     try {
-      const res = await applyTaskBranch()
+      // Explicitly main, matching the button's label. The backend still refuses
+      // when main is not the checked-out branch, and says which branch you are
+      // on — it will not quietly check out or move anything else.
+      const res = await applyTaskBranch('main')
       if (res && res.ok === false) {
-        alert(res.error || 'Could not apply the integration branch')
+        // Name the exact files standing in the way. A blanket "commit or stash
+        // everything" was true of every unrelated edit too, which is why this
+        // read as a dead end; only the genuinely overlapping files matter, and
+        // the rest are explicitly not a problem.
+        const blocking = res.conflictFiles as string[] | undefined
+        if (blocking?.length) {
+          const keep = window.confirm(
+            `${res.error}\n\nDiscard your local edits to just these and apply?\n${blocking.map(f => `  - ${f}`).join('\n')}\n\n` +
+            `This cannot be undone. If you would rather keep them, cancel and commit them first.`
+          )
+          if (keep) {
+            const disc = await discardLocalEdits(blocking)
+            if (disc?.ok === false) { alert(disc.error || 'Could not discard those files'); return false }
+            const retry = await applyTaskBranch('main')
+            if (retry && retry.ok === false) { alert(retry.error || 'Could not apply the integration branch to main'); return false }
+            setFileTreeRefreshTick(t => t + 1)
+            alert(`Applied to main — ${retry?.files?.length ?? 0} file(s) are now in your folder. Your edits to ${blocking.join(', ')} were discarded.`)
+            return true
+          }
+        } else {
+          alert(res.error || 'Could not apply the integration branch to main')
+        }
         return false
       }
-      if (res?.upToDate) alert(`${res.branch || 'Your branch'} is already up to date.`)
-      else alert(`Applied to ${res?.branch || 'your branch'} — ${res?.files?.length ?? 0} file(s) are now in your folder.`)
+      if (res?.upToDate) {
+        alert('main is already up to date with the integration branch.')
+      } else {
+        // The files are physically in the folder now. The explorer only reloads
+        // on a workspace switch or a manual refresh, so without this the user
+        // applied successfully and saw no files at all.
+        setFileTreeRefreshTick(t => t + 1)
+        alert(`Applied to main — ${res?.files?.length ?? 0} file(s) are now in your folder.`)
+      }
       return true
     } catch (e: any) {
-      alert(e?.message || 'Could not apply the integration branch')
+      alert(e?.message || 'Could not apply the integration branch to main')
       return false
     } finally {
       setApplyingIntegration(false)
     }
-  }, [applyTaskBranch])
+  }, [applyTaskBranch, discardLocalEdits])
+
+  // Pull the integration branch into one task's worktree, so a task can pick up
+  // what other tasks merged before it starts its next piece of work. Commits
+  // anything that task left pending first, so it cannot dead-end on a dirty
+  // worktree the way this action used to.
+
+  // Merging or updating rewrites a task's worktree. AgntSpce never closes an
+  // agent to make that safe — a session belongs to the user, and killing one
+  // loses whatever it had in flight. So the user is warned and chooses.
+  const [riskPrompt, setRiskPrompt] = useState<{
+    title: string
+    message: string
+    detail: string
+    confirmLabel: string
+    run: () => Promise<void>
+  } | null>(null)
+  const [riskBusy, setRiskBusy] = useState(false)
+
+  const confirmWithAgents = useCallback((
+    action: { title: string; message: string; detail: string; confirmLabel: string },
+    run: () => Promise<void>,
+  ) => {
+    const busy = (taskGroups || []).filter(t => (t.activeAgents ?? 0) > 0)
+    if (!busy.length) { run().catch(() => {}); return }
+    setRiskPrompt({ ...action, run })
+  }, [taskGroups])
+
+  const runRiskPrompt = useCallback(async () => {
+    if (!riskPrompt) return
+    setRiskBusy(true)
+    try {
+      await riskPrompt.run()
+    } catch {
+      // The action reports its own failures.
+    } finally {
+      setRiskBusy(false)
+      setRiskPrompt(null)
+    }
+  }, [riskPrompt])
+
+  // Apply only moves the user's own branch, never a task worktree, so task
+  // agents are untouched by it. Wrapped in the same confirm for consistency.
+  const handleApplyIntegration = useCallback(async (): Promise<boolean> => {
+    const run = async (): Promise<void> => {
+      await applyIntegrationNow()
+      listTaskGroups(activeWorkspace?.id).catch(() => {})
+    }
+    if ((taskGroups || []).some(t => (t.activeAgents ?? 0) > 0)) {
+      confirmWithAgents({
+        title: 'Agents are still working',
+        message: 'Some agents are still running.',
+        detail: "Applying only moves your own branch, so their agents are unaffected. Continue if you would rather wait.",
+        confirmLabel: 'Apply anyway',
+      }, async () => { await run() })
+      // The dialog resolves later, so a caller awaiting this cannot get the
+      // real result. Report "not applied" rather than a false success.
+      return false
+    }
+    return applyIntegrationNow()
+  }, [applyIntegrationNow, taskGroups, confirmWithAgents, listTaskGroups, activeWorkspace?.id])
+
+  const handleUpdateTask = useCallback(async (taskGroupId: string) => {
+    const run = async (opts?: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }) => {
+      const res = await syncTaskBranch(taskGroupId, opts)
+      if (res && res.ok === false) {
+        // A conflict used to come back as a wall of text and nothing else, so
+        // the task could never pull in a peer's work on a shared file. Offer
+        // the actual choices instead of a dead end.
+        if (res.conflictFiles?.length) {
+          const g = (taskGroups || []).find(t => t.id === taskGroupId)
+          setSyncConflict({
+            taskGroupId,
+            taskTitle: g?.title || 'This task',
+            integrationBranch: res.integrationBranch || 'the integration branch',
+            conflictFiles: res.conflictFiles,
+          })
+          setSyncError('')
+          return
+        }
+        // A silent-looking sync is indistinguishable from a broken button, so
+        // always say what happened and what to do instead.
+        alert(res.error || 'Could not update this task from the integration branch')
+        return
+      }
+      setSyncConflict(null)
+      const committed = res?.autoCommittedFiles?.length ?? 0
+      const pulled = res?.mergedFiles?.length ?? 0
+      const resolved = res?.resolvedBy === 'ai' ? 'Resolved by the AI. ' : ''
+      if (committed > 0) alert(`${resolved}Committed ${committed} uncommitted file(s) this task's agent left behind.`)
+      else if (pulled === 0) alert('Already up to date with the integration branch.')
+      else alert(`${resolved}Updated from the integration branch. ${pulled} file(s) changed in this task.`)
+    }
+    const doUpdate = async () => {
+      try {
+        await run()
+      } catch (e: any) {
+        alert(e?.message || 'Could not update this task')
+      } finally {
+        // Every outcome can change the row (pending work committed, files
+        // pulled), so refresh unconditionally rather than on the happy path.
+        listTaskGroups(activeWorkspace?.id).catch(() => {})
+      }
+    }
+    const t = (taskGroups || []).find(x => x.id === taskGroupId)
+    if ((t?.activeAgents ?? 0) > 0) {
+      confirmWithAgents({
+        title: 'Agents are still working',
+        message: `${t?.activeAgents} agent${t?.activeAgents === 1 ? '' : 's'} in "${t?.title || 'this task'}" ${t?.activeAgents === 1 ? 'is' : 'are'} still running.`,
+        detail: "Wait for them to finish, or close them yourself, before updating. AgntSpce will not close your agents for you — updating now rewrites their files underneath them.",
+        confirmLabel: 'Update anyway',
+      }, doUpdate)
+      return
+    }
+    await doUpdate()
+  }, [syncTaskBranch, activeWorkspace?.id, listTaskGroups, taskGroups, confirmWithAgents])
+
+  const handleResolveSyncConflict = useCallback(async (choice: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }) => {
+    const conflict = syncConflict
+    if (!conflict) return
+    setSyncBusy(true)
+    setSyncError('')
+    try {
+      const res = await syncTaskBranch(conflict.taskGroupId, choice)
+      if (res && res.ok === false) {
+        setSyncError(res.error || 'Could not resolve these conflicts.')
+        listTaskGroups(activeWorkspace?.id).catch(() => {})
+        return
+      }
+      setSyncConflict(null)
+      const pulled = res?.mergedFiles?.length ?? 0
+      const how = res?.resolvedBy === 'ai'
+        ? 'The AI merged both sides.'
+        : res?.resolvedBy === 'task'
+          ? "Kept this task's version."
+          : 'Kept the merged version.'
+      alert(`${how} ${pulled} file(s) updated in this task.`)
+    } catch (e: any) {
+      setSyncError(e?.message || 'Could not resolve these conflicts')
+    } finally {
+      setSyncBusy(false)
+      listTaskGroups(activeWorkspace?.id).catch(() => {})
+    }
+  }, [syncConflict, syncTaskBranch, activeWorkspace?.id, listTaskGroups])
+
+  // Same warning as Update: a merge rewrites the task worktree, and the app
+  // has no business closing the user's agents to make that safe.
+  const handleMergeTask = useCallback((taskGroupId: string) => {
+    const open = () => setMergeTaskId(taskGroupId)
+    const t = (taskGroups || []).find(x => x.id === taskGroupId)
+    if ((t?.activeAgents ?? 0) > 0) {
+      confirmWithAgents({
+        title: 'Agents are still working',
+        message: `${t?.activeAgents} agent${t?.activeAgents === 1 ? '' : 's'} in "${t?.title || 'this task'}" ${t?.activeAgents === 1 ? 'is' : 'are'} still running.`,
+        detail: "Wait for them to finish, or close them yourself, before merging. AgntSpce will not close your agents for you — merging now rewrites their files underneath them.",
+        confirmLabel: 'Merge anyway',
+      }, async () => { open() })
+      return
+    }
+    open()
+  }, [taskGroups, confirmWithAgents])
 
   const handleMergeAllTasks = useCallback(async () => {
+    // Mirrors canMergeTask in the sidebar: a `done` task is already on the
+    // integration branch, so it is not part of the batch.
     const ids = (taskGroups || [])
-      .filter(t => !!t.branchName && !!t.baseSha && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef))
+      .filter(t => !!t.branchName && !!t.baseSha && t.status !== 'done' && (t.status === 'active' || !!t.mergeCandidateRef))
       .map(t => t.id)
     if (ids.length === 0) return
     const count = ids.length
-    if (!confirm(`Merge ${count} task${count === 1 ? '' : 's'} into the integration branch, oldest first?`)) return
-    try {
+    // This text used to claim a merged task is finished — its agents stopped,
+    // its worktree deleted. None of that has been true for a while: a merge
+    // leaves the task, its worktree, its branch and its agents alone, and only
+    // "Delete" removes a worktree. The old wording talked the user out of
+    // merging a task they could keep working in.
+    const activeCount = ids.filter(id => {
+      const t = (taskGroups || []).find(x => x.id === id)
+      return (t?.activeAgents ?? 0) > 0
+    }).length
+    const doMergeAll = async () => {
+      try {
       const res = await mergeAllTasks(ids)
-      if (res && res.ok === false) {
-        const failed = res.results?.find((r: any) => !r.ok && !r.skipped)
-        alert(`${res.landed ?? 0} of ${count} merged, then stopped.\n\n${failed?.error || 'A task failed to merge.'}${res.pendingConfirm ? `\n\n${res.pendingConfirm} task(s) have a prepared merge waiting for review.` : ''}`)
-      } else if ((res?.landed ?? count) > 0) {
-        // Merging only moves the integration branch, so the folder the user is
-        // looking at is still unchanged. Verified dead end: this used to end at
-        // "Merged N tasks" with no way to bring the files over.
-        if (confirm(`Merged ${res?.landed ?? count} task(s) into the integration branch.\n\nBring them into your current branch now?`)) {
-          await handleApplyIntegration()
-        }
+      const landed = res?.landed ?? 0
+      // Every task is attempted now, so a partial result is a normal outcome,
+      // not a halted batch: report what landed, what is waiting on review, and
+      // what failed, then still offer to bring the landed work over.
+      const failures = (res?.results || []).filter((r: any) => !r.ok && !r.skipped && !r.needsConfirm)
+      if (failures.length > 0) {
+        alert([
+          `Merged ${landed} of ${count}.`,
+          res?.pendingConfirm ? `${res.pendingConfirm} task(s) have a prepared merge waiting for review.` : '',
+          '',
+          ...failures.map((f: any) => `• ${f.error || 'A task failed to merge.'}`),
+        ].filter(Boolean).join('\n'))
       }
-    } catch (e: any) {
-      alert(e?.message || 'Merge failed')
+      if (landed > 0 && confirm(`Merged ${landed} task${landed === 1 ? '' : 's'} into the integration branch.\n\nBring them into your current branch now?`)) {
+        await handleApplyIntegration()
+      }
+      } catch (e: any) {
+        alert(e?.message || 'Merge failed')
+      }
     }
-  }, [taskGroups, mergeAllTasks, handleApplyIntegration])
+    if (activeCount > 0) {
+      confirmWithAgents({
+        title: 'Agents are still working',
+        message: `${activeCount} of these ${activeCount === 1 ? 'task has' : 'tasks have'} agents still running.`,
+        detail: "Wait for them to finish, or close them yourself, before merging. AgntSpce will not close your agents for you — merging now rewrites their files underneath them.",
+        confirmLabel: `Merge ${count} anyway`,
+      }, doMergeAll)
+      return
+    }
+    await doMergeAll()
+  }, [taskGroups, mergeAllTasks, handleApplyIntegration, confirmWithAgents])
 
 
   useEffect(() => {
@@ -1003,6 +1237,83 @@ function App() {
     [sessions]
   )
 
+  // Only agents actually installed, for the solver's picker.
+  const installedAgentsList = useMemo(
+    () => AGENTS_LIST.filter(a => installedAgents.has(a.id)),
+    [installedAgents]
+  )
+
+  // ---------------- Conflict solver ----------------
+  // The solver's agent is independent of the task on purpose. It runs in the
+  // task's worktree (that is where the files being merged live) but is its own
+  // session: it never joins the task's agent roster and never consumes one of
+  // its slots, so solving a conflict cannot hijack a task agent's terminal.
+  const openSolver = useCallback(async (taskGroupId: string, conflictFiles: string[]) => {
+    setSolverError('')
+    setSolverStatus('Loading conflict…')
+    try {
+      const res = await getConflictContext(taskGroupId, conflictFiles || [])
+      if (res?.ok === false) { setSolverError(res.error || 'Could not read the conflict'); return }
+      const agentId = installedAgentsList[0]?.id || 'claude'
+      setSolver({ context: res.context, sessionId: null, agentId })
+      setSolverStatus('')
+      setMergeTaskId(null)
+    } catch (e: any) {
+      setSolverError(e?.message || 'Could not read the conflict')
+    }
+  }, [getConflictContext, installedAgentsList])
+
+  const startSolverAgent = useCallback((agentId: string) => {
+    if (!solver?.context?.worktreePath) {
+      setSolverError('This task has no worktree for the solver to work in.')
+      return
+    }
+    setSolverBusy(true)
+    setSolverError('')
+    setSolverStatus(`Starting ${agentId}…`)
+    let cancelled = false
+    const brief = solver.context.brief || ''
+    ;(async () => {
+      const sid = await createSolverSession(agentId, solver.context.worktreePath)
+      if (cancelled || !sid) { setSolverBusy(false); return }
+      setSolver(s => (s ? { ...s, sessionId: sid, agentId } : s))
+      setSolverStatus(`${agentId} is starting`)
+      // Hand over the whole conflict as the first thing it reads, so the user
+      // does not have to paste context in themselves.
+      if (brief) setTimeout(() => sendTerminalInput(sid, brief.replace(/\n/g, '\r') + '\r'), 1500)
+    })()
+    return () => { cancelled = true }
+  }, [solver, createSolverSession, sendTerminalInput])
+
+  const closeSolver = useCallback(() => {
+    // Closing the panel closes the agent: it exists to solve this one conflict.
+    const sid = solver?.sessionId
+    if (sid) closeTab([sid])
+    setSolver(null)
+    setSolverError('')
+    setSolverStatus('')
+    setSolverBusy(false)
+  }, [solver, closeTab])
+
+  const solverKeep = useCallback((side: 'task' | 'integration') => {
+    if (!solver?.context) return
+    setSolverBusy(true)
+    ;(async () => {
+      try {
+        await syncTaskBranch(solver.context.taskId, { preferSide: side })
+        closeSolver()
+        alert(side === 'task'
+          ? "Kept this task's version. Open Merge changes to land it."
+          : "Kept the merged version. Open Merge changes to land it.")
+      } catch (e: any) {
+        setSolverError(e?.message || 'Could not apply that choice')
+      } finally {
+        setSolverBusy(false)
+        listTaskGroups(activeWorkspace?.id).catch(() => {})
+      }
+    })()
+  }, [solver, syncTaskBranch, closeSolver, listTaskGroups, activeWorkspace?.id])
+
   const handleNewTerminal = useCallback((type?: string) => {
     createRawSession(type, wsPath)
   }, [createRawSession, wsPath])
@@ -1313,10 +1624,14 @@ function App() {
     if (!group) return
     const groupId = group.id
     let cwd = group.worktreePath
+    let lastStatus = ''
+    let lastMode = ''
     for (let attempt = 0; !cwd && attempt < 12; attempt++) {
       try {
         const res = await getTaskDetail(groupId)
         const taskGroup = res?.detail?.group
+        lastStatus = taskGroup?.status || ''
+        lastMode = taskGroup?.worktreeMode || ''
         cwd = taskGroup?.worktreePath
           || (taskGroup?.worktreeMode === 'in-repo' || taskGroup?.worktreeMode === 'none' ? taskGroup?.repoPath : null)
           || null
@@ -1325,7 +1640,26 @@ function App() {
       if (!cwd) await new Promise(resolve => setTimeout(resolve, 100))
     }
     if (!cwd) {
-      alert('The task workspace is still being prepared. Try again in a moment.')
+      // A task that was never launched has no worktree to put an agent in, and
+      // no amount of waiting will change that. Say so instead of the old
+      // "still being prepared", which was the answer for every failure.
+      if (lastStatus === 'planning' || lastStatus === 'done' || lastStatus === '') {
+        alert('This task has not been launched yet, so it has no worktree for the agent. Launch it first.')
+        return
+      }
+      if (lastStatus === 'abandoned') {
+        alert('This task was abandoned. Create a new task to keep working.')
+        return
+      }
+      if (lastStatus === 'planning' || lastStatus === '') {
+        alert('This task has not been launched yet, so it has no worktree for the agent. Launch it first.')
+        return
+      }
+      if (lastMode === 'none') {
+        alert('This task runs directly in the workspace folder and could not be resolved. Reopen the task and try again.')
+        return
+      }
+      alert('The task worktree could not be prepared. Try again in a moment.')
       return
     }
     const defaultConfig = { agentId, mode: 'fresh', flags: [] }
@@ -2084,10 +2418,11 @@ function App() {
               getTokenUsage={getTokenUsage}
               onRenameTask={handleRenameTask}
               onSetTaskPinned={handleSetTaskPinned}
-              onMergeTask={setMergeTaskId}
+              onMergeTask={handleMergeTask}
               onMergeAllTasks={handleMergeAllTasks}
               onApplyIntegration={handleApplyIntegration}
               applyingIntegration={applyingIntegration}
+              onUpdateTask={handleUpdateTask}
               onDeleteTask={handleDeleteTask}
               onOpenTaskDetails={setSelectedTaskId}
             />
@@ -2325,11 +2660,56 @@ function App() {
           taskTitle={mergeDialogTask.title}
           api={taskMergeApi}
           onClose={() => setMergeTaskId(null)}
+          onOpenSolver={(files) => openSolver(mergeDialogTask.id, files)}
           onMerged={() => { if (activeWorkspace?.id) listTaskGroups(activeWorkspace.id).catch(() => {}) }}
         />
       )}
-      {gitConsentOpen && activeWorkspace && (
-        <GitConsentDialog
+      {solver?.context && (
+        <ConflictSolverPanel
+          context={solver.context}
+          solverSessionId={solver.sessionId}
+          installedAgents={Object.fromEntries(AGENTS_LIST.map(a => [a.id, installedAgents.has(a.id)]))}
+          agentConfigs={agentConfigs}
+          sessions={sessions}
+          busy={solverBusy}
+          error={solverError}
+          statusText={solverStatus}
+          onInput={sendTerminalInput}
+          onResize={sendTerminalResize}
+          onStartAgent={(sessionId, config) => startAgent(sessionId, config)}
+          onShowAgentModal={() => {}}
+          onRestart={() => closeSolver()}
+          onCloseSession={() => closeSolver()}
+          onOpenSolver={(agentId) => startSolverAgent(agentId)}
+          onKeepTask={() => solverKeep('task')}
+          onKeepMerged={() => solverKeep('integration')}
+          onClose={closeSolver}
+        />
+      )}
+      <RiskConfirmDialog
+        open={!!riskPrompt}
+        title={riskPrompt?.title ?? ''}
+        message={riskPrompt?.message ?? ''}
+        detail={riskPrompt?.detail ?? ''}
+        confirmLabel={riskPrompt?.confirmLabel ?? 'Continue'}
+        busy={riskBusy}
+        onCancel={() => { if (!riskBusy) setRiskPrompt(null) }}
+        onConfirm={runRiskPrompt}
+      />
+      {syncConflict && (
+        <TaskSyncDialog
+          state={syncConflict}
+          busy={syncBusy}
+          error={syncError}
+          onCancel={() => { setSyncConflict(null); setSyncError('') }}
+          onOpenSolver={() => {
+            if (syncConflict) openSolver(syncConflict.taskGroupId, syncConflict.conflictFiles)
+            setSyncConflict(null)
+          }}
+          onResolve={handleResolveSyncConflict}
+        />
+      )}
+      {gitConsentOpen && activeWorkspace && (        <GitConsentDialog
           workspaceName={activeWorkspace.name || activeWorkspace.repository?.path || 'Workspace'}
           onInitialize={handleInitializeGit}
           onAcceptNoGit={handleAcceptNoGit}

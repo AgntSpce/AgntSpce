@@ -9,10 +9,9 @@ import {
 import { WorktreeLifecycle } from './worktreeLifecycle'
 import { CollabShim } from './collabShim'
 import {
-  planTask,
+  buildTaskAssignments,
   writeTaskMetaFile,
   type PlanAgentInput,
-  type TaskPlan,
 } from './taskPlanner'
 import { SessionSummarizer, type TaskSummary } from './sessionSummarizer'
 
@@ -26,7 +25,6 @@ export interface SubtaskSpawnInput {
   prompt: string
   cwd: string
   worktreeId: string
-  scopeFiles: string[]
   siblingSessionIds: string[]
 }
 
@@ -52,8 +50,6 @@ export interface TaskWarning {
 export interface LaunchResult {
   taskGroupId: string
   sessionIds: string[]
-  usedFallback: boolean
-  warnings: string[]
 }
 
 export interface TaskDetail {
@@ -72,20 +68,10 @@ export class TaskOrchestrator {
     private spawner: Spawner,
     private slots: SlotPool,
     private opts?: {
-      llm?: (prompt: string) => Promise<string | null>
-      repoTree?: (repoPath: string) => string[]
       slotTimeoutMs?: number
     }
   ) {}
 
-  private repoTreeFor(repoPath: string): string[] {
-    try {
-      if (this.opts?.repoTree) return this.opts.repoTree(repoPath)
-      return fs.readdirSync(repoPath)
-    } catch {
-      return []
-    }
-  }
 
   private sourceRef(): string {
     try {
@@ -107,7 +93,9 @@ export class TaskOrchestrator {
   }
 
   /** Full launch: plan → worktree/branch → meta+seed → reserve → spawn.
-   *  Only 'planning' (or 'paused' after a failed launch) groups launch. */
+   *  Only 'planning' (or 'paused' after a failed launch) groups launch. A merged
+   *  task stays 'active' with its worktree and agents intact, so it is never
+   *  relaunched - work simply continues. */
   async launchTask(taskGroupId: string): Promise<LaunchResult> {
     const group = this.sm.getTaskGroup(taskGroupId)
     if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
@@ -117,7 +105,6 @@ export class TaskOrchestrator {
     const shells = this.sm.listSubTasks(taskGroupId)
     if (shells.length === 0) throw new CoordinatorError('INVALID_STATE', `Task ${taskGroupId} has no agents`)
 
-    const plan = await this.buildPlan(group, shells)
     const wtl = new WorktreeLifecycle(group.repoPath)
     const slug = WorktreeLifecycle.sanitizeTaskSlug(group.title)
 
@@ -149,24 +136,29 @@ export class TaskOrchestrator {
     const cwd = worktreePath ?? group.repoPath
     this.sm.updateTaskGroup(group.id, { branchName, worktreePath, baseSha, status: 'active' })
 
+    // Every agent gets the whole goal. There is no split to record, so the
+    // meta file is just who is taking part.
+    const assignments = buildTaskAssignments(
+      this.planContext({ ...group, branchName, worktreePath }, shells),
+      shells.map(s => ({ agentId: s.agentId, model: s.model, reasoning: s.reasoning, verbosity: s.verbosity })),
+    )
     writeTaskMetaFile(cwd, {
       taskGroupId: group.id,
       branchName,
       baseSha,
       worktreeMode: group.worktreeMode,
-      todoList: plan.todoList,
-      subtasks: plan.subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
+      agents: shells.map(s => s.agentId),
     })
-    for (const s of plan.subtasks) {
-      const shell = shells.find(x => x.agentId === s.agentId)
-      if (shell) this.sm.updateSubTaskPlan(shell.id, { title: s.title, scopeFiles: s.scopeFiles, assignmentPrompt: s.assignmentPrompt })
+    for (const a of assignments) {
+      const shell = shells.find(x => x.agentId === a.agentId)
+      if (shell) this.sm.updateSubTaskAssignment(shell.id, a.assignmentPrompt)
     }
     new CollabShim(this.sm, group.repoPath).seed(group.id)
 
     // Reserve every slot before spawning the first agent.
     let releases: (() => void)[]
     try {
-      releases = await this.slots.tryAcquire(plan.subtasks.length, this.opts?.slotTimeoutMs ?? 30000)
+      releases = await this.slots.tryAcquire(shells.length, this.opts?.slotTimeoutMs ?? 30000)
     } catch (err: any) {
       this.sm.updateTaskGroup(group.id, { status: 'paused' })
       throw new CoordinatorError('NO_CAPACITY', err?.message || 'Not enough agent slots right now — reduce agents or wait for another task to finish')
@@ -177,7 +169,6 @@ export class TaskOrchestrator {
       const fresh = this.sm.listSubTasks(group.id)
       for (const s of fresh) {
         if (s.status === 'done') continue
-        const planned = plan.subtasks.find(p => p.agentId === s.agentId)
         const sid = await this.spawner.spawnTaskSubtask({
           taskGroupId: group.id,
           subtaskId: s.id,
@@ -185,10 +176,9 @@ export class TaskOrchestrator {
           model: s.model ?? undefined,
           reasoning: s.reasoning ?? undefined,
           verbosity: s.verbosity ?? undefined,
-          prompt: planned?.assignmentPrompt || s.assignmentPrompt,
+          prompt: s.assignmentPrompt,
           cwd,
           worktreeId: group.id,
-          scopeFiles: s.scopeFiles,
           siblingSessionIds: [...sessionIds],
         })
         this.sm.updateSubTaskStatus(s.id, 'running', sid)
@@ -204,16 +194,28 @@ export class TaskOrchestrator {
         try { release() } catch {}
       }
     }
-    return { taskGroupId: group.id, sessionIds, usedFallback: plan.usedFallback, warnings: plan.warnings }
+    return { taskGroupId: group.id, sessionIds }
   }
 
-  /** Follow-up: stop running agents, re-plan with the new message appended,
-   *  update non-done subtasks, re-seed, respawn only the non-done ones. */
-  async replanTask(taskGroupId: string, followUp: string): Promise<LaunchResult> {
+  /** Follow-up: stop running agents, hand them the goal plus the new message,
+   *  re-seed, and respawn only the non-done ones. There is nothing to re-plan —
+   *  every agent already has the whole goal, so a follow-up is just more of it. */
+  async followUpTask(taskGroupId: string, followUp: string): Promise<LaunchResult> {
+    const groupIdLabel = (g: TaskGroupOverview) => `"${g.title}"`
     const group = this.sm.getTaskGroup(taskGroupId)
     if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
     const message = followUp.trim()
     if (!message) throw new CoordinatorError('INVALID', 'Follow-up message is empty')
+    // A finished task's worktree is gone. Following up used to relaunch its
+    // agents into that deleted directory, which fails silently and leaves a bare
+    // shell — and, before the merge started closing sessions, one that looked
+    // to the agent like its environment had been swapped.
+    if (group.status === 'done' || group.status === 'abandoned') {
+      throw new CoordinatorError('INVALID_STATE', `Task ${groupIdLabel(group)} has already been merged and its worktree is gone. Start a new task instead.`)
+    }
+    if (group.worktreePath && !fs.existsSync(group.worktreePath)) {
+      throw new CoordinatorError('INVALID_STATE', 'This task\'s worktree no longer exists, so its agents cannot be restarted. Create the task again.')
+    }
 
     const subs = this.sm.listSubTasks(taskGroupId)
     const runningIds = subs.filter(s => s.status === 'running' && s.sessionId).map(s => s.sessionId as string)
@@ -222,28 +224,18 @@ export class TaskOrchestrator {
       if (s.status === 'running') this.sm.updateSubTaskStatus(s.id, 'pending', null)
     }
 
-    const goal = group.userGoal ? `${group.userGoal}\nFollow-up: ${message}` : message
     const agents: PlanAgentInput[] = subs
       .filter(s => s.status !== 'done')
       .map(s => ({ agentId: s.agentId, model: s.model, reasoning: s.reasoning, verbosity: s.verbosity }))
-    if (agents.length === 0) throw new CoordinatorError('INVALID_STATE', `Task ${taskGroupId} is fully done — nothing to replan`)
+    if (agents.length === 0) throw new CoordinatorError('INVALID_STATE', `Task ${taskGroupId} is fully done — no unfinished agents to follow up`)
 
-    const plan = await planTask(
-      {
-        taskTitle: group.title,
-        userGoal: goal,
-        branchName: group.branchName ?? '',
-        worktreePath: group.worktreePath ?? group.repoPath,
-        worktreeMode: group.worktreeMode,
-        integrationBranch: this.integrationBranchOrUndefined(),
-      },
+    const assignments = buildTaskAssignments(
+      this.planContext(group, agents, message),
       agents,
-      this.repoTreeFor(group.worktreePath ?? group.repoPath),
-      this.opts?.llm
     )
-    for (const p of plan.subtasks) {
-      const shell = subs.find(s => s.agentId === p.agentId && s.status !== 'done')
-      if (shell) this.sm.updateSubTaskPlan(shell.id, { title: p.title, scopeFiles: p.scopeFiles, assignmentPrompt: p.assignmentPrompt })
+    for (const a of assignments) {
+      const shell = subs.find(s => s.agentId === a.agentId && s.status !== 'done')
+      if (shell) this.sm.updateSubTaskAssignment(shell.id, a.assignmentPrompt)
     }
     const cwd = group.worktreePath ?? group.repoPath
     const current = this.sm.listSubTasks(taskGroupId)
@@ -252,15 +244,14 @@ export class TaskOrchestrator {
       branchName: group.branchName ?? '',
       baseSha: group.baseSha,
       worktreeMode: group.worktreeMode,
-      todoList: plan.todoList,
-      subtasks: current.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
+      agents: agents.map(a => a.agentId),
     })
     new CollabShim(this.sm, group.repoPath).refresh(group.id)
     this.sm.updateTaskGroup(group.id, { status: 'active' })
 
     let releases: (() => void)[]
     try {
-      releases = await this.slots.tryAcquire(plan.subtasks.length, this.opts?.slotTimeoutMs ?? 30000)
+      releases = await this.slots.tryAcquire(agents.length, this.opts?.slotTimeoutMs ?? 30000)
     } catch (err: any) {
       this.sm.updateTaskGroup(group.id, { status: 'paused' })
       throw new CoordinatorError('NO_CAPACITY', err?.message || 'Not enough agent slots right now')
@@ -269,7 +260,6 @@ export class TaskOrchestrator {
     try {
       for (const s of current) {
         if (s.status === 'done') continue
-        const planned = plan.subtasks.find(p => p.agentId === s.agentId)
         const sid = await this.spawner.spawnTaskSubtask({
           taskGroupId: group.id,
           subtaskId: s.id,
@@ -277,10 +267,9 @@ export class TaskOrchestrator {
           model: s.model ?? undefined,
           reasoning: s.reasoning ?? undefined,
           verbosity: s.verbosity ?? undefined,
-          prompt: planned?.assignmentPrompt || s.assignmentPrompt,
+          prompt: s.assignmentPrompt,
           cwd,
           worktreeId: group.id,
-          scopeFiles: s.scopeFiles,
           siblingSessionIds: [...sessionIds],
         })
         this.sm.updateSubTaskStatus(s.id, 'running', sid)
@@ -295,7 +284,7 @@ export class TaskOrchestrator {
         try { release() } catch {}
       }
     }
-    return { taskGroupId: group.id, sessionIds, usedFallback: plan.usedFallback, warnings: plan.warnings }
+    return { taskGroupId: group.id, sessionIds }
   }
 
   /** Kill graph: closes every subtask PTY. Abandon also retires the group;
@@ -372,26 +361,29 @@ export class TaskOrchestrator {
     return out
   }
 
-  private async buildPlan(group: TaskGroupOverview, shells: { agentId: string; model: string | null; reasoning: string | null; verbosity: string | null }[]): Promise<TaskPlan> {
+  /** The assignment context every agent in this task shares.
+   *
+   *  There is no planning step: this resolves the worktree/branch and states how
+   *  many agents share the task, and `buildTaskAssignments` hands each one the
+   *  whole goal. Splitting the goal was the old LLM planner's job, and it had
+   *  strictly less information than the agents do. */
+  private planContext(group: TaskGroupOverview, shells: { agentId: string }[], followUp?: string): PlanContext {
     const wtl = new WorktreeLifecycle(group.repoPath)
     const slug = WorktreeLifecycle.sanitizeTaskSlug(group.title)
     const branchName = group.branchName ?? wtl.buildTaskBranchName(group.id, slug)
     // 'none' has no worktree at all — the agent's cwd is the workspace folder.
     const worktreePath = group.worktreePath
       ?? (group.worktreeMode === 'in-repo' || group.worktreeMode === 'none' ? group.repoPath : wtl.getTaskWorktreePath(group.id))
-    return planTask(
-      {
-        taskTitle: group.title,
-        userGoal: group.userGoal,
-        branchName,
-        worktreePath,
-        worktreeMode: group.worktreeMode,
-        integrationBranch: this.integrationBranchOrUndefined(),
-      },
-      shells.map(s => ({ agentId: s.agentId, model: s.model, reasoning: s.reasoning, verbosity: s.verbosity })),
-      this.repoTreeFor(group.repoPath),
-      this.opts?.llm
-    )
+    return {
+      taskTitle: group.title,
+      userGoal: group.userGoal,
+      branchName,
+      worktreePath,
+      worktreeMode: group.worktreeMode,
+      integrationBranch: this.integrationBranchOrUndefined(),
+      agentCount: shells.length,
+      followUp,
+    }
   }
 
   private safeRevParse(repoPath: string, ref: string): string | null {

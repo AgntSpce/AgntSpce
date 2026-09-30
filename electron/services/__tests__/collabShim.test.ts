@@ -46,13 +46,15 @@ describe('CollabShim', () => {
     expect(shim.done(g.id, a.id, 'schema done').ok).toBe(true)
     expect(sm.getSubTask(a.id)?.status).toBe('done')
 
-    const mdPath = path.join(dir, 'COLLAB.md')
+    // No worktree: our files live under .agntspce/, not the user's root.
+    const mdPath = path.join(dir, '.agntspce', 'shared', 'COLLAB.md')
     expect(fs.existsSync(mdPath)).toBe(true)
     const md = fs.readFileSync(mdPath, 'utf-8')
     expect(md).toContain('# Task: Login')
     expect(md).toContain('## Subtasks')
     expect(md).toContain('## Progress')
     expect(md).toContain('schema done')
+    expect(fs.existsSync(path.join(dir, 'COLLAB.md'))).toBe(false)
   })
 
   it('renderCollabMd lists open claims and caps progress history', () => {

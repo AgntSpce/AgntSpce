@@ -82,13 +82,16 @@ interface UseSocketReturn {
   closeTask: (taskGroupId: string, abandon?: boolean) => Promise<any>
   taskFollowup: (taskGroupId: string, message: string) => Promise<any>
   previewTaskMerge: (taskGroupId: string) => Promise<any>
-  mergeTask: (taskGroupId: string, autoResolve?: boolean) => Promise<any>
+  mergeTask: (taskGroupId: string, autoResolve?: boolean, preferSide?: 'ours' | 'theirs') => Promise<any>
   confirmTaskMerge: (taskGroupId: string) => Promise<any>
   mergeAllTasks: (taskGroupIds: string[]) => Promise<any>
   checkGitRepo: (workspaceId?: string, repoPath?: string) => Promise<any>
   initGitRepo: (workspaceId?: string, repoPath?: string) => Promise<any>
-  syncTaskBranch: (taskGroupId: string) => Promise<any>
+  syncTaskBranch: (taskGroupId: string, opts?: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }) => Promise<any>
   applyTaskBranch: (branchName?: string) => Promise<any>
+  discardLocalEdits: (files: string[]) => Promise<any>
+  getConflictContext: (taskGroupId: string, files: string[]) => Promise<any>
+  createSolverSession: (agentId: string, cwd: string) => Promise<string | null>
   groupSessions: (sessionIds: string[], title?: string) => Promise<any>
   joinGroup: (taskGroupId: string, sessionId: string) => Promise<any>
   ungroupSession: (taskGroupId: string, sessionId: string) => Promise<any>
@@ -773,8 +776,8 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('preview-task-merge', { taskGroupId }, 300000)
   }, [emitAck])
 
-  const mergeTask = useCallback((taskGroupId: string, autoResolve = true): Promise<any> => {
-    return emitAck('merge-task', { taskGroupId, autoResolve }, 900000)
+  const mergeTask = useCallback((taskGroupId: string, autoResolve = true, preferSide?: 'ours' | 'theirs'): Promise<any> => {
+    return emitAck('merge-task', { taskGroupId, autoResolve, preferSide }, 900000)
   }, [emitAck])
 
   const confirmTaskMerge = useCallback((taskGroupId: string): Promise<any> => {
@@ -793,12 +796,37 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('init-git-repo', { workspaceId, repoPath }, 180000)
   }, [emitAck])
 
-  const syncTaskBranch = useCallback((taskGroupId: string): Promise<any> => {
-    return emitAck('sync-task-branch', { taskGroupId }, 300000)
+  const syncTaskBranch = useCallback((taskGroupId: string, opts?: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }): Promise<any> => {
+    return emitAck('sync-task-branch', { taskGroupId, ...opts }, 300000)
   }, [emitAck])
 
   // Fast-forward the user's checked-out branch onto the integration branch, so
   // merged task work lands in the folder they are looking at.
+  // Revert the user's local edits for named files only. Exposed as a socket
+  // call rather than a shell-out so the exact file list the apply reported is
+  // what gets reverted, with no path handling in the renderer.
+  const discardLocalEdits = useCallback((files: string[]): Promise<any> => {
+    return emitAck('discard-local-edits', { files }, 60000)
+  }, [emitAck])
+
+  // Everything a conflict solver needs: the task's goal, both versions of each
+  // conflicting file, the three-way diff, and a written brief.
+  const getConflictContext = useCallback((taskGroupId: string, files: string[]): Promise<any> => {
+    return emitAck('get-conflict-context', { taskGroupId, files }, 120000)
+  }, [emitAck])
+
+  // A throwaway agent session for the conflict solver: created in the worktree
+  // being resolved and started immediately. It is NOT linked to a task group,
+  // so it never appears in the task's agent roster and never takes a slot.
+  const createSolverSession = useCallback((agentId: string, cwd: string): Promise<string | null> => {
+    return emitAck('create-agent-session', {
+      type: agentId,
+      workspacePath: cwd,
+      config: { agentId, mode: 'fresh', flags: [] },
+      // No taskGroupId: independent of the task by design.
+    }, 30000).then((res: any) => res?.sessionId ?? null)
+  }, [emitAck])
+
   const applyTaskBranch = useCallback((branchName?: string): Promise<any> => {
     return emitAck('apply-task-branch', { branchName }, 300000)
   }, [emitAck])
@@ -1187,6 +1215,9 @@ socket.emit('get-cumulative-stats', {})
     initGitRepo,
     syncTaskBranch,
     applyTaskBranch,
+    discardLocalEdits,
+    getConflictContext,
+    createSolverSession,
     groupSessions,
     joinGroup,
     ungroupSession,

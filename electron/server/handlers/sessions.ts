@@ -74,6 +74,15 @@ export function registerSessionHandlers(ctx: ServerContext, socket: Socket): voi
 
   socket.on('start-agent', async ({ sessionId, config }) => {
     try {
+      // Starting an agent appends a launch command to the PTY. Doing that while
+      // an agent is already running types the text into the live TUI's stdin
+      // instead of the shell, so guard it — a duplicate start should be refused,
+      // not silently typed into someone's terminal.
+      const state = ctx.sessionManager.getSessionStates().find(s => s.id === sessionId)
+      if (state?.status === 'running' || state?.status === 'busy') {
+        socket.emit('error', { message: 'That agent is already running. Close it first to start a new one.' })
+        return
+      }
       ctx.sessionManager.startAgentWithConfig(sessionId, config)
       socket.emit('agent-started', { sessionId, config })
       await ctx.autoSaveSessions()

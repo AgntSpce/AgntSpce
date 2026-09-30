@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { SessionManager } from '../sessionManager'
+import { SessionManager, buildShellArgs } from '../sessionManager'
 import { RingBuffer } from '../ringBuffer'
 import type { Session, Workspace } from '../types'
 
@@ -228,7 +228,36 @@ describe('SessionManager (orchestration logic)', () => {
       const session = makeFakeSession({ id: 's1', pty: { write: writeMock } })
       sm.sessions.set('s1', session)
       expect(sm.writeToSession('s1', 'hello')).toBe(true)
-      expect(writeMock).toHaveBeenCalledWith('hello')
+      // A callback is passed so a failed write is handled rather than logged by
+      // node-pty as "Unhandled pty write error".
+      expect(writeMock).toHaveBeenCalledWith('hello', expect.any(Function))
+    })
+
+    it('marks the session exited when the pty reports EIO', () => {
+      // Verified: writing to a dead pty on macOS fails asynchronously with EIO.
+      // The synchronous try/catch cannot see it, so without a callback node-pty
+      // logged it as unhandled and the tab stayed "live" but untypable.
+      let cb: ((err?: Error) => void) | undefined
+      const writeMock = vi.fn((_data: string, done?: (e?: Error) => void) => { cb = done })
+      const session = makeFakeSession({ id: 's1', pty: { write: writeMock } })
+      sm.sessions.set('s1', session)
+      expect(sm.writeToSession('s1', 'hello')).toBe(true)
+      expect(session.status).not.toBe('exited')
+      cb?.(Object.assign(new Error('write EIO'), { code: 'EIO' }))
+      expect(session.status).toBe('exited')
+      // The pty object is kept so resume-recovery can still re-launch.
+      expect(session.pty).toBeTruthy()
+      expect(String(session.exitReason)).toMatch(/EIO/i)
+    })
+
+    it('does not mark the session exited for an unrelated write error', () => {
+      let cb: ((err?: Error) => void) | undefined
+      const writeMock = vi.fn((_data: string, done?: (e?: Error) => void) => { cb = done })
+      const session = makeFakeSession({ id: 's1', pty: { write: writeMock } })
+      sm.sessions.set('s1', session)
+      sm.writeToSession('s1', 'hello')
+      cb?.(new Error('some other failure'))
+      expect(session.status).not.toBe('exited')
     })
 
     it('writeToSession ignores command/flag-only lines as prompts', () => {
@@ -265,5 +294,42 @@ describe('SessionManager (orchestration logic)', () => {
       expect(session?.buffer.snapshot()).toContain('fresh-agent')
       manager.closeSession('resume-fallback-test')
     })
+  })
+})
+
+// A dead pty is the worst failure mode in a terminal app: the tab looks live but
+// nothing can be typed into it, and node-pty logs "EIO: i/o error, write" with
+// no explanation. The cause was this chain: every command was joined with `&&`,
+// so a `cd` into a task worktree that a merge had just deleted failed, skipped
+// the `exec`, and the shell exited immediately.
+describe('buildShellArgs keeps a terminal alive when a cd fails', () => {
+  const scriptOf = (args: string[]) => args[args.length - 1]!
+
+  it('always reaches the exec, whatever a command does', () => {
+    const script = scriptOf(buildShellArgs(`cd '/nope/does/not/exist'`))
+    // `&&` would abort the chain here; the shell must exec regardless.
+    expect(script).toMatch(/;\s*exec /)
+    expect(script).not.toMatch(/&&\s*exec/)
+    expect(script).toMatch(/\|\|\s*true/)
+  })
+
+  it('still runs the commands, in order', () => {
+    const script = scriptOf(buildShellArgs([`cd /tmp`, `echo hi`]))
+    expect(script.indexOf('cd /tmp')).toBeLessThan(script.indexOf('echo hi'))
+    expect(script).toMatch(/;\s*exec /)
+  })
+
+  it('produces a valid script for an empty command list', () => {
+    // `{ ; } || true` is a syntax error, so the empty case has to short-circuit.
+    const script = scriptOf(buildShellArgs([]))
+    expect(script).toMatch(/^exec /)
+    expect(script).not.toContain('{ ; }')
+  })
+
+  it('is syntactically valid shell', () => {
+    const { execFileSync } = require('node:child_process') as typeof import('node:child_process')
+    // A real shell must accept the generated script.
+    const script = scriptOf(buildShellArgs(`cd '/nope/does/not/exist'`)).replace(/exec\s+\S+\s*$/, 'true')
+    expect(() => execFileSync('/bin/sh', ['-n', '-c', script])).not.toThrow()
   })
 })

@@ -49,14 +49,6 @@ class FakeSlots {
   }
 }
 
-const CLEAN_PLAN = JSON.stringify({
-  todoList: ['db', 'ui'],
-  subtasks: [
-    { agentId: 'claude', title: 'DB', scopeFiles: ['src/db.ts'] },
-    { agentId: 'opencode', title: 'UI', scopeFiles: ['src/ui.tsx'] },
-  ],
-})
-
 function setup(mode: 'worktree' | 'in-repo' = 'worktree'): { repo: string; sm: StateManager; gid: string } {
   const repo = tmpDir()
   initRepo(repo)
@@ -68,14 +60,13 @@ function setup(mode: 'worktree' | 'in-repo' = 'worktree'): { repo: string; sm: S
 }
 
 describe('TaskOrchestrator', () => {
-  it('launches: plans, creates worktree, seeds, reserves, spawns', async () => {
+  it('launches: creates worktree, seeds, reserves, spawns', async () => {
     const { repo, sm, gid } = setup()
     const spawner = new FakeSpawner()
-    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
     const res = await orch.launchTask(gid)
 
     expect(res.sessionIds).toHaveLength(2)
-    expect(res.usedFallback).toBe(false)
     const group = sm.getTaskGroup(gid)!
     expect(group.status).toBe('active')
     expect(group.branchName).toMatch(/^task\/login-page-/)
@@ -95,7 +86,7 @@ describe('TaskOrchestrator', () => {
 
   it('launches in-repo mode without a worktree dir', async () => {
     const { sm, gid } = setup('in-repo')
-    const orch = new TaskOrchestrator(sm, new FakeSpawner(), new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, new FakeSpawner(), new FakeSlots())
     const res = await orch.launchTask(gid)
     expect(res.sessionIds).toHaveLength(2)
     const group = sm.getTaskGroup(gid)!
@@ -106,7 +97,7 @@ describe('TaskOrchestrator', () => {
   it('pauses without spawning when slots are unavailable', async () => {
     const { sm, gid } = setup()
     const spawner = new FakeSpawner()
-    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(true), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(true))
     await expect(orch.launchTask(gid)).rejects.toThrow(/NO_CAPACITY|slots/)
     expect(spawner.spawns).toHaveLength(0)
     expect(sm.getTaskGroup(gid)!.status).toBe('paused')
@@ -116,20 +107,20 @@ describe('TaskOrchestrator', () => {
     const { sm, gid } = setup()
     const spawner = new FakeSpawner()
     spawner.failSpawn = true
-    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
     await expect(orch.launchTask(gid)).rejects.toThrow(/spawn boom/)
     expect(sm.getTaskGroup(gid)!.status).toBe('paused')
   })
 
-  it('replans follow-ups: closes old sessions, respawns non-done', async () => {
+  it('follow-ups: closes old sessions, respawns non-done', async () => {
     const { sm, gid } = setup()
     const spawner = new FakeSpawner()
-    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
     const first = await orch.launchTask(gid)
     const subs = sm.listSubTasks(gid)
     sm.updateSubTaskStatus(subs[0]!.id, 'done')
 
-    const res = await orch.replanTask(gid, 'also add logout')
+    const res = await orch.followUpTask(gid, 'also add logout')
     // Only the non-done subtask respawns; the done session stays closed-or-absent.
     expect(res.sessionIds).toHaveLength(1)
     expect(spawner.closed).toEqual(expect.arrayContaining(first.sessionIds.slice(1)))
@@ -140,7 +131,7 @@ describe('TaskOrchestrator', () => {
   it('closes tasks: kills sessions, parks or abandons', async () => {
     const { sm, gid } = setup()
     const spawner = new FakeSpawner()
-    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
     const launched = await orch.launchTask(gid)
     const out = orch.closeTask(gid)
     expect(out.closed).toBe(2)
@@ -171,7 +162,7 @@ describe('TaskOrchestrator', () => {
   it('deleteTask closes sessions, retires worktree, drops rows', async () => {
     const { sm, gid } = setup()
     const spawner = new FakeSpawner()
-    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
     const launched = await orch.launchTask(gid)
     const wt = sm.getTaskGroup(gid)!.worktreePath!
     expect(fs.existsSync(wt)).toBe(true)
@@ -185,12 +176,54 @@ describe('TaskOrchestrator', () => {
 
   it('getDetail bundles group, subtasks, summary, warnings', async () => {
     const { sm, gid } = setup()
-    const orch = new TaskOrchestrator(sm, new FakeSpawner(), new FakeSlots(), { llm: async () => CLEAN_PLAN })
+    const orch = new TaskOrchestrator(sm, new FakeSpawner(), new FakeSlots())
     await orch.launchTask(gid)
     const detail = orch.getDetail(gid)
     expect(detail.group.id).toBe(gid)
     expect(detail.subtasks).toHaveLength(2)
     expect(detail.summary.taskId).toBe(gid)
     expect(Array.isArray(detail.warnings)).toBe(true)
+  })
+})
+
+// A follow-up on a finished task used to relaunch its agents into a worktree
+// the merge had already deleted. `pty.spawn` fails on a missing directory, the
+// error is swallowed by a bare catch, and the user is left with a bare shell —
+// or, before merges started closing sessions, an agent whose directory vanished
+// mid-conversation.
+describe('following up on a task', () => {
+  it('refuses once the task is merged and its worktree is gone', async () => {
+    const { repo, sm, gid } = setup()
+    const spawner = new FakeSpawner()
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
+    await orch.launchTask(gid)
+    expect(sm.getTaskGroup(gid)!.status).toBe('active')
+
+    // Retire it the way a merge does: done, no worktree, no branch.
+    sm.updateTaskGroup(gid, { status: 'done', worktreePath: null, branchName: null })
+
+    await expect(orch.followUpTask(gid, 'also add logout')).rejects.toThrow(/already been merged/i)
+    // No agent was spawned into a directory that does not exist.
+    expect(spawner.spawns.filter(s => s.cwd).length).toBe(2) // only the original launch
+  })
+
+  it('refuses when the worktree directory has vanished', async () => {
+    const { repo, sm, gid } = setup()
+    const orch = new TaskOrchestrator(sm, new FakeSpawner(), new FakeSlots())
+    await orch.launchTask(gid)
+    const group = sm.getTaskGroup(gid)!
+    fs.rmSync(group.worktreePath!, { recursive: true, force: true })
+    await expect(orch.followUpTask(gid, 'keep going')).rejects.toThrow(/no longer exists/i)
+  })
+
+  it('still works on a live task', async () => {
+    const { sm, gid } = setup()
+    const spawner = new FakeSpawner()
+    const orch = new TaskOrchestrator(sm, spawner, new FakeSlots())
+    await orch.launchTask(gid)
+    const res = await orch.followUpTask(gid, 'also add logout')
+    expect(res.sessionIds.length).toBeGreaterThan(0)
+    // The follow-up reached the agent.
+    expect(spawner.spawns[spawner.spawns.length - 1]!.prompt).toContain('also add logout')
   })
 })

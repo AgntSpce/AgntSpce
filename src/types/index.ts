@@ -213,7 +213,10 @@ export interface TaskGroupInfo {
   /** Set while a conflict-resolved merge waits for the user to land it. */
   mergeCandidateRef?: string | null
   mergeCandidateBase?: string | null
-  members?: { agentId: string; sessionId: string | null }[]
+  members?: { agentId: string; sessionId: string | null; status?: string }[]
+  /** Sessions that produced output very recently. Used only to decide whether
+   *  to warn before a branch-moving action — never to hide a control. */
+  activeAgents?: number
 }
 
 export interface SubTaskInfo {

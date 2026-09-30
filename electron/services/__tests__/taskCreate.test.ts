@@ -164,8 +164,13 @@ describe('create-task-group in worktreeMode "none" (accepted no-git mode)', () =
     expect(group.worktreePath).toBeNull()
     expect(group.baseSha).toBeNull()
     expect(fs.existsSync(path.join(dir, '.agntspce', 'tasks', res.taskGroup.id, '.task.json'))).toBe(false)
-    // The agent's cwd is the workspace folder, so its briefing lives there.
-    expect(fs.existsSync(path.join(dir, 'COLLAB.md'))).toBe(true)
+    // The agent's cwd is the workspace folder, but our own files must not land
+    // in their project root. They used to, and then showed as untracked changes
+    // that blocked "Apply to main" — the user's own bookkeeping refusing their
+    // own work. They now live under .agntspce/.
+    expect(fs.existsSync(path.join(dir, 'COLLAB.md'))).toBe(false)
+    expect(fs.existsSync(path.join(dir, '.task.json'))).toBe(false)
+    expect(fs.existsSync(path.join(dir, '.agntspce', 'shared', 'COLLAB.md'))).toBe(true)
   })
 })
 
@@ -202,5 +207,92 @@ describe('create-task-group (no boot coordinator)', () => {
     const listed = await call(handlers, 'list-task-groups', { workspaceId: 'ws1' })
     expect(listed.ok).toBe(true)
     expect(listed.taskGroups.map((g: any) => g.id)).toContain(res.taskGroup.id)
+  })
+})
+
+// Merging and updating rewrite a task's worktree, which is a real risk to an
+// agent mid-turn. The app's response was to close those agents itself — so
+// clicking Update silently emptied the task, and any uncommitted work in
+// flight was gone with no way back. An agent session belongs to the user: only
+// they may close one. These tests pin that.
+describe('branch-moving actions never close the user\'s agents', () => {
+  async function setup() {
+    const repo = tmpDir()
+    git(['init', '-b', 'main'], repo)
+    git(['config', 'user.email', 'test@test.com'], repo)
+    git(['config', 'user.name', 'Test'], repo)
+    fs.writeFileSync(path.join(repo, 'README.md'), '# Demo\n')
+    git(['add', '.'], repo)
+    git(['commit', '-m', 'init'], repo)
+
+    const { handlers, ctx } = setupHandler(repo)
+    const res = await call(handlers, 'create-task-group', {
+      title: 'Hands off', userGoal: 'work', worktreeMode: 'worktree',
+      agents: [{ agentId: 'claude' }], workspaceId: 'ws1',
+    })
+    expect(res.ok).toBe(true)
+    const group = await waitForWorktree(handlers, res.taskGroup.id)
+    const sm = (ctx.agentOrchestrator as any).getStateManager()
+    const sub = sm.listSubTasks(group.id)[0]
+    sm.updateSubTaskStatus(sub.id, 'running', 'sess-1')
+    // Any attempt to close a session is a failure, not a detail.
+    const closed: string[] = []
+    ;(ctx as any).sessionManager.closeTaskSessions = (ids: string[]) => { closed.push(...ids); return ids.length }
+    ;(ctx as any).sessionManager.closeSession = (id: string) => { closed.push(id); return true }
+    return { handlers, ctx, group, sm, sub, closed }
+  }
+
+  it('leaves the agent session open when updating', async () => {
+    const { handlers, group, closed } = await setup()
+    await call(handlers, 'sync-task-branch', { taskGroupId: group.id })
+    expect(closed).toEqual([])
+  })
+
+  it('leaves the agent session open when merging', async () => {
+    const { handlers, group, closed } = await setup()
+    await call(handlers, 'merge-task', { taskGroupId: group.id })
+    expect(closed).toEqual([])
+  })
+
+  it('leaves the agent session open when merging everything', async () => {
+    const { handlers, group, closed } = await setup()
+    await call(handlers, 'merge-all-tasks', { taskGroupIds: [group.id] })
+    expect(closed).toEqual([])
+  })
+
+  it('leaves the subtask and the task exactly as they were', async () => {
+    const { handlers, group, sm } = await setup()
+    await call(handlers, 'sync-task-branch', { taskGroupId: group.id })
+    // Still the user's agent, still attached, and the task is still theirs.
+    const sub = sm.listSubTasks(group.id)[0]
+    expect(sub.status).toBe('running')
+    expect(sub.sessionId).toBe('sess-1')
+    expect(sm.getTaskGroup(group.id)!.status).toBe('active')
+  })
+
+  it('warns only for agents the user can see still running', async () => {
+    const { handlers, group, ctx } = await setup()
+    const setStatus = (status: string, lastActivity: number) => {
+      ;(ctx as any).sessionManager.getSessionStates = () => ({ 'sess-1': { id: 'sess-1', status, lastActivity } })
+    }
+    const count = async () => {
+      const listed = await call(handlers, 'list-task-groups', { workspaceId: 'ws1' })
+      return (listed.taskGroups || []).find((x: any) => x.id === group.id).activeAgents
+    }
+
+    // `busy` is what draws the spinner, so that is what warns.
+    setStatus('busy', Date.now())
+    expect(await count()).toBe(1)
+
+    // A finished agent sitting at its prompt shows a check. Its TUI keeps
+    // repainting, so `lastActivity` stays recent long after the turn ended —
+    // warning on that reported finished work as still running, which is exactly
+    // what the user saw. The rendered status is the only honest signal.
+    setStatus('waiting', Date.now())
+    expect(await count()).toBe(0)
+    setStatus('idle', Date.now())
+    expect(await count()).toBe(0)
+    setStatus('exited', Date.now())
+    expect(await count()).toBe(0)
   })
 })

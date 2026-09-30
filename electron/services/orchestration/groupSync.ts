@@ -6,7 +6,7 @@ import {
   type TaskGroupOverview,
   type SubTaskOverview,
 } from './stateManager'
-import { CollabShim } from './collabShim'
+import { CollabShim, taskFilesDir } from './collabShim'
 
 /** Minimal PTY surface group sync needs — SessionManager satisfies this. */
 export interface PtyWriter {
@@ -65,6 +65,22 @@ export function linkSessionToGroup(
   if (!state) throw new CoordinatorError('NOT_FOUND', 'That session no longer exists')
   const already = sm.listSubTasks(taskGroupId).find(s => s.sessionId === sessionId)
   if (already) return { subtask: already, joined: false }
+  // A session can only belong to one task. Joining it to a second one used to
+  // leave it recorded in both, and the live PTY — still in the first task's
+  // worktree — then reported the new task's id, so the agent described itself
+  // as working "in a different task worktree with another agent alongside".
+  // Refuse rather than silently re-home a running agent.
+  const owner = sm.listTaskGroups()
+    .filter(g => g.id !== taskGroupId)
+    .flatMap(g => sm.listSubTasks(g.id).map(sub => ({ g, sub })))
+    .find(x => x.sub.sessionId === sessionId)
+  if (owner) {
+    const name = owner.g.title || owner.g.id
+    throw new CoordinatorError(
+      'INVALID_STATE',
+      `That session is already an agent of task "${name}". Ungroup it there first — an agent cannot work in two tasks at once.`
+    )
+  }
   const agentId = String(state.type || 'shell')
   const created = sm.addSubTask({ taskGroupId, agentId, title: agentId })
   const subtask = sm.updateSubTaskStatus(created.id, 'running', sessionId)!
@@ -90,9 +106,7 @@ export function syncGroupFiles(
   try {
     conventions = fs.readFileSync(mdPath, 'utf-8')
   } catch {}
-  const dir = group.worktreePath && fs.existsSync(group.worktreePath)
-    ? group.worktreePath
-    : repoPath
+  const dir = taskFilesDir(repoPath, group.worktreePath)
   let briefingPath: string | null = null
   try {
     fs.mkdirSync(dir, { recursive: true })

@@ -43,9 +43,8 @@ export function renderCollabMd(
   lines.push('')
   lines.push('## Subtasks')
   for (const s of subtasks) {
-    const scope = s.scopeFiles.length > 0 ? ` \`${s.scopeFiles.join('`, `')}\`` : ''
     const model = s.model ? ` (${s.model})` : ''
-    lines.push(`- ${s.agentId}${model} → ${s.title || s.status}${scope} [${s.status}]`)
+    lines.push(`- ${s.agentId}${model} [${s.status}]`)
   }
   lines.push('')
   if (openClaims.length > 0) {
@@ -74,6 +73,21 @@ export function renderCollabMd(
 export interface ShimResult {
   ok: boolean
   message: string
+}
+
+/** Where a task's agent-facing files live.
+ *
+ *  With a worktree, that is the worktree root: it is already isolated, and it
+ *  is where the agents' cwd points.
+ *
+ *  Without one, the cwd is the user's project folder, and writing COLLAB.md or
+ *  .task.json there dropped three files into their repo that then blocked
+ *  "Apply to main" as uncommitted changes. Those cases now write under
+ *  .agntspce/, and the agent prompt names the path.
+ */
+export function taskFilesDir(repoPath: string, worktreePath?: string | null): string {
+  if (worktreePath && fs.existsSync(worktreePath)) return worktreePath
+  return path.join(repoPath, '.agntspce', 'shared')
 }
 
 export class CollabShim {
@@ -140,7 +154,7 @@ export class CollabShim {
   refresh(taskGroupId: string): string {
     const group = this.sm.getTaskGroup(taskGroupId)
     if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
-    const dir = group.worktreePath ?? this.repoPath
+    const dir = taskFilesDir(this.repoPath, group.worktreePath)
     const content = renderCollabMd(group, this.sm.listSubTasks(taskGroupId), this.sm.getCollabEvents(taskGroupId), this.collectOpenClaims(taskGroupId))
     fs.mkdirSync(dir, { recursive: true })
     const filePath = path.join(dir, COLLAB_MD_FILENAME)

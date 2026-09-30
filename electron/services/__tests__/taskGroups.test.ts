@@ -285,3 +285,102 @@ describe('v2 task worktrees', () => {
     expect(fs.readFileSync(gi, 'utf-8')).toBe('node_modules/\n.agntspce/\n')
   })
 })
+
+// A ghost task is one whose branch was deleted by a completed merge while the
+// row still claimed a live status. It showed up as mergeable, reported a raw
+// "unknown revision" git error, and in a batch could hold up every other task.
+describe('repairing retired task rows', () => {
+  function repoWithHistory(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agntspce-repair-'))
+    tmpDirs.push(dir)
+    execFileSync('git', ['init', '-b', 'main'], { cwd: dir })
+    execFileSync('git', ['config', 'user.email', 't@t.com'], { cwd: dir })
+    execFileSync('git', ['config', 'user.name', 'T'], { cwd: dir })
+    fs.writeFileSync(path.join(dir, 'README.md'), '# x\n')
+    execFileSync('git', ['add', '.'], { cwd: dir })
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: dir })
+    return dir
+  }
+  const newSM = (repo: string) => {
+    fs.mkdirSync(path.join(repo, '.agntspce'), { recursive: true })
+    return new StateManager(path.join(repo, '.agntspce', 'coordinator.db'), repo)
+  }
+
+  it('retires a task whose branch is gone', () => {
+    const repo = repoWithHistory()
+    let sm = newSM(repo)
+    const g = sm.createTaskGroup({ repoPath: repo, title: 'Ghost', userGoal: 'x' })
+    // Launch-shaped row: branch recorded, status active.
+    execFileSync('git', ['branch', 'task/ghost-1', 'main'], { cwd: repo })
+    sm.updateTaskGroup(g.id, { branchName: 'task/ghost-1', baseSha: 'abc', status: 'active' })
+    // The merge deleted the branch, as it does on every successful merge.
+    execFileSync('git', ['branch', '-D', 'task/ghost-1'], { cwd: repo })
+
+    // Reopening the workspace is what runs the repair.
+    sm = newSM(repo)
+    expect(sm.getTaskGroup(g.id)!.status).toBe('done')
+  })
+
+  it('leaves a planning task alone, so create-then-launch still works', () => {
+    const repo = repoWithHistory()
+    const sm = newSM(repo)
+    const g = sm.createTaskGroup({ repoPath: repo, title: 'Fresh', userGoal: 'x' })
+    // Never launched: no branch. Retiring this would break the normal flow.
+    expect(sm.getTaskGroup(g.id)!.status).toBe('planning')
+    expect(sm.getTaskGroup(g.id)!.branchName).toBeNull()
+    newSM(repo)
+    expect(sm.getTaskGroup(g.id)!.status).toBe('planning')
+  })
+
+  it('leaves a live task alone', () => {
+    const repo = repoWithHistory()
+    let sm = newSM(repo)
+    const g = sm.createTaskGroup({ repoPath: repo, title: 'Live', userGoal: 'x' })
+    execFileSync('git', ['branch', 'task/live-1', 'main'], { cwd: repo })
+    sm.updateTaskGroup(g.id, { branchName: 'task/live-1', baseSha: 'abc', status: 'active' })
+    newSM(repo)
+    expect(sm.getTaskGroup(g.id)!.status).toBe('active')
+  })
+
+  it('un-sticks a task left mid-merge by a crash', () => {
+    const repo = repoWithHistory()
+    let sm = newSM(repo)
+    const g = sm.createTaskGroup({ repoPath: repo, title: 'Stuck', userGoal: 'x' })
+    execFileSync('git', ['branch', 'task/stuck-1', 'main'], { cwd: repo })
+    // Branch intact, status stuck at merging: the app died mid-merge.
+    sm.updateTaskGroup(g.id, { branchName: 'task/stuck-1', baseSha: 'abc', status: 'merging' })
+    newSM(repo)
+    // Back to active so it can be merged again, rather than invisible forever.
+    expect(sm.getTaskGroup(g.id)!.status).toBe('active')
+  })
+
+  it('does not touch a done or abandoned task', () => {
+    const repo = repoWithHistory()
+    let sm = newSM(repo)
+    const a = sm.createTaskGroup({ repoPath: repo, title: 'Done', userGoal: 'x' })
+    const b = sm.createTaskGroup({ repoPath: repo, title: 'Abandoned', userGoal: 'x' })
+    sm.updateTaskGroup(a.id, { branchName: 'task/gone-a', status: 'done' })
+    sm.updateTaskGroup(b.id, { branchName: 'task/gone-b', status: 'abandoned' })
+    newSM(repo)
+    expect(sm.getTaskGroup(a.id)!.status).toBe('done')
+    expect(sm.getTaskGroup(b.id)!.status).toBe('abandoned')
+  })
+
+  it('is idempotent, and safe when the folder is not a git repo', () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'agntspce-repair-plain-'))
+    tmpDirs.push(plain)
+    // A non-repo workspace must not throw on load.
+    expect(() => newSM(plain)).not.toThrow()
+
+    const repo = repoWithHistory()
+    let sm = newSM(repo)
+    const g = sm.createTaskGroup({ repoPath: repo, title: 'Ghost', userGoal: 'x' })
+    execFileSync('git', ['branch', 'task/ghost-2', 'main'], { cwd: repo })
+    sm.updateTaskGroup(g.id, { branchName: 'task/ghost-2', baseSha: 'abc', status: 'active' })
+    execFileSync('git', ['branch', '-D', 'task/ghost-2'], { cwd: repo })
+    newSM(repo)
+    const third = newSM(repo)
+    expect(third.repairRetiredTasks()).toEqual([])   // nothing left to fix
+    expect(third.getTaskGroup(g.id)!.status).toBe('done')
+  })
+})

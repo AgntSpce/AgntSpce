@@ -9,6 +9,7 @@ import { TaskOrchestrator } from '../../services/orchestration/taskOrchestrator'
 import { TaskMerger } from '../../services/orchestration/taskMerger'
 import { WorktreeLifecycle } from '../../services/orchestration/worktreeLifecycle'
 import { syncGroupFiles, linkSessionToGroup } from '../../services/orchestration/groupSync'
+import { taskFilesDir } from '../../services/orchestration/collabShim'
 import { writeTaskMetaFile } from '../../services/orchestration/taskPlanner'
 import type { ChatMessage } from '../../services/chatTypes'
 
@@ -20,6 +21,35 @@ const smCache = new Map<string, StateManager>()
 // Last lazy-ensure failure, surfaced in endpoint errors so a persistent
 // failure tells us WHY instead of the generic unavailable message.
 let lastResolveError: string | null = null
+
+/** Merge an ordered list of tasks, attempting every one of them.
+ *
+ *  Extracted so the "a failure never blocks the rest" guarantee is testable
+ *  without a socket. Two rules:
+ *  - Every task is attempted. Verified failure: stopping at the first failure
+ *    meant one unmergeable task (uncommitted work, a retired branch) held every
+ *    other task hostage — "0 of 2 merged" while good work sat ready.
+ *  - Order still matters: each merge advances the integration branch, so later
+ *    tasks merge against the work already landed. Oldest first. */
+export async function runMergeAll(
+  ordered: string[],
+  mergeOne: (taskGroupId: string) => Promise<any>
+): Promise<any[]> {
+  const results: any[] = []
+  for (const id of ordered) {
+    // A merge that throws must not abort the batch either.
+    try {
+      results.push(await mergeOne(id))
+    } catch (e: any) {
+      results.push({
+        ok: false, skipped: false, needsConfirm: false, taskGroupId: id, branchName: '',
+        diffSummary: '', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [], buildPassed: false,
+        error: e?.message || 'Merge failed',
+      })
+    }
+  }
+  return results
+}
 
 function resolveSM(ctx: ServerContext, repoPath?: string): StateManager | null {
   const orch = ctx.agentOrchestrator
@@ -108,14 +138,28 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
         return
       }
       const groups = sm.listTaskGroups(wsId ?? undefined)
+      // Used for ONE thing: deciding whether to warn before a branch-moving
+      // action. Never used to hide or disable a control — an action that
+      // silently disappears is indistinguishable from a broken app.
+      //
+      // The signal is the session's own status, which is the same value the
+      // sidebar already renders as a spinner or a check mark. Deliberately not
+      // `lastActivity`: agent TUIs keep repainting long after a turn ends, so
+      // "produced output recently" reported a finished agent as still working
+      // and the warning fired on work that was already done. Mirroring the
+      // rendered status also means the warning can never disagree with what the
+      // user can see in the UI.
+      const liveSessions = ctx.sessionManager.getSessionStates()
+      const activeNow = (sessionId: string | null | undefined) =>
+        !!sessionId && liveSessions[sessionId]?.status === 'busy'
       // Attach live membership so the sidebar can render agent logos per
       // task and detect ungrouped sessions without extra roundtrips.
       const withMembers = groups.map(g => {
-        let members: { agentId: string; sessionId: string | null }[] = []
+        let members: { agentId: string; sessionId: string | null; status: string }[] = []
         try {
-          members = sm.listSubTasks(g.id).map(s => ({ agentId: s.agentId, sessionId: s.sessionId }))
+          members = sm.listSubTasks(g.id).map(s => ({ agentId: s.agentId, sessionId: s.sessionId, status: s.status }))
         } catch {}
-        return { ...g, members }
+        return { ...g, members, activeAgents: members.filter(m => activeNow(m.sessionId)).length }
       })
       if (callback) callback({ ok: true, taskGroups: withMembers })
     } catch (error: any) {
@@ -176,13 +220,15 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
           // is the workspace folder itself, so the agent sees them in its cwd.
           const setup = (dir: string, branchName: string | null, baseSha: string | null) => {
             sm.updateTaskGroup(group.id, { branchName, worktreePath: dir, baseSha, status: 'active' })
-            writeTaskMetaFile(dir, {
+            // In 'none' mode there is no worktree, so `dir` is the user's own
+            // project folder. Our metadata goes under .agntspce/ so it cannot
+            // appear in their git status and block "Apply to main".
+            writeTaskMetaFile(taskFilesDir(repoPath, dir === repoPath ? null : dir), {
               taskGroupId: group.id,
               branchName: branchName ?? '',
               baseSha,
               worktreeMode: mode,
-              todoList: userGoal ? [userGoal] : [title],
-              subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
+              agents: subtasks.map(s => s.agentId),
             })
             syncGroupFiles(sm, group.id, repoPath)
           }
@@ -190,13 +236,12 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
             // User explicitly accepted running without git: no worktree, no
             // branch, no merge, and agents share the workspace folder.
             sm.updateTaskGroup(group.id, { worktreePath: null, status: 'active' })
-            writeTaskMetaFile(repoPath, {
+            writeTaskMetaFile(taskFilesDir(repoPath, null), {
               taskGroupId: group.id,
               branchName: '',
               baseSha: null,
               worktreeMode: mode,
-              todoList: userGoal ? [userGoal] : [title],
-              subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: s.scopeFiles })),
+              agents: subtasks.map(s => s.agentId),
             })
             syncGroupFiles(sm, group.id, repoPath)
             ctx.io.emit('task-groups-changed', { workspaceId: ws.id })
@@ -245,20 +290,20 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
   }
 
   const buildLlm = (): ((prompt: string) => Promise<string | null>) | undefined => {
-    // Planner/conflict-solver LLM: first configured chat provider, one-shot
-    // (no thread pollution). None configured → deterministic fallback split.
+    // Conflict-solver LLM: first configured chat provider, one-shot (no thread
+    // pollution). None configured → no LLM, and the merge says so.
     for (const pid of ['anthropic', 'openai', 'google', 'deepseek', 'grok', 'mistral', 'groq', 'openrouter']) {
       try {
         const provider = ctx.chatManager.getProvider(pid)
         if (provider?.isConfigured()) {
           const model = (provider as any).model as string
           return async (prompt: string) => {
-            try {
-              const msg: ChatMessage = { id: `task-plan-${Date.now()}`, role: 'user', content: prompt, timestamp: Date.now() }
-              return await provider.chat([msg], model)
-            } catch {
-              return null
-            }
+            const msg: ChatMessage = { id: `task-plan-${Date.now()}`, role: 'user', content: prompt, timestamp: Date.now() }
+            // Errors propagate on purpose. Swallowing them here turned every
+            // failure - a bad key, an exhausted quota, a network blip - into a
+            // null, which surfaced as "LLM returned an empty resolution" and
+            // left the user with a conflict they could not get past.
+            return await provider.chat([msg], model)
           }
         }
       } catch {}
@@ -313,7 +358,7 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
 
   socket.on('task-followup', async ({ taskGroupId, message }: { taskGroupId: string; message: string }, callback?: Function) => {
     try {
-      const result = await buildOrchestrator(taskGroupId).replanTask(taskGroupId, message)
+      const result = await buildOrchestrator(taskGroupId).followUpTask(taskGroupId, message)
       ctx.io.emit('task-groups-changed', { workspaceId: '' })
       if (callback) callback({ ok: true, ...result })
     } catch (error: any) {
@@ -324,15 +369,19 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
   socket.on('preview-task-merge', async ({ taskGroupId }: { taskGroupId: string }, callback?: Function) => {
     try {
       const preview = buildMerger(taskGroupId).previewMerge(taskGroupId)
-      if (callback) callback({ ok: !preview.error, preview })
+      // The error has to be surfaced at the top level too. The dialog reads
+      // `res.error`, so a preview that failed with a real reason ("already
+      // merged", a git error) was reported as the useless "Could not read the
+      // merge preview" and the actual cause was thrown away.
+      if (callback) callback({ ok: !preview.error, error: preview.error, preview })
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }
   })
 
-  socket.on('merge-task', async ({ taskGroupId, autoResolve }: { taskGroupId: string; autoResolve?: boolean }, callback?: Function) => {
+  socket.on('merge-task', async ({ taskGroupId, autoResolve, preferSide }: { taskGroupId: string; autoResolve?: boolean; preferSide?: 'ours' | 'theirs' }, callback?: Function) => {
     try {
-      const result = await buildMerger(taskGroupId).executeMerge(taskGroupId, autoResolve !== false)
+      const result = await buildMerger(taskGroupId).executeMerge(taskGroupId, autoResolve !== false, preferSide)
       ctx.io.emit('task-groups-changed', { workspaceId: '' })
       if (callback) callback({ ok: true, ...result })
     } catch (error: any) {
@@ -350,10 +399,14 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     }
   })
 
-  socket.on('sync-task-branch', async ({ taskGroupId }: { taskGroupId: string }, callback?: Function) => {
+  socket.on('sync-task-branch', async ({ taskGroupId, preferSide, autoResolve }: { taskGroupId: string; preferSide?: 'task' | 'integration'; autoResolve?: boolean }, callback?: Function) => {
     try {
-      const result = buildMerger(taskGroupId).syncTaskOntoIntegration(taskGroupId)
-      if (callback) callback({ ok: result.ok, error: result.error, mergedFiles: result.mergedFiles })
+      const result = await buildMerger(taskGroupId).syncTaskOntoIntegration(taskGroupId, { preferSide, autoResolve })
+      // Syncing commits the task's pending work, so the task row has changed.
+      // Without this event the sidebar kept showing the pre-sync state until
+      // some unrelated action happened to trigger a refetch.
+      ctx.io.emit('task-groups-changed', { workspaceId: '' })
+      if (callback) callback(result)
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
     }
@@ -365,8 +418,47 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     try {
       const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
       if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
-      const result = new TaskMerger(sm.getRepoPath(), new WorktreeLifecycle(sm.getRepoPath()), sm)
-        .applyIntegrationToBranch(branchName)
+      const merger = new TaskMerger(sm.getRepoPath(), new WorktreeLifecycle(sm.getRepoPath()), sm)
+      const result = merger.applyIntegrationToBranch(branchName)
+      if (callback) callback(result)
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('get-conflict-context', async ({ taskGroupId, files }: { taskGroupId: string; files: string[] }, callback?: Function) => {
+    try {
+      const sm = smForTask(ctx, taskGroupId)
+      const group = sm?.getTaskGroup(taskGroupId)
+      if (!sm || !group) throw new Error(`Task ${taskGroupId} not found`)
+      const merger = buildMerger(taskGroupId)
+      const conflictFiles = files || []
+      callback?.({
+        ok: true,
+        context: {
+          taskId: taskGroupId,
+          taskTitle: group.title,
+          userGoal: group.userGoal,
+          branchName: group.branchName,
+          worktreePath: group.worktreePath,
+          integrationBranch: sm.getIntegrationBranch(),
+          behindCount: 0,
+          conflictFiles,
+          details: conflictFiles.map(f => merger.describeConflict(taskGroupId, f)).filter(Boolean),
+          brief: merger.buildConflictBrief(taskGroupId, conflictFiles),
+        },
+      })
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('discard-local-edits', async ({ files }: { files: string[] }, callback?: Function) => {
+    try {
+      const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      const repo = sm.getRepoPath()
+      const result = new TaskMerger(repo, new WorktreeLifecycle(repo), sm).discardLocalEdits(files || [])
       if (callback) callback(result)
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })
@@ -382,33 +474,17 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
       // meaningful contract and made merge-all results depend on click order.
       const order = new Map(sm.listTaskGroups().map(g => [g.id, g.createdAt ?? 0]))
       const ordered = [...(taskGroupIds || [])].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
-      const results: any[] = []
-      let stopped = false
-      for (const id of ordered) {
-        if (stopped) {
-          results.push({
-            ok: false, skipped: true, needsConfirm: false, taskGroupId: id, branchName: '',
-            diffSummary: '', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [], buildPassed: false,
-            error: 'Skipped — an earlier task failed to merge. Resolve it and run this again.',
-          })
-          continue
-        }
-        const result = await buildMerger(id).executeMerge(id, true)
-        results.push(result)
-        // No rollback: a landed merge stays landed. Stop and report exactly
-        // what made it in so the user can decide, instead of pretending the
-        // whole batch either worked or failed.
-        if (!result.ok) stopped = true
-      }
+      const results: any[] = await runMergeAll(ordered, id => buildMerger(id).executeMerge(id, true))
       const landed = results.filter(r => r.ok).length
       const pendingConfirm = results.filter(r => r.needsConfirm).length
+      const failedResults = results.filter(r => !r.ok && !r.skipped && !r.needsConfirm)
       ctx.io.emit('task-groups-changed', { workspaceId: '' })
       if (callback) {
         callback({
-          ok: !stopped,
+          ok: failedResults.length === 0,
           landed,
           pendingConfirm,
-          failed: results.filter(r => !r.ok && !r.skipped).length,
+          failed: failedResults.length,
           skipped: results.filter(r => r.skipped).length,
           results,
         })
@@ -490,14 +566,18 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
             }
             sm.updateTaskGroup(group.id, { branchName, worktreePath, baseSha })
           }
-          const cwd = worktreePath ?? repoPath
-          writeTaskMetaFile(cwd, {
+          // With no worktree the cwd is the user's project root, and writing
+          // COLLAB.md / .task.json there dropped three files into their repo
+          // that then blocked "Apply to main" as uncommitted changes. Keep the
+          // agents' briefing files in the worktree, but put our own metadata
+          // under .agntspce/ where it belongs. The agents are told where to find
+          // COLLAB.md in the prompt.
+          writeTaskMetaFile(taskFilesDir(repoPath, worktreePath), {
             taskGroupId: group.id,
             branchName: branchName ?? '',
             baseSha,
             worktreeMode: 'worktree',
-            todoList: [`${members.map(m => m.agentId).join(', ')} collaborate in the shared worktree`],
-            subtasks: subtasks.map(s => ({ agentId: s.agentId, model: s.model, title: s.title, scopeFiles: [] })),
+            agents: subtasks.map(s => s.agentId),
           })
           syncGroupFiles(sm, group.id, repoPath)
           ctx.io.emit('task-groups-changed', { workspaceId: ws!.id })

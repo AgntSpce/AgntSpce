@@ -164,19 +164,29 @@ export class SessionSummarizer {
     if (!group) throw new Error(`TaskGroup ${taskGroupId} not found`)
 
     const subs = this.db.prepare(
-      'SELECT agent_id, status, scope_files FROM subtasks WHERE task_group_id = ? ORDER BY created_at ASC'
-    ).all(taskGroupId) as { agent_id: string; status: string; scope_files: string }[]
+      'SELECT agent_id, status FROM subtasks WHERE task_group_id = ? ORDER BY created_at ASC'
+    ).all(taskGroupId) as { agent_id: string; status: string }[]
 
     const parts: string[] = []
     parts.push(`[${group.status}] ${group.title}`)
     if (subs.length > 0) {
       parts.push(`agents: ${subs.map(s => `${s.agent_id}(${s.status})`).join(', ')}`)
     }
+
+    // Key files used to come from the planner's declared scopeFiles. There is no
+    // planner now, and a declared scope was a guess anyway — so take them from
+    // what agents reported actually touching, which is real.
+    const progress = this.db.prepare(
+      `SELECT payload FROM collab_events
+       WHERE task_group_id = ? AND kind = 'progress' ORDER BY created_at DESC LIMIT 20`
+    ).all(taskGroupId) as { payload: string }[]
     const keyFiles: string[] = []
-    for (const s of subs) {
+    for (const row of progress) {
       try {
-        for (const f of JSON.parse(s.scope_files || '[]')) {
-          if (typeof f === 'string' && !keyFiles.includes(f)) keyFiles.push(f)
+        const touched = (JSON.parse(row.payload || '{}') as { touched?: unknown }).touched
+        if (!Array.isArray(touched)) continue
+        for (const f of touched) {
+          if (typeof f === 'string' && f && !keyFiles.includes(f)) keyFiles.push(f)
         }
       } catch {}
     }

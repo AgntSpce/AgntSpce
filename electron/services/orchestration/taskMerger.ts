@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { WorktreeLifecycle, detectBuildCommand, runCommands, isTaskScaffoldStatusLine } from './worktreeLifecycle'
+import { WorktreeLifecycle, detectBuildCommand, runCommands, isTaskScaffoldStatusLine, parseStatusPath, TASK_SCAFFOLD_FILES } from './worktreeLifecycle'
 import { StateManager, CoordinatorError, type TaskGroupOverview } from './stateManager'
 
 export interface TaskMergePreview {
@@ -20,6 +20,12 @@ export interface TaskMergePreview {
   behindFiles?: string[]
   /** A prepared-but-unlanded merge already exists for this task. */
   pendingCandidate?: { ref: string; diff: string } | null
+  /** Files AgntSpce committed in the worktree on the agent's behalf, because
+   *  the agent left them uncommitted. Never silent: the UI reports this. */
+  autoCommittedFiles?: string[]
+  /** Pending work in the worktree, before any auto-commit. Lets the UI label
+   *  the action "Commit & merge" instead of "Merge changes". */
+  pendingFiles?: string[]
   error?: string
 }
 
@@ -74,6 +80,11 @@ export class TaskMerger {
     this.llm = llm
   }
 
+  /** Run git and return stdout.
+   *
+   *  Only trailing whitespace is trimmed: a `git status --porcelain` line begins
+   *  with its two status columns, so a full trim turns " M README.md" into
+   *  "M README.md" and the path parses as "ADME.md". */
   private execGit(args: string[], cwd?: string): string {
     // See worktreeLifecycle.execGit: pipe stderr so best-effort probes don't
     // spam the host terminal; fold it into the thrown error instead.
@@ -81,7 +92,7 @@ export class TaskMerger {
       throw new Error(`git ${args.join(' ')} failed: empty revision argument`)
     }
     try {
-      return execFileSync('git', args, { cwd: cwd || this.repoPath, encoding: 'utf-8', timeout: 60000, stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim()
+      return execFileSync('git', args, { cwd: cwd || this.repoPath, encoding: 'utf-8', timeout: 60000, stdio: ['pipe', 'pipe', 'pipe'] }).toString().replace(/\s+$/, '')
     } catch (e: any) {
       const stderr = String(e?.stderr || '').trim()
       throw new Error(stderr ? `git ${args.join(' ')} failed: ${stderr.slice(0, 500)}` : (e?.message || String(e)))
@@ -99,6 +110,16 @@ export class TaskMerger {
     }
   }
 
+  /** True when the task's branch no longer exists. A task that has already been
+   *  merged and retired has its branch deleted, but the DB row keeps the name —
+   *  so anything that diffs the branch must check first. Without this, a
+   *  re-merge died on a raw "unknown revision" git error and, worse, the catch
+   *  handler reset the finished task back to 'active', resurrecting the ghost
+   *  this whole path is meant to avoid. */
+  private branchIsGone(branchName: string): boolean {
+    return this.probeGit(['rev-parse', '--verify', '--quiet', branchName]) === null
+  }
+
   private groupOrThrow(taskGroupId: string) {
     const group = this.stateManager.getTaskGroup(taskGroupId)
     if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
@@ -110,29 +131,45 @@ export class TaskMerger {
     return { ok: false, needsConfirm: false, taskGroupId, branchName, diffSummary: '', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [], buildPassed: false, error }
   }
 
-  /** Files this task claims that other unfinished tasks also claim. Advisory:
-   *  nothing is blocked, but a merge that will collide is far cheaper to
-   *  resolve before the AI starts rewriting the same lines. */
-  private scopeOverlapFiles(taskGroupId: string): string[] {
+  /** Files this task has actually changed that another unfinished task has also
+   *  actually changed. Advisory: nothing is blocked, but a merge that will
+   *  collide is far cheaper to resolve before the AI starts rewriting the same
+   *  lines.
+   *
+   *  This used to compare the per-agent `scopeFiles` the planner declared. With
+   *  no planner there are no declared scopes, and a guess is worse than nothing
+   *  — so the overlap is measured from each task's real diff against the
+   *  integration branch, which is both available and accurate. */
+  private scopeOverlapFiles(taskGroupId: string, myFiles: string[]): string[] {
     try {
-      const mine = new Set<string>()
-      for (const s of this.stateManager.listSubTasks(taskGroupId)) {
-        for (const f of s.scopeFiles || []) if (f) mine.add(f)
-      }
-      if (mine.size === 0) return []
+      if (myFiles.length === 0) return []
+      const mine = new Set(myFiles)
+      const integrationBranch = this.stateManager.getIntegrationBranch()
       const others = new Set<string>()
       for (const g of this.stateManager.listTaskGroups()) {
         if (g.id === taskGroupId) continue
         if (g.status === 'done' || g.status === 'abandoned') continue
-        for (const s of this.stateManager.listSubTasks(g.id)) {
-          for (const f of s.scopeFiles || []) if (f && mine.has(f)) others.add(f)
-        }
+        if (!g.branchName) continue
+        const theirs = this.changedFilesOn(g.branchName, integrationBranch)
+        for (const f of theirs) if (mine.has(f)) others.add(f)
       }
       return [...others].sort()
     } catch {
       return []
     }
   }
+
+  /** Files a branch changes relative to the integration branch, repo-relative. */
+  private changedFilesOn(branchName: string, integrationBranch: string): string[] {
+    const range = `${integrationBranch}...${branchName}`
+    const out = this.probeGit(['diff', '--name-only', range])
+    if (out !== null) return out.split('\n').map(s => s.trim()).filter(Boolean)
+    // New branch with no merge base: fall back to everything it has that the
+    // integration branch does not.
+    const direct = this.probeGit(['diff', '--name-only', integrationBranch, branchName])
+    return direct !== null ? direct.split('\n').map(s => s.trim()).filter(Boolean) : []
+  }
+
 
   /** Locate the worktree that has `branchName` checked out, so a parked merge
    *  candidate can be cleaned up after a restart. */
@@ -154,10 +191,38 @@ export class TaskMerger {
   /** One trial merge in the scratch worktree: diffstat, changed files, and an
    *  empirically measured conflict list. On a clean merge the merge is left
    *  staged so the caller can commit it without redoing the work. */
+  /** Undo any change the task branch made to our generated files, in the scratch
+   *  worktree, so the merge does not carry them onto the integration branch.
+   *
+   *  Filtering them out of the reported file list is not enough: the real
+   *  `git merge` brings the branch's commits wholesale, which dropped a
+   *  `.task.json`, `COLLAB.md` and `AGENTS-TASK.md` into the user's project
+   *  root — files that belong to a task worktree, not to their repo. Restore the
+   *  integration copy where there is one, and drop the path where the task
+   *  introduced it. */
+  private dropScaffoldFromMerge(scaffoldFiles: string[], integrationRef: string, scratchPath: string): void {
+    for (const f of scaffoldFiles) {
+      const atIntegration = this.probeGit(['cat-file', '-e', `${integrationRef}:${f}`], scratchPath) !== null
+      try {
+        if (atIntegration) this.execGit(['checkout', integrationRef, '--', f], scratchPath)
+        else this.execGit(['rm', '-f', '-q', '--', f], scratchPath)
+      } catch {}
+    }
+  }
+
   private collect(group: TaskGroupOverview, integrationRef: string, scratchPath: string): Collected {
     const branchName = group.branchName!
     const diffStat = this.execGit(['diff', '--stat', `${integrationRef}...${branchName}`])
-    const actualFiles = this.execGit(['diff', '--name-only', `${integrationRef}...${branchName}`]).split('\n').filter(Boolean)
+    const changed = this.execGit(['diff', '--name-only', `${integrationRef}...${branchName}`]).split('\n').filter(Boolean)
+    // Files AgntSpce generates into every task root. Agents are told to
+    // `git add -A`, so these get committed by the agent — and then two tasks
+    // that started before each other merged conflict on them. Verified: a batch
+    // of two tasks failed with "Merge conflicts in: .task.json, COLLAB.md",
+    // which reads as the app being broken rather than as bookkeeping noise.
+    // They are ours, per-task, and regenerated, so the integration side always
+    // wins and they never count as a change.
+    const isScaffold = (f: string) => TASK_SCAFFOLD_FILES.has(path.basename(f))
+    const actualFiles = changed.filter(f => !isScaffold(f))
 
     if (actualFiles.length === 0) {
       return { diffStat, actualFiles, conflictFiles: [], mergeStaged: false, nothingToMerge: true }
@@ -169,12 +234,35 @@ export class TaskMerger {
     } catch {
       const unmerged = this.execGit(['diff', '--name-only', '--diff-filter=U'], scratchPath)
       if (unmerged) conflictFiles = unmerged.split('\n').filter(Boolean)
-      try { this.execGit(['merge', '--abort'], scratchPath) } catch {}
-      return { diffStat, actualFiles, conflictFiles, mergeStaged: false, nothingToMerge: false }
+      // Resolve away conflicts that are only our own bookkeeping, then carry on
+      // if nothing real is left. A genuine conflict is left untouched.
+      const scaffoldOnly = conflictFiles.filter(isScaffold)
+      const real = conflictFiles.filter(f => !isScaffold(f))
+      if (scaffoldOnly.length > 0) {
+        // A conflicting generated file is never already on the integration
+        // branch, so restore it there if it exists, otherwise drop it.
+        this.dropScaffoldFromMerge(scaffoldOnly, integrationRef, scratchPath)
+        for (const f of scaffoldOnly) {
+          const i = actualFiles.indexOf(f)
+          if (i >= 0) actualFiles.splice(i, 1)
+        }
+        conflictFiles = real
+      }
+      if (conflictFiles.length > 0) {
+        try { this.execGit(['merge', '--abort'], scratchPath) } catch {}
+        return { diffStat, actualFiles, conflictFiles, mergeStaged: false, nothingToMerge: false }
+      }
+      // Conflicts were only ours: the merge is still in progress and can land.
+      if (this.probeGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], scratchPath)) {
+        return { diffStat, actualFiles, conflictFiles: [], mergeStaged: true, nothingToMerge: false }
+      }
+      return { diffStat, actualFiles, conflictFiles: [], mergeStaged: false, nothingToMerge: true }
     }
 
-    // `git merge` exits 0 with nothing staged when the branch is already
-    // contained in the integration tip — there is no MERGE_HEAD in that case.
+    // Drop our generated files from the merge result, then confirm the merge is
+    // really in progress (git merge exits 0 with nothing staged when the branch
+    // is already contained in the integration tip).
+    this.dropScaffoldFromMerge(changed.filter(isScaffold), integrationRef, scratchPath)
     const mergeHead = this.probeGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], scratchPath)
     if (!mergeHead) {
       return { diffStat, actualFiles, conflictFiles: [], mergeStaged: false, nothingToMerge: true }
@@ -204,7 +292,7 @@ export class TaskMerger {
       diffSummary: collected.diffStat || '(no changes)',
       actualFiles: collected.actualFiles,
       conflictFiles: collected.conflictFiles,
-      scopeOverlapFiles: this.scopeOverlapFiles(taskGroupId),
+      scopeOverlapFiles: this.scopeOverlapFiles(taskGroupId, collected.actualFiles),
       integrationBranch,
       ...this.driftSince(taskGroupId, integrationBranch, collected.actualFiles),
       pendingCandidate,
@@ -236,36 +324,186 @@ export class TaskMerger {
    *  merge is clean. Never touches the user's checkout, and never creates a
    *  commit the merge gate would not also verify — on conflict it aborts and
    *  reports the files. */
-  syncTaskOntoIntegration(taskGroupId: string): { ok: boolean; error?: string; mergedFiles?: string[] } {
+  syncTaskOntoIntegration(
+    taskGroupId: string,
+    opts: { preferSide?: 'task' | 'integration'; autoResolve?: boolean } = {}
+  ): { ok: boolean; error?: string; conflictFiles?: string[]; mergedFiles?: string[]; autoCommittedFiles?: string[]; resolvedBy?: string } {
     const group = this.groupOrThrow(taskGroupId)
     if (!group.worktreePath || !fs.existsSync(group.worktreePath)) {
       return { ok: false, error: 'This task has no worktree to sync (it is running without isolation).' }
     }
     if (!group.branchName) return { ok: false, error: 'This task has no branch yet — launch it first.' }
+    // Commit first. Pulling peers' work in on top of an agent's uncommitted
+    // changes would either fail or silently mix them, so "Update from branch"
+    // commits what is pending and then updates — the same safety net the merge
+    // has, so this action cannot dead-end either.
+    const preCommit = this.commitPendingWork(group, group.branchName)
+    if (preCommit.error) return { ok: false, error: preCommit.error }
     const dirty = this.dirtyWorktreeError(group, 'sync')
     if (dirty) return { ok: false, error: dirty }
 
+    const worktreePath = group.worktreePath
+    const branchName = group.branchName
     const integrationBranch = this.stateManager.getIntegrationBranch()
-    const behind = Number(this.execGit(['rev-list', '--count', `${group.branchName}..${integrationBranch}`]) || 0)
-    if (behind === 0) return { ok: true, mergedFiles: [] }
+    const behind = Number(this.execGit(['rev-list', '--count', `${branchName}..${integrationBranch}`]) || 0)
+    if (behind === 0) return { ok: true, mergedFiles: [], autoCommittedFiles: preCommit.files }
 
-    const before = this.execGit(['diff', '--name-only'], group.worktreePath)
+    const before = this.execGit(['diff', '--name-only'], worktreePath)
     try {
-      this.execGit(['merge', integrationBranch, '--no-edit'], group.worktreePath)
+      // --no-edit so a fast-forward stays a fast-forward: when the task is
+      // simply behind, there is nothing to reconcile and no merge commit to
+      // review. On conflict git leaves the merge in progress, which is what
+      // lets the resolution below see real conflict stages.
+      this.execGit(['merge', integrationBranch, '--no-edit'], worktreePath)
     } catch {
       let conflicts: string[] = []
-      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U'], group.worktreePath).split('\n').filter(Boolean) } catch {}
-      try { this.execGit(['merge', '--abort'], group.worktreePath) } catch {}
+      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U'], worktreePath).split('\n').filter(Boolean) } catch {}
+      if (!conflicts.length) {
+        this.abortSync(worktreePath)
+        return { ok: false, error: `Could not sync onto ${integrationBranch}. Merge the task as-is, or resolve the task worktree first.` }
+      }
+      return this.resolveSyncConflict(taskGroupId, group, conflicts, preCommit.files, opts)
+    }
+    const after = this.execGit(['diff', '--name-only'], worktreePath)
+    const touched = new Set([...before.split('\n'), ...after.split('\n')].filter(Boolean))
+    return { ok: true, mergedFiles: [...touched], autoCommittedFiles: preCommit.files }
+  }
+
+  /** Finish a conflicted sync: take a side, or let the provider try, or hand
+   *  the file list back so the user can choose.
+   *
+   *  This used to abort and return a wall of text, which was a dead end — the
+   *  same task could never pull in a peer's work on a file both had touched.
+   *
+   *  Note the inversion: this merges *into* the task worktree, so git's
+   *  `--ours` is the task branch and `--theirs` is the integration branch. The
+   *  merge dialog has the opposite arrangement, which is why the choice is
+   *  passed as 'task' | 'integration' rather than as ours/theirs — the same
+   *  word would have meant opposite things in the two places. */
+  private resolveSyncConflict(
+    taskGroupId: string,
+    group: TaskGroupOverview,
+    conflicts: string[],
+    autoCommitted: string[],
+    opts: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }
+  ): { ok: boolean; error?: string; conflictFiles?: string[]; mergedFiles?: string[]; autoCommittedFiles?: string[]; resolvedBy?: string } {
+    const worktreePath = group.worktreePath!
+    const branchName = group.branchName!
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    const mergeInProgress = this.probeGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], worktreePath) !== null
+
+    if (mergeInProgress && opts.preferSide) {
+      // Inside the live conflicted merge, so `--ours` really is the task and
+      // `--theirs` really is what peers merged. Outside a merge these silently
+      // keep the current content, which is how picking a side used to land the
+      // wrong one.
+      const side = opts.preferSide === 'task' ? '--ours' : '--theirs'
+      try {
+        this.execGit(['checkout', side, '--', ...conflicts], worktreePath)
+        this.execGit(['add', '--', ...conflicts], worktreePath)
+        this.execGit(['commit', '--no-edit'], worktreePath)
+      } catch (e: any) {
+        this.abortSync(worktreePath)
+        return { ok: false, error: `Could not keep the ${opts.preferSide === 'task' ? 'task' : 'merged'} version of ${conflicts.join(', ')}: ${(e as Error).message}` }
+      }
       return {
-        ok: false,
-        error: conflicts.length
-          ? `Syncing onto ${integrationBranch} conflicts in: ${conflicts.join(', ')}. Resolve them in the task worktree, or merge the task as-is.`
-          : `Could not sync onto ${integrationBranch}. Merge the task as-is, or resolve the task worktree first.`,
+        ok: true,
+        resolvedBy: opts.preferSide,
+        mergedFiles: conflicts,
+        autoCommittedFiles: autoCommitted,
       }
     }
-    const after = this.execGit(['diff', '--name-only'], group.worktreePath)
-    const touched = new Set([...before.split('\n'), ...after.split('\n')].filter(Boolean))
-    return { ok: true, mergedFiles: [...touched] }
+
+    // The AI is opt-in here, unlike a merge. Update runs on a click with no
+    // prior review step, so trying the provider first meant that an exhausted
+    // account turned every update into an error — the user never reached the
+    // panel, and Update looked simply broken. Hand back the conflicts and let
+    // the panel offer the AI as one of several choices.
+    if (opts.autoResolve === true && this.llm) {
+      return this.resolveSyncConflictAsync(taskGroupId, group, conflicts, autoCommitted)
+    }
+
+    this.abortSync(worktreePath)
+    return {
+      ok: false,
+      conflictFiles: conflicts,
+      autoCommittedFiles: autoCommitted,
+      error: `${integrationBranch} and this task both changed: ${conflicts.join(', ')}.`,
+    }
+  }
+
+  private async resolveSyncConflictAsync(
+    taskGroupId: string,
+    group: TaskGroupOverview,
+    conflicts: string[],
+    autoCommitted: string[]
+  ): Promise<{ ok: boolean; error?: string; conflictFiles?: string[]; mergedFiles?: string[]; autoCommittedFiles?: string[]; resolvedBy?: string }> {
+    const worktreePath = group.worktreePath!
+    const branchName = group.branchName!
+    const resolved = await this.resolveWithLlm(
+      taskGroupId, branchName, 'task branch', this.stateManager.getIntegrationBranch(), 'merged from other tasks',
+      conflicts, worktreePath
+    )
+    if (!resolved.applied) {
+      this.abortSync(worktreePath)
+      return { ok: false, conflictFiles: conflicts, autoCommittedFiles: autoCommitted, error: resolved.error }
+    }
+    try {
+      if (this.probeGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], worktreePath)) {
+        this.execGit(['commit', '--no-edit'], worktreePath)
+      } else {
+        this.execGit(['add', '-A'], worktreePath)
+      }
+    } catch (e: any) {
+      this.abortSync(worktreePath)
+      return { ok: false, error: `Could not record the AI's resolution: ${(e as Error).message}` }
+    }
+    return { ok: true, resolvedBy: 'ai', mergedFiles: conflicts, autoCommittedFiles: autoCommitted }
+  }
+
+  /** Never leave a half-merged task worktree behind.
+   *
+   *  A worktree stuck in a conflicted merge is worse than one that never
+   *  started: the agent relaunches into a tree full of conflict markers and its
+   *  next commit sweeps them into the task branch. */
+  private abortSync(worktreePath: string): void {
+    try { this.execGit(['merge', '--abort'], worktreePath) } catch {}
+    try { this.execGit(['reset', '--hard'], worktreePath) } catch {}
+  }
+
+  /** Uncommitted work in a task worktree, ignoring our generated files.
+   *  Read-only: used to label the action before the user commits to it. */
+  private pendingWork(group: TaskGroupOverview): string[] {
+    if (!group.worktreePath || !fs.existsSync(group.worktreePath)) return []
+    if (!fs.existsSync(path.join(group.worktreePath, '.git'))) return []
+    try {
+      return this.execGit(['status', '--porcelain'], group.worktreePath)
+        .split('\n').filter(l => l.trim().length > 0)
+        .filter(line => !isTaskScaffoldStatusLine(line))
+        .map(parseStatusPath).filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+
+  /** Commit a task worktree's pending work, on the agents' behalf.
+   *
+   *  Returns the files it committed so the merge result can say so — nothing
+   *  here happens silently. */
+  private commitPendingWork(
+    group: TaskGroupOverview,
+    branchName: string
+  ): { files: string[]; error?: string } {
+    if (!group.worktreePath || !fs.existsSync(group.worktreePath)) return { files: [] }
+    // Never read git state from a directory that is no longer a worktree: it
+    // would report the MAIN repo and blame the task for the user's own edits.
+    if (!fs.existsSync(path.join(group.worktreePath, '.git'))) return { files: [] }
+    const res = new WorktreeLifecycle(this.repoPath).commitTaskWorktree(
+      group.worktreePath,
+      `agntspce: commit task work (${branchName})`
+    )
+    if (res.error) return { files: [], error: res.error }
+    return { files: res.committed ? res.files : [] }
   }
 
   /** Fast-forward the user's own checked-out branch onto the integration branch.
@@ -280,7 +518,7 @@ export class TaskMerger {
    *  integration branch does not contain, this refuses and says so rather than
    *  creating a merge commit in someone's checkout, and it never touches a
    *  dirty tree. */
-  applyIntegrationToBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; upToDate?: boolean } {
+  applyIntegrationToBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; upToDate?: boolean; uncommittedFiles?: string[]; conflictFiles?: string[]; safeDirtyFiles?: string[]; preservedDirtyFiles?: string[] } {
     const integrationBranch = this.stateManager.getIntegrationBranch()
     let current = ''
     try { current = this.execGit(['symbolic-ref', '--short', 'HEAD']) } catch {
@@ -297,12 +535,14 @@ export class TaskMerger {
       return { ok: false, error: `You are on the task branch ${target}. Check out your own branch first, then apply.` }
     }
     if (target !== current) {
-      return { ok: false, error: `${target} is not the branch you have checked out (you are on ${current}). Apply only affects the current branch.` }
+      return { ok: false, error: `You are on ${current}, not ${target}. Check out ${target} first, then apply — AgntSpce will not switch branches for you.` }
     }
+    // Only the user's own changes are reported. AgntSpce's task files are
+    // excluded from git, but if that is missing the refusal would otherwise
+    // blame the user for our bookkeeping and they could not tell the two apart.
     const status = this.execGit(['status', '--porcelain'])
-    if (status) {
-      return { ok: false, error: `Your working tree has uncommitted changes, so ${integrationBranch} cannot be applied onto ${target} without risking them:\n${status.split('\n').filter(Boolean).join('\n')}\n\nCommit or stash them, then apply.` }
-    }
+      .split('\n').filter(l => l.trim().length > 0)
+      .filter(line => !isTaskScaffoldStatusLine(line))
     let integrationSha = ''
     try { integrationSha = this.execGit(['rev-parse', integrationBranch]) } catch {
       return { ok: false, error: `No ${integrationBranch} branch exists yet — merge a task first.` }
@@ -319,31 +559,158 @@ export class TaskMerger {
       }
     }
     const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
+
+    // A dirty tree does not block a fast-forward. `git merge --ff-only` only
+    // refuses when the incoming commits touch a file that is dirty locally —
+    // edits to files nobody changed ride along untouched. Refusing on *any*
+    // dirt meant one unrelated scratch edit stranded every merged task behind a
+    // "commit or stash everything" wall, which is what made Apply look broken.
+    const dirtyFiles = status.map(parseStatusPath).filter(Boolean)
+    const blocking = dirtyFiles.filter(f => files.includes(f))
+    const harmless = dirtyFiles.filter(f => !files.includes(f))
+    if (blocking.length > 0) {
+      return {
+        ok: false,
+        error: `${integrationBranch} also changes ${blocking.length} file(s) you have edited locally: ${blocking.join(', ')}. Those cannot be applied over your unsaved version — commit them, or discard just those files and apply again.`
+          + (harmless.length ? `\n\nYour other uncommitted change(s) (${harmless.join(', ')}) are untouched by this and are not a problem.` : ''),
+        uncommittedFiles: status,
+        conflictFiles: blocking,
+        safeDirtyFiles: harmless,
+      }
+    }
+
     try {
       this.execGit(['merge', '--ff-only', integrationBranch])
-    } catch {
-      return { ok: false, error: `Could not fast-forward ${target} onto ${integrationBranch}.` }
+    } catch (e: any) {
+      return { ok: false, error: `Could not fast-forward ${target} onto ${integrationBranch}: ${(e as Error).message}` }
     }
-    return { ok: true, branch: target, files }
+    return { ok: true, branch: target, files, preservedDirtyFiles: harmless }
+  }
+
+  /** Discard the user's local edits for specific files, so they can unblock an
+   *  apply without a blanket `git checkout .`.
+   *
+   *  Deliberately explicit and per-file. Resolving an apply conflict means one
+   *  version has to go, and doing that to someone's working tree by inference
+   *  is how real work gets destroyed. The UI lists the exact files, the user
+   *  picks, and only those are reverted. */
+  discardLocalEdits(files: string[]): { ok: boolean; error?: string; discarded: string[] } {
+    if (!files.length) return { ok: true, discarded: [] }
+    let current = ''
+    try { current = this.execGit(['symbolic-ref', '--short', 'HEAD']) } catch {
+      return { ok: false, error: 'HEAD is detached, so there is no branch to apply onto.' }
+    }
+    if (current.startsWith('task/')) {
+      return { ok: false, error: `You are on the task branch ${current}. Check out your own branch first.` }
+    }
+    const safe = files.filter(f => f && !path.isAbsolute(f) && !f.startsWith('..'))
+    if (safe.length !== files.length) {
+      return { ok: false, error: 'Refusing to discard a path outside the repository.' }
+    }
+    try {
+      this.execGit(['checkout', '--', ...safe])
+    } catch (e: any) {
+      return { ok: false, error: `Could not discard ${safe.join(', ')}: ${(e as Error).message}` }
+    }
+    return { ok: true, discarded: safe }
+  }
+
+  /** Full context for one conflicting file, for a human or an agent to work from.
+   *
+   *  Everything needed to decide, in one place: what this task wrote, what the
+   *  integration branch has, and the real three-way diff. A solver handed only
+   *  "demo.txt conflicts" has to rediscover all of it by hand. */
+  describeConflict(taskGroupId: string, file: string): { file: string; taskSide: string; mergedSide: string; diff: string } | null {
+    const group = this.stateManager.getTaskGroup(taskGroupId)
+    if (!group?.branchName) return null
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    const taskSide = this.safeShow(`${group.branchName}:${file}`, this.repoPath)
+    const mergedSide = this.safeShow(`${integrationBranch}:${file}`, this.repoPath)
+    // `...` is the symmetric-difference form: task-only changes against
+    // merged-only changes, which is the choice actually being made.
+    let diff = ''
+    try { diff = this.execGit(['diff', `${integrationBranch}...${group.branchName}`, '--', file], this.repoPath) } catch {}
+    return { file, taskSide: taskSide.slice(0, 8000), mergedSide: mergedSide.slice(0, 8000), diff: diff.slice(0, 12000) }
+  }
+
+  /** The brief handed to a conflict-solving agent.
+   *
+   *  Written to be actionable on its own: what the task was for, which two
+   *  versions disagree, and what the agent is allowed to do. Without the goal,
+   *  an agent sees two blocks of text and cannot tell which one is correct. */
+  buildConflictBrief(taskGroupId: string, conflictFiles: string[]): string {
+    const group = this.stateManager.getTaskGroup(taskGroupId)
+    if (!group) return ''
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    const details = conflictFiles.slice(0, 6).map((f) => {
+      const d = this.describeConflict(taskGroupId, f)
+      if (!d) return `--- ${f}\n(no detail available)`
+      return [
+        `--- ${f}`,
+        `=== THIS TASK wrote (${group.branchName}) ===`,
+        d.taskSide,
+        `=== THE INTEGRATION BRANCH has (${integrationBranch}) ===`,
+        d.mergedSide,
+        `=== three-way diff (integration ... task) ===`,
+        d.diff || '(no textual diff)',
+      ].join('\n')
+    })
+    return [
+      `A git merge conflict is blocking "${group.title}" from merging into ${integrationBranch}.`,
+      ``,
+      `Task goal: ${group.userGoal}`,
+      `Task branch: ${group.branchName}`,
+      `Integration branch: ${integrationBranch}`,
+      `Conflicting file(s): ${conflictFiles.join(', ')}`,
+      ``,
+      `You are running in this task's own worktree at ${group.worktreePath}.`,
+      `Nothing is merged yet. Two versions of the file above disagree.`,
+      ``,
+      `Decide what the correct combined result should be, then edit the file(s) in`,
+      `this worktree to that result. Keep both sides' intent where they do not`,
+      `actually conflict, and prefer the version that matches the task goal.`,
+      `Do not run git commands - AgntSpce performs the merge once you are done.`,
+      `When you have made the edits, say so and stop.`,
+      ``,
+      ...details,
+    ].join('\n')
   }
 
   /** Read-only preview: clean check + diff stat + trial merge for conflicts. */
   previewMerge(taskGroupId: string): TaskMergePreview {
-    const group = this.groupOrThrow(taskGroupId)
+    const group = this.stateManager.getTaskGroup(taskGroupId)
+    if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
+    if (!group.branchName) {
+      return {
+        taskGroupId, branchName: '', diffSummary: '', actualFiles: [], conflictFiles: [],
+        scopeOverlapFiles: [], error: 'This task is already merged — it has no branch left to merge.',
+      }
+    }
+    if (group.branchName && this.branchIsGone(group.branchName)) {
+      return {
+        taskGroupId, branchName: group.branchName, diffSummary: '', actualFiles: [], conflictFiles: [],
+        scopeOverlapFiles: [], error: 'This task is already merged — its branch was retired when it landed.',
+      }
+    }
     const integrationBranch = this.stateManager.getIntegrationBranch()
     let scratch: Scratch | null = null
+    // Read before the trial merge mutates the scratch worktree, so the UI can
+    // label the action "Commit & merge" when there is uncommitted work.
+    const pending = this.pendingWork(group)
     try {
-      const dirty = this.dirtyWorktreeError(group)
-      if (dirty) {
-        return { taskGroupId, branchName: group.branchName ?? '', diffSummary: '', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [], error: dirty }
-      }
+      // No dirty-check bail-out here. Merging now commits pending work on the
+      // agent's behalf, so an uncommitted worktree is a normal state that the
+      // preview should describe, not refuse to describe — that refusal is what
+      // left the user with a dead end and no idea what would be merged.
       const integrationRef = this.execGit(['rev-parse', integrationBranch])
       scratch = this.worktreeLifecycle.createScratchWorktree(integrationRef)
       const collected = this.collect(group, integrationRef, scratch.worktreePath)
       if (collected.mergeStaged) {
         try { this.execGit(['merge', '--abort'], scratch.worktreePath) } catch {}
       }
-      return this.previewFrom(taskGroupId, group, collected)
+      const preview = this.previewFrom(taskGroupId, group, collected)
+      if (pending.length > 0) preview.pendingFiles = pending
+      return preview
     } catch (e: any) {
       return { taskGroupId, branchName: group.branchName ?? '', diffSummary: '', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [], error: e?.message || 'Preview failed' }
     } finally {
@@ -358,6 +725,15 @@ export class TaskMerger {
    *  as "uncommitted changes" made every freshly launched task unmergeable. */
   private dirtyWorktreeError(group: TaskGroupOverview, action: 'merge' | 'sync' = 'merge'): string | null {
     if (!group.worktreePath || !fs.existsSync(group.worktreePath)) return null
+    // A retired task's directory can outlive its worktree as an orphan inside the
+    // repo (`.agntspce/` is gitignored, so removing the worktree leaves the
+    // generated COLLAB.md/.task.json behind). Running `git status` in such a
+    // directory does not inspect the task at all — git walks up and reports the
+    // MAIN repo, so the task gets blamed for the user's own uncommitted edits.
+    // Verified: an orphan dir produced "Modified, never committed: M index.html"
+    // for a file that task never touched. A real linked worktree always has a
+    // `.git` entry (a file, not a directory).
+    if (!fs.existsSync(path.join(group.worktreePath, '.git'))) return null
     const wtStatus = this.execGit(['status', '--porcelain'], group.worktreePath)
     if (!wtStatus) return null
     const blocking = wtStatus.split('\n').filter(Boolean).filter(line => !isTaskScaffoldStatusLine(line))
@@ -388,17 +764,56 @@ export class TaskMerger {
 
   /** Execute a merge. Clean path auto-promotes; conflict path either resolves
    *  via LLM into a confirm-pending candidate or returns blocked. */
-  async executeMerge(taskGroupId: string, autoResolve = true): Promise<TaskMergeResult> {
+  /** Merge a task into the integration branch.
+   *
+   *  `preferSide` is the escape hatch. When the AI cannot resolve a conflict
+   *  the user used to be stuck forever: the sync refuses (it would clobber
+   *  work), and re-merging hits the same wall. Taking one side outright is a
+   *  deliberate, visible choice the user makes, not a silent guess — 'ours' is
+   *  the integration branch (work already merged), 'theirs' is the task. */
+  async executeMerge(
+    taskGroupId: string,
+    autoResolve = true,
+    preferSide?: 'ours' | 'theirs'
+  ): Promise<TaskMergeResult> {
     if (this.locked || repoMergeLocks.has(this.repoPath)) {
       const group = this.groupOrThrow(taskGroupId)
       return { ...this.failResult(taskGroupId, group.branchName ?? '', 'A merge is already in progress for this repository. Wait for it to complete.'), needsConfirm: false }
     }
-    const group = this.groupOrThrow(taskGroupId)
-    const branchName = group.branchName!
+    const group = this.stateManager.getTaskGroup(taskGroupId)
+    if (!group) throw new CoordinatorError('NOT_FOUND', `Task ${taskGroupId} not found`)
+    const branchName = group.branchName
+    // No branch: the task is finished. A completed merge retires the worktree
+    // and clears the branch, so this is the expected state of a task whose work
+    // already landed — not an error, and not something to re-merge.
+    if (!branchName) {
+      return {
+        ok: true, needsConfirm: false, taskGroupId, branchName: '',
+        diffSummary: '(already merged)', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [],
+        buildPassed: true,
+      }
+    }
+    // Already merged and retired. Returning success (rather than falling through
+    // to a raw git error) is what stops merge-all from reporting a finished task
+    // as a failure, and stops the catch handler from flipping it back to
+    // 'active'. A pre-fix database still has the dead branch recorded.
+    if (this.branchIsGone(branchName)) {
+      return {
+        ok: true, needsConfirm: false, taskGroupId, branchName,
+        diffSummary: '(already merged)', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [],
+        buildPassed: true,
+      }
+    }
     const integrationBranch = this.stateManager.getIntegrationBranch()
     this.locked = true
     repoMergeLocks.add(this.repoPath)
     let scratch: Scratch | null = null
+    // Set the moment the integration ref actually moves. Past this point the
+    // work IS on the integration branch: reporting a failure, or rolling the
+    // status back to 'active', would tell the user their work was lost while it
+    // sits merged on the branch — the worst possible outcome for a merge, since
+    // retrying would apply it twice.
+    let landed = false
     try {
       // A stale candidate from an earlier attempt can never be confirmed once
       // the integration branch moves, so drop it before starting over.
@@ -406,6 +821,15 @@ export class TaskMerger {
       group.mergeCandidateRef = null
       group.mergeCandidateBase = null
       this.stateManager.updateTaskGroup(taskGroupId, { status: 'merging' })
+      // Commit on the agent's behalf before deciding anything. A worktree the
+      // agent never committed used to dead-end here with "there is nothing to
+      // merge yet", even though the work was sitting there finished. Merging is
+      // the user saying "take this work", so take it.
+      const autoCommit = this.commitPendingWork(group, branchName)
+      if (autoCommit.error) {
+        this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
+        return { ...this.failResult(taskGroupId, branchName, autoCommit.error), needsConfirm: false }
+      }
       const dirty = this.dirtyWorktreeError(group)
       if (dirty) {
         this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
@@ -416,18 +840,58 @@ export class TaskMerger {
       scratch = this.worktreeLifecycle.createScratchWorktree(integrationRef)
       const collected = this.collect(group, integrationRef, scratch.worktreePath)
       const preview = this.previewFrom(taskGroupId, group, collected)
+      // The user clicked merge, so they get told what was committed for the
+      // agent rather than finding out from the history. Every `{ ...preview }`
+      // return below carries this.
+      if (autoCommit.files.length > 0) preview.autoCommittedFiles = autoCommit.files
 
       if (collected.nothingToMerge) {
-        this.stateManager.updateTaskGroup(taskGroupId, { status: 'done', completedAt: Date.now() })
+        // Nothing to land, but the task is finished either way, so retire it
+        // like a real merge. This path used to only flip the status, leaking the
+        // task branch and leaving an orphan directory that later reported the
+        // main repo's dirty files as this task's.
+        this.recordMerge(taskGroupId, branchName, integrationBranch, integrationRef, '(no changes to merge)')
         return { ...preview, ok: true, needsConfirm: false, buildPassed: true }
       }
 
       if (collected.conflictFiles.length > 0) {
-        if (!autoResolve || !this.llm) {
-          this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
-          return { ...preview, ok: false, needsConfirm: false, buildPassed: false, error: `Merge conflicts in: ${collected.conflictFiles.join(', ')}. Resolve them or retry with auto-resolve.` }
+        // `collect` aborts its trial merge, so the scratch worktree has no
+        // conflict stages here. Re-run the merge to get them back before asking
+        // git for one side - `git checkout --theirs` outside a conflicted merge
+        // silently keeps the current content, which is how "keep the task's
+        // version" quietly landed the integration version instead. Scoped to
+        // preferSide: the LLM path expects the clean, aborted tree.
+        if (preferSide) {
+          try {
+            this.execGit(['merge', branchName, '--no-commit', '--no-ff'], scratch.worktreePath)
+          } catch {
+            // Expected: this is the conflict we are about to resolve.
+          }
         }
-        const resolved = await this.resolveWithLlm(taskGroupId, branchName, integrationRef, collected.conflictFiles, scratch.worktreePath)
+        // The user picked a side: take it for the conflicting files and let the
+        // merge finish, rather than dead-ending.
+        if (preferSide) {
+          try {
+            this.execGit(['checkout', `--${preferSide}`, '--', ...collected.conflictFiles], scratch.worktreePath)
+            this.execGit(['add', '--', ...collected.conflictFiles], scratch.worktreePath)
+          } catch (e: any) {
+            try { this.execGit(['merge', '--abort'], scratch.worktreePath) } catch {}
+            this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
+            return { ...preview, ok: false, needsConfirm: false, buildPassed: false, error: `Could not take the ${preferSide === 'ours' ? 'integration' : 'task'} version of ${collected.conflictFiles.join(', ')}: ${(e as Error).message}` }
+          }
+        } else if (!autoResolve || !this.llm) {
+          try { this.execGit(['merge', '--abort'], scratch.worktreePath) } catch {}
+          this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
+          return {
+            ...preview, ok: false, needsConfirm: false, buildPassed: false,
+            error: this.llm
+              ? `Merge conflicts in: ${collected.conflictFiles.join(', ')}. Let the AI resolve it, or choose which version to keep.`
+              : `Merge conflicts in ${collected.conflictFiles.join(', ')} and no AI provider is configured to resolve them. Add one in Settings, or choose which version to keep.`,
+          }
+        }
+        const resolved = preferSide
+          ? { applied: true }
+          : await this.resolveWithLlm(taskGroupId, integrationRef, 'integration', branchName, 'task branch', collected.conflictFiles, scratch.worktreePath)
         if (!resolved.applied) {
           this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
           return { ...preview, ok: false, needsConfirm: false, buildPassed: false, error: resolved.error || 'LLM resolution failed to apply' }
@@ -457,11 +921,22 @@ export class TaskMerger {
       this.execGit(['commit', '-m', `agntspce merge: ${taskGroupId} (${branchName}) into ${integrationBranch}`], scratch.worktreePath)
       const head = this.execGit(['rev-parse', 'HEAD'], scratch.worktreePath)
       this.promote(head, integrationBranch, integrationRef)
-      this.finishTask(taskGroupId, branchName, integrationBranch, head, preview.diffSummary)
+      landed = true
+      this.recordMerge(taskGroupId, branchName, integrationBranch, head, preview.diffSummary)
       return { ...preview, ok: true, needsConfirm: false, buildPassed: true, mergeCommitSha: head }
     } catch (e: any) {
-      try { this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' }) } catch {}
       const msg = e instanceof CoordinatorError ? e.message : (e as Error).message
+      if (landed) {
+        // The integration branch already carries this work. Finish the task
+        // bookkeeping and report success — never a failure the user would retry.
+        try { this.recordMerge(taskGroupId, branchName, integrationBranch, '', '(merged)') } catch {}
+        return {
+          ok: true, needsConfirm: false, taskGroupId, branchName,
+          diffSummary: '(merged)', actualFiles: [], conflictFiles: [], scopeOverlapFiles: [],
+          buildPassed: true,
+        }
+      }
+      try { this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' }) } catch {}
       return { ...this.failResult(taskGroupId, branchName, msg), needsConfirm: false }
     } finally {
       if (scratch) this.worktreeLifecycle.removeScratchWorktree(scratch.worktreePath)
@@ -525,7 +1000,7 @@ export class TaskMerger {
       scratchPath = this.findScratchPathForBranch(scratchBranch)
       this.promote(head, integrationBranch, candidateBase)
       const diffSummary = this.execGit(['diff', '--stat', `${candidateBase}..${head}`])
-      this.finishTask(taskGroupId, branchName, integrationBranch, head, diffSummary)
+      this.recordMerge(taskGroupId, branchName, integrationBranch, head, diffSummary)
       this.stateManager.updateTaskGroup(taskGroupId, { mergeCandidateRef: null, mergeCandidateBase: null })
       return {
         ok: true, needsConfirm: false, taskGroupId, branchName,
@@ -550,18 +1025,32 @@ export class TaskMerger {
     return out
   }
 
+  /** Ask the configured provider to resolve conflicted files.
+   *
+   *  The two sides are passed by ref *and* label because the roles invert
+   *  depending on the direction: merging a task into the integration branch has
+   *  integration on one side, but syncing a task *onto* integration has the task
+   *  branch first. Getting that backwards would have shown the model the two
+   *  versions and told it which was which, incorrectly. */
   private async resolveWithLlm(
-    taskGroupId: string, branchName: string, integrationRef: string,
+    taskGroupId: string,
+    oursRef: string, oursLabel: string,
+    theirsRef: string, theirsLabel: string,
     conflictFiles: string[], scratchPath: string
   ): Promise<{ applied: boolean; error?: string }> {
-    if (!this.llm) return { applied: false, error: 'No LLM configured for conflict resolution' }
+    if (!this.llm) {
+      return {
+        applied: false,
+        error: 'No AI provider is configured, so conflicts cannot be resolved automatically. Add one in Settings, or choose which version to keep.',
+      }
+    }
     try {
       const group = this.groupOrThrow(taskGroupId)
       const chunks: string[] = []
       for (const f of conflictFiles.slice(0, 8)) {
-        const ours = this.safeShow(`${integrationRef}:${f}`, scratchPath)
-        const theirs = this.safeShow(`${branchName}:${f}`, scratchPath)
-        chunks.push(`--- ${f} (integration)\n${ours.slice(0, 4000)}\n--- ${f} (task branch)\n${theirs.slice(0, 4000)}`)
+        const ours = this.safeShow(`${oursRef}:${f}`, scratchPath)
+        const theirs = this.safeShow(`${theirsRef}:${f}`, scratchPath)
+        chunks.push(`--- ${f} (${oursLabel})\n${ours.slice(0, 4000)}\n--- ${f} (${theirsLabel})\n${theirs.slice(0, 4000)}`)
       }
       let conventions = ''
       try {
@@ -574,8 +1063,20 @@ export class TaskMerger {
         conventions ? `Team conventions:\n${conventions}` : '',
         ...chunks,
       ].filter(Boolean).join('\n\n')
-      const patch = await this.llm(prompt)
-      if (!patch || patch.trim().length < 20) return { applied: false, error: 'LLM returned an empty resolution' }
+      let patch: string | null
+      try {
+        patch = await this.llm(prompt)
+      } catch (e: any) {
+        // The provider failed. Say why - an invalid key or a spent quota is
+        // fixable, and "empty resolution" gave the user nothing to act on.
+        return { applied: false, error: describeLlmFailure(e) }
+      }
+      if (!patch || patch.trim().length < 20) {
+        return {
+          applied: false,
+          error: `The AI replied with nothing usable for ${conflictFiles.join(', ')}. Retry, or resolve the conflict in the task worktree.`,
+        }
+      }
       // git apply reads a missing trailing newline as a truncated hunk
       // ("corrupt patch"), so normalize before feeding it via stdin.
       const raw = extractPatch(patch)
@@ -639,16 +1140,48 @@ export class TaskMerger {
     this.execGit(['update-ref', `refs/heads/${integrationBranch}`, head, integrationRef])
   }
 
-  private finishTask(taskGroupId: string, branchName: string, integrationBranch: string, head: string, diffSummary: string): void {
-    this.stateManager.updateTaskGroup(taskGroupId, { status: 'done', completedAt: Date.now() })
-    try {
-      const wtl = new WorktreeLifecycle(this.repoPath)
-      wtl.removeTaskWorktree(taskGroupId, integrationBranch)
-    } catch {}
+  /** Retire a task that has landed.
+   *
+   *  Verified failure: this deleted the worktree without stopping the agents
+   *  running inside it, and left `worktree_path`/`branch_name` populated. A live
+   *  agent then reported "the environment changed under me — the worktree I was
+   *  in was torn down", and any later relaunch or follow-up re-spawned it into
+   *  that deleted directory.
+   *
+   *  So: stop the agents first, then clear the pointers to the worktree that is
+   *  about to stop existing, then remove it. A task that no longer has a
+   *  worktree must not still claim one. */
+  /** A merge is just a merge. The task is left completely alone.
+   *
+   *  It used to retire the task here: stop its agents, mark it done, delete its
+   *  worktree and drop its branch. That made a merged task unusable — a live
+   *  agent watched its directory disappear ("the environment changed under
+   *  me"), its buttons vanished, and adding an agent failed because there was
+   *  no worktree left to put one in.
+   *
+   *  So a merge now moves only the *branch*: the task keeps its worktree, its
+   *  branch, its agents and their sessions. Work continues in the same place,
+   *  and Merge / Update keep working for the next round exactly as they did the
+   *  first time. A task is discarded with Delete, which is the one action that
+   *  should remove a worktree.
+   *
+   *  The one field written here is the status, and only to clear the transient
+   *  'merging' the merge set on the way in. Leaving it there would hide the
+   *  task's own Merge and Update buttons, which only appear for an active task.
+   */
+  private recordMerge(
+    taskGroupId: string,
+    branchName: string,
+    integrationBranch: string,
+    head: string,
+    diffSummary: string
+  ): void {
+    try { this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' }) } catch {}
     try {
       this.stateManager.sendMessage('agntspce-coordinator', null, true, `Task ${taskGroupId} merged: ${branchName} → ${integrationBranch}\n${diffSummary}\nHEAD: ${head}`)
     } catch {}
   }
+
 }
 
 function extractPatch(text: string): string {
@@ -656,4 +1189,45 @@ function extractPatch(text: string): string {
   const body = (fenced ? fenced[1] : text).trim()
   const idx = body.search(/^diff --git /m)
   return idx >= 0 ? body.slice(idx) : body
+}
+
+
+/** Turn a provider failure into something the user can act on.
+ *
+ *  A raw provider message was the whole error, so an exhausted-credit reply
+ *  arrived as a wall of third-party text with no indication that the real
+ *  choice was still open: merge this yourself, right now, by picking a side.
+ *  The detail is kept — it is the only place the credit URL appears — but it is
+ *  demoted below the part that tells you what to do next. */
+function describeLlmFailure(e: any): string {
+  const raw = String(e?.message || e)
+  const lower = raw.toLowerCase()
+  if (/credit|insufficient_quota|quota|billing|balance|upgrade.*paid|payment/.test(lower)) {
+    return [
+      `Your AI provider has no credits left, so it cannot resolve conflicts right now.`,
+      ``,
+      `You do not have to wait: keep this task's version, or keep the merged one, and it lands immediately.`,
+      ``,
+      `Provider said: ${raw.slice(0, 400)}`,
+    ].join('\n')
+  }
+  if (/401|unauthor|invalid.*key|api[- ]?key/.test(lower)) {
+    return [
+      `Your AI provider rejected the request (an invalid or missing API key), so it cannot resolve conflicts.`,
+      ``,
+      `You can still resolve this now by keeping either version below.`,
+      ``,
+      `Provider said: ${raw.slice(0, 400)}`,
+    ].join('\n')
+  }
+  if (/timeout|timed out|network|econn|enotfound|fetch failed|socket/.test(lower)) {
+    return [
+      `Could not reach the AI provider.`,
+      ``,
+      `You can still resolve this now by keeping either version below.`,
+      ``,
+      `Provider said: ${raw.slice(0, 400)}`,
+    ].join('\n')
+  }
+  return `The AI could not be reached: ${raw.slice(0, 400)}`
 }

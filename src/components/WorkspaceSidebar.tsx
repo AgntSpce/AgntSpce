@@ -121,6 +121,9 @@ interface Props {
   /** Fast-forward the checked-out branch onto the integration branch. */
   onApplyIntegration?: () => void
   applyingIntegration?: boolean
+  /** Pull the integration branch into one task's worktree. */
+  onUpdateTask?: (taskGroupId: string) => void
+
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -847,6 +850,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onMergeAllTasks,
   onApplyIntegration,
   applyingIntegration,
+  onUpdateTask,
   onDeleteTask,
   onOpenTaskDetails,
 }: {
@@ -919,6 +923,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   /** Fast-forward the checked-out branch onto the integration branch. */
   onApplyIntegration?: () => void
   applyingIntegration?: boolean
+  /** Pull the integration branch into one task's worktree. */
+  onUpdateTask?: (taskGroupId: string) => void
+
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
   /** Open the details popup for a task group. */
@@ -1061,12 +1068,32 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   // & land" step would be unreachable from the sidebar. `baseSha` is what
   // separates a real worktree from the plain-directory fallback used when the
   // workspace folder is not a git repository — those can never merge.
+  //
+  // `done` is deliberately NOT mergeable: it is the status a task lands in once
+  // its work is on the integration branch, so re-offering the merge button made
+  // finished tasks look pending and sent already-merged work back through the
+  // merge flow. A task with a prepared candidate is still actionable.
+  // Merging and updating rewrite the task worktree. Doing that while an agent
+  // is mid-turn silently discards whatever it has not committed yet — the agent
+  // then reads the other task's content back and thinks someone is overwriting
+  // its files. Rather than gate the buttons on a live status signal (which is
+  // heuristic, and was wrong in both directions: stuck on, and flashing when
+  // idle), the action itself stops the task's agents first and then proceeds.
+  // The task stays active afterwards and its agents can be relaunched.
   const canMergeTask = (t: TaskGroupInfo) =>
-    !!t.branchName && !!t.baseSha && (t.status === 'active' || t.status === 'done' || !!t.mergeCandidateRef)
+    !!t.branchName && !!t.baseSha && t.status !== 'done'
+    && (t.status === 'active' || !!t.mergeCandidateRef)
   const mergeableTasks = useMemo(
     () => (taskGroups || []).filter(canMergeTask),
     [taskGroups]
   )
+
+  // "Update from branch" needs a worktree and a branch to merge into it. It is
+  // offered regardless of how far behind the task is: the user wants to pull in
+  // peers' work before starting the next feature, and having to first open the
+  // merge dialog to discover a button was the hard part.
+  const canUpdateTask = (t: TaskGroupInfo) =>
+    !!t.branchName && !!t.worktreePath && t.status !== 'done'
 
   return (
     <aside className="sidebar orca-workspace-sidebar">
@@ -1160,19 +1187,19 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
           <div className="workspace-tasks-top">
             <div className="sidebar-header tasks-header">
               <h2>Tasks</h2>
-              {/* Merging parks work on the integration branch, so the user's
-                  own checkout does not change until they ask for it. Verified
-                  dead end: "Merge all" had no follow-up, leaving merged files
-                  invisible in the folder with no way to bring them over. */}
+              {/* Merging parks work on the integration branch, so main does not
+                  move until they ask for it. Verified dead end: "Merge all" had
+                  no follow-up, leaving merged files invisible in the folder with
+                  no way to bring them over. */}
               {onApplyIntegration && (
                 <button
                   className="tasks-merge-all"
                   onClick={onApplyIntegration}
                   disabled={applyingIntegration}
-                  title={`Fast-forward your checked-out branch onto the integration branch, so merged task files appear in this folder`}
+                  title="Fast-forward main onto the integration branch, so merged task files appear in this folder"
                 >
                   <i className="codicon codicon-git-merge" />
-                  {applyingIntegration ? 'Applying…' : 'Apply to my branch'}
+                  {applyingIntegration ? 'Applying…' : 'Apply to main'}
                 </button>
               )}
               {onMergeAllTasks && mergeableTasks.length > 0 && (
@@ -1234,6 +1261,10 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           {t.worktreeMode === 'none' && (
                             <i className="codicon codicon-files task-row-no-isolation" title="No isolation — agents share the workspace folder" />
                           )}
+                          {/* A finished task has no branch and no worktree, so its
+                              Merge and Update buttons are correctly gone. Saying
+                              so is the difference between "understood" and
+                              "broken". */}
                           {renamingTask?.id === t.id ? (
                             <TaskRenameInput
                               initialName={t.title}
@@ -1258,11 +1289,20 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           </span>
                         )}
                       </div>
+                      {onMergeTask && onUpdateTask && canUpdateTask(t) && (
+                        <button
+                          className="task-row-merge"
+                          onClick={(e) => { e.stopPropagation(); onUpdateTask(t.id) }}
+                          title={`Pull the integration branch into ${t.title}'s worktree, so it sees what other tasks have merged. Pending work is committed first.`}
+                        >
+                          <i className="codicon codicon-sync" /> Update
+                        </button>
+                      )}
                       {onMergeTask && canMergeTask(t) && (
                         <button
                           className="task-row-merge"
                           onClick={(e) => { e.stopPropagation(); onMergeTask(t.id) }}
-                          title={`Merge ${t.title}'s changes into the integration branch`}
+                          title={`Merge ${t.title}'s changes into the integration branch. Any agents still working in this task are stopped first.`}
                         >
                           <i className="codicon codicon-git-merge" /> Merge changes
                         </button>
@@ -1420,7 +1460,7 @@ export default memo(function WorkspaceSidebar({
   activeSessionId, onSelectSession,
   onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, onAgentStatus, getTokenUsage, promptHistory,
   onRenameTask, onSetTaskPinned, onMergeTask, onMergeAllTasks, onDeleteTask, onOpenTaskDetails,
-  onApplyIntegration, applyingIntegration,
+  onApplyIntegration, applyingIntegration, onUpdateTask,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -1460,6 +1500,7 @@ export default memo(function WorkspaceSidebar({
         onMergeAllTasks={onMergeAllTasks}
         onApplyIntegration={onApplyIntegration}
         applyingIntegration={applyingIntegration}
+        onUpdateTask={onUpdateTask}
         onDeleteTask={onDeleteTask}
         onOpenTaskDetails={onOpenTaskDetails}
       />
@@ -1713,6 +1754,21 @@ const WorkspaceSidebarFiles = memo(function WorkspaceSidebarFiles({
                 {/* Inline file tree when expanded */}
                 {isExpanded && isActive && wsPath && canShowTree && (
                   <div className="workspace-inline-tree">
+                    {/* The tree only reloads on a signal — there is no watcher and
+                        no polling — so a file that appeared on disk (an agent's
+                        output after "Apply to main") stayed invisible until the
+                        user found a right-click menu in the workspace row. */}
+                    <div className="file-explorer-toolbar">
+                      <span className="file-explorer-toolbar-path" title={wsPath}>{ws.name || wsPath}</span>
+                      <button
+                        className="file-explorer-refresh"
+                        title="Reload the file tree"
+                        aria-label="Reload the file tree"
+                        onClick={() => setRefreshSignal(n => n + 1)}
+                      >
+                        <i className="codicon codicon-refresh" />
+                      </button>
+                    </div>
                     <FileExplorer
                       workspacePath={wsPath}
                       selectedFilePath={selectedFilePath || null}

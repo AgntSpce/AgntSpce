@@ -116,7 +116,7 @@ function getShellName(): string {
   return shell.split('/').pop() || 'bash'
 }
 
-function buildShellArgs(commands: string | string[]): string[] {
+export function buildShellArgs(commands: string | string[]): string[] {
   if (process.platform === 'win32') {
     let cmds = Array.isArray(commands) ? commands : [commands]
     cmds = cmds.filter(c => !c.startsWith('cd '))
@@ -125,8 +125,19 @@ function buildShellArgs(commands: string | string[]): string[] {
     return ['-NoExit', '-NoProfile', '-Command', joined]
   }
   const shellName = getShellName()
-  const joined = Array.isArray(commands) ? commands.join(' && ') : commands
-  const keepOpen = joined && joined.trim() ? `${joined} && exec ${shellName}` : `exec ${shellName}`
+  // Every command is joined with `&&`, so a single failure — most often a `cd`
+  // into a task worktree that has since been deleted by a merge — skips the
+  // `exec` entirely, the shell exits immediately, and every later write to that
+  // pty fails with EIO. The user gets a tab that looks live but can never be
+  // typed into, and no explanation.
+  //
+  // Each command is therefore run so that a failure does not abort the chain,
+  // and the shell always execs. A missing directory leaves the agent in the
+  // fallback directory instead of in a corpse.
+  const list = (Array.isArray(commands) ? commands : [commands]).filter(c => !!c && c.trim())
+  if (list.length === 0) return ['-c', `exec ${shellName}`]
+  const tolerant = (cmd: string) => `{ ${cmd}; } || true`
+  const keepOpen = `${list.map(tolerant).join(' && ')} ; exec ${shellName}`
   return ['-c', keepOpen]
 }
 
@@ -968,9 +979,41 @@ export class SessionManager extends EventEmitter {
       if (session.type === 'claude' && session.agentStartConfig?.mode === 'fresh' && !this.claudeSessionLookups.has(sessionId)) {
         this.scheduleClaudeSessionLookup(sessionId, session.config.cwd, Date.now(), session.agentStartConfig.nativeSessionId)
       }
-      session.pty.write(data)
+      // node-pty's write is async: a dead child surfaces as an EIO on the pty's
+      // error event, which the synchronous try/catch above cannot see. Without a
+      // callback node-pty logs it as "Unhandled pty write error" and the session
+      // sits there looking broken with no explanation. Handle it: the child is
+      // gone, so mark the session exited, which is what it actually is.
+      session.pty.write(data, (err?: Error) => {
+        if (!err) return
+        const s = this.sessions.get(sessionId)
+        if (!s) return
+        const code = (err as any)?.code
+        if (code === 'EIO' || /EIO/i.test(err.message || '')) {
+          this.markPtyGone(sessionId, err)
+        } else {
+          console.warn(`[sessionManager] pty write failed for ${sessionId}: ${err.message}`)
+        }
+      })
       return true
     } catch { return false }
+  }
+
+  /** The PTY's child is gone (EIO on macOS). Reflect that instead of leaving a
+   *  tab that looks live but can never be typed into.
+   *
+   *  The pty object is deliberately kept: the resume-recovery paths key off it
+   *  (`maybeRecoverFailedAgentResume` re-launches when an agent exits straight
+   *  away), and nulling it here disabled that recovery. */
+  private markPtyGone(sessionId: string, err: Error): void {
+    const session = this.sessions.get(sessionId)
+    if (!session || session.status === 'exited') return
+    try {
+      session.status = 'exited'
+      session.statusChangedAt = Date.now()
+      session.exitReason = err?.message || 'The terminal process exited'
+      this.io?.emit('status-change', { sessionId, status: 'exited' })
+    } catch {}
   }
 
   resizeSession(sessionId: string, cols: number, rows: number) {
@@ -1285,7 +1328,14 @@ export class SessionManager extends EventEmitter {
   }
 
   private registerRestorableSession(saved: SavedSessionData): void {
-    const cwd = saved.cwd || this.workspace?.repository?.path || process.env.HOME || '/tmp'
+    // A task's worktree is deleted when it merges, but the persisted cwd is not
+    // updated until the next clean shutdown. Restoring into that path produced a
+    // terminal whose shell exited immediately and could never be typed into.
+    // Fall back to the workspace folder and say so.
+    const persisted = saved.cwd
+    const fallback = this.workspace?.repository?.path || process.env.HOME || '/tmp'
+    const cwd = persisted && fs.existsSync(persisted) ? persisted : fallback
+    const cwdVanished = !!persisted && !fs.existsSync(persisted)
     const defaultConfig = (AGENT_TYPES as readonly string[]).includes(saved.type as any)
       ? this.agentManager?.getDefaultConfig(saved.type)
       : null
@@ -1317,6 +1367,7 @@ export class SessionManager extends EventEmitter {
       pendingStatus: null,
       pendingStatusTimer: null,
       cwdState: { current: cwd, previous: null, stack: [] },
+      ...(cwdVanished ? { exitReason: `Its folder was removed: ${persisted}` } : {}),
       autoStarted: false,
       claudeLaunchState: null,
       restorable: true,
@@ -1528,7 +1579,19 @@ export class SessionManager extends EventEmitter {
           excludeSessionIds: siblings,
           prompt: input.prompt,
         })
-      } catch {}
+      } catch (err: any) {
+        // A bare catch made a failed agent start invisible: the task row showed
+        // a red indicator with no reason and no agent. Say what happened.
+        const reason = err?.message || String(err)
+        console.warn('[sessionManager] task agent failed to start:', sessionId, reason)
+        const session = this.sessions.get(sessionId)
+        if (session) {
+          session.status = 'exited'
+          session.statusChangedAt = Date.now()
+          session.exitReason = `The agent could not start: ${reason}`
+        }
+        try { this.io?.emit('status-change', { sessionId, status: 'exited' }) } catch {}
+      }
     }, 500)
     return sessionId
   }

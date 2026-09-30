@@ -3,6 +3,7 @@ import * as path from 'node:path'
 import Database from 'better-sqlite3'
 import { v4 as uuid } from 'uuid'
 import { createSchema, migrateSchema } from './schema'
+import { WorktreeLifecycle } from './worktreeLifecycle'
 
 export interface AgentRow {
   id: string
@@ -322,6 +323,71 @@ export class StateManager {
     migrateSchema(this.db)
     this.initSystemAgent()
     this.initIntegrationBranch()
+    this.repairRetiredTasks()
+    this.keepOwnFilesOutOfGitStatus()
+  }
+
+  /** Make sure AgntSpce's own task files never show up as the user's uncommitted
+   *  work. Older versions wrote them to the project root, and they then blocked
+   *  "Apply to main". Excluding them (rather than deleting them) is safe: a file
+   *  in someone's project is not ours to remove. */
+  private keepOwnFilesOutOfGitStatus(): void {
+    try {
+      new WorktreeLifecycle(this.workspaceRepoPath).ensureTaskFilesExcluded()
+    } catch {}
+  }
+
+  /** Self-heal task rows left inconsistent by an earlier version or a crash.
+   *
+   *  A "ghost" task is one whose branch no longer exists while the row still
+   *  claims a live status. Merging retires a task by deleting its branch, but
+   *  the row keeps the name; a failure between the promote and the bookkeeping
+   *  used to reset the status to 'active', leaving a finished task looking
+   *  pending. It then counted as mergeable and reported a raw
+   *  "unknown revision" git error, and in a batch it could hold up every other
+   *  task — the "0 of 2 merged, then stopped" dead end.
+   *
+   *  The code no longer creates these, but existing databases still hold them,
+   *  so this runs on every workspace load and retires them. It is also the
+   *  reason they cannot come back: any row that drifts into this state is
+   *  corrected the next time the workspace opens.
+   *
+   *  Deliberately conservative:
+   *  - a task with no branch was never launched (still 'planning'), so it is
+   *    left alone — retiring those would break the normal create-then-launch flow
+   *  - only 'active'/'merging' rows are touched; 'done' and 'abandoned' are final
+   *  - a task stuck in 'merging' whose branch still exists is a crash, not a
+   *    ghost, so it goes back to 'active' and can be merged again
+   */
+  repairRetiredTasks(): string[] {
+    const repaired: string[] = []
+    let rows: { id: string; status: string; branch_name: string | null }[]
+    try {
+      rows = this.db.prepare("SELECT id, status, branch_name FROM task_groups WHERE branch_name IS NOT NULL AND branch_name != ''").all() as typeof rows
+    } catch {
+      return repaired
+    }
+    for (const row of rows) {
+      if (row.status === 'done' || row.status === 'abandoned') continue
+      const branch = row.branch_name as string
+      let branchExists = false
+      try {
+        this.gitOut(['rev-parse', '--verify', '--quiet', branch])
+        branchExists = true
+      } catch {
+        branchExists = false
+      }
+      if (!branchExists) {
+        // The branch is gone, so the work landed and the branch cleanup ran.
+        this.updateTaskGroup(row.id, { status: 'done', completedAt: Date.now() })
+        repaired.push(row.id)
+      } else if (row.status === 'merging') {
+        // Branch intact: an interrupted merge. Safe to retry.
+        this.updateTaskGroup(row.id, { status: 'active' })
+        repaired.push(row.id)
+      }
+    }
+    return repaired
   }
 
   private initSystemAgent(): void {
@@ -897,15 +963,16 @@ export class StateManager {
     return this.getSubTask(id)
   }
 
-  /** Replan update: replaces a subtask's assignment (title/scope/prompt)
-   *  without touching its status/session linkage. */
-  updateSubTaskPlan(id: string, plan: { title?: string; scopeFiles?: string[]; assignmentPrompt?: string }): SubTaskOverview | null {
+  /** Replace a subtask's assignment prompt without touching its status/session
+   *  linkage. `scope_files` is kept at its stored value: the column stays for
+   *  existing databases, but nothing writes a scope any more — there is no
+   *  planner to declare one. */
+  updateSubTaskAssignment(id: string, assignmentPrompt: string): SubTaskOverview | null {
     const sub = this.getSubTask(id)
     if (!sub) return null
-    this.db.prepare('UPDATE subtasks SET title = ?, scope_files = ?, assignment_prompt = ? WHERE id = ?').run(
-      plan.title ?? sub.title,
-      JSON.stringify(plan.scopeFiles ?? sub.scopeFiles),
-      plan.assignmentPrompt ?? sub.assignmentPrompt,
+    this.db.prepare('UPDATE subtasks SET title = ?, assignment_prompt = ? WHERE id = ?').run(
+      sub.agentId,
+      assignmentPrompt,
       id
     )
     return this.getSubTask(id)

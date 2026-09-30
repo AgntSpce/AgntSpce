@@ -78,12 +78,18 @@ export default function GitReviewPanel({
   worktreePath, onSelectDiff,
   getGitFullStatus, getGitLog, getGitBranches, getGitCommitFiles,
   gitStageFile, gitUnstageFile, gitCommit,
+  gitPull, gitPush, gitFetch,
 }: Props) {
   const [status, setStatus] = useState<FullStatus | null>(null)
   const [commitMsg, setCommitMsg] = useState('')
   const [committing, setCommitting] = useState(false)
   const [commitResult, setCommitResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [logs, setLogs] = useState<CommitEntry[]>([])
+  // Pull/push/fetch were passed in and their socket handlers exist, but were
+  // never wired to anything, so a repo with a remote had no way to sync from
+  // this panel at all.
+  const [remoteBusy, setRemoteBusy] = useState<'pull' | 'push' | 'fetch' | null>(null)
+  const [remoteResult, setRemoteResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [branches, setBranches] = useState<BranchEntry[]>([])
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null)
   const [commitFiles, setCommitFiles] = useState<CommitFileEntry[] | null>(null)
@@ -171,7 +177,43 @@ export default function GitReviewPanel({
           <i className="codicon codicon-source-control" style={{ fontSize: 13 }}></i>
           <span className="git-review-branch-name">{currentBranch}</span>
         </span>
+        <span className="git-review-remote-actions">
+          {(['fetch', 'pull', 'push'] as const).map(kind => (
+            <button
+              key={kind}
+              className="git-review-remote-btn"
+              disabled={remoteBusy !== null}
+              title={
+                kind === 'fetch' ? 'Fetch from the remote without changing your branch'
+                : kind === 'pull' ? 'Pull the remote branch into this one'
+                : 'Push this branch to the remote'
+              }
+              onClick={async () => {
+                setRemoteBusy(kind)
+                setRemoteResult(null)
+                try {
+                  const fn = kind === 'fetch' ? gitFetch : kind === 'pull' ? gitPull : gitPush
+                  const res = await fn(worktreePath)
+                  setRemoteResult({
+                    ok: res?.ok !== false,
+                    msg: res?.error || (res?.output || res?.message || `${kind} finished`),
+                  })
+                  loadStatus()
+                } catch (e: any) {
+                  setRemoteResult({ ok: false, msg: e?.message || `${kind} failed` })
+                } finally {
+                  setRemoteBusy(null)
+                }
+              }}
+            >
+              {remoteBusy === kind ? `${kind}…` : kind}
+            </button>
+          ))}
+        </span>
       </div>
+      {remoteResult && (
+        <div className={`git-commit-result ${remoteResult.ok ? 'ok' : 'err'}`}>{remoteResult.msg}</div>
+      )}
 
       {/* Commit section */}
       <div className="git-commit-section">

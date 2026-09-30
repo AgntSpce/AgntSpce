@@ -33,6 +33,9 @@ export interface Session {
   sessionGroupId?: string
   slotRelease?: (() => void) | null
   restorable?: boolean
+  /** Why the terminal process is gone, when we found out from a failed write
+   *  rather than an exit event. Shown in the UI so a dead tab explains itself. */
+  exitReason?: string
 }
 
 export interface SessionConfig {

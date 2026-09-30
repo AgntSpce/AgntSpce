@@ -17,6 +17,57 @@ export const TASK_SCAFFOLD_FILES: ReadonlySet<string> = new Set([
   'AGENTS-TASK.md',
 ])
 
+/** Extract the path from one `git status --porcelain` line.
+ *
+ *  The format is `XY<space>path`, so the path starts at index 3 — trimming the
+ *  line first shifts it and yields "ADME.md" for " M README.md", which then
+ *  fails as a pathspec. A rename reads `R  old -> new`; the new path is what
+ *  should be added. */
+export function parseStatusPath(line: string): string {
+  const raw = line.replace(/\r$/, '')
+  if (raw.length < 4) return ''
+  const rest = raw.slice(3)
+  const arrow = rest.indexOf(' -> ')
+  return unquoteGitPath(arrow >= 0 ? rest.slice(arrow + 4) : rest).trim()
+}
+
+/** Undo git's C-style quoting of a `--porcelain` path.
+ *
+ *  git wraps any path containing a space, quote or non-ASCII byte in double
+ *  quotes and escapes it: `demo 3.txt` is reported as `"demo 3.txt"`. Those
+ *  quotes are formatting, not part of the filename.
+ *
+ *  Verified failure: the quote marks were carried straight into the argument
+ *  list, so `git add -A -- "demo 3.txt"` looked for a file whose name literally
+ *  included two quote characters, failed with "pathspec did not match any
+ *  files", and the task could not be committed or merged at all — a file with a
+ *  space in its name was unmergeable. */
+function unquoteGitPath(p: string): string {
+  const trimmed = p.trim()
+  if (!(trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"'))) return trimmed
+  const body = trimmed.slice(1, -1)
+  // Octal escapes are raw *bytes*, not code points, so a run of them has to be
+  // decoded together: "caf\303\251" is one é (0xC3 0xA9 in UTF-8), and reading
+  // each byte as its own character produced "cafÃ©".
+  const bytes: number[] = []
+  let out = ''
+  const flush = () => {
+    if (bytes.length) { out += Buffer.from(bytes).toString('utf-8'); bytes.length = 0 }
+  }
+  const map: Record<string, string> = { a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '"': '"', '\\': '\\' }
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (ch !== '\\') { flush(); out += ch; continue }
+    const next3 = body.slice(i + 1, i + 4)
+    if (/^\d{3}$/.test(next3)) { bytes.push(parseInt(next3, 8)); i += 3; continue }
+    flush()
+    const esc = body[i + 1]
+    if (esc !== undefined) { out += esc in map ? map[esc] : esc; i += 1 }
+  }
+  flush()
+  return out
+}
+
 /** True when a `git status --porcelain` line refers only to generated
  *  scaffolding. Handles the `XY path` and `XY path -> path` (rename) forms. */
 export function isTaskScaffoldStatusLine(line: string): boolean {
@@ -102,6 +153,12 @@ export class WorktreeLifecycle {
     fs.mkdirSync(this.baseDir, { recursive: true })
   }
 
+  /** Run git and return stdout.
+   *
+   *  Only trailing whitespace is trimmed. Leading whitespace is significant:
+   *  `git status --porcelain` lines start with the two status columns, so a
+   *  leading `" M README.md"` becomes `"M README.md"` under a full trim and the
+   *  path then parses as "ADME.md" — which git rejects as a pathspec. */
   private execGit(args: string[], cwd?: string): string {
     // Pipe stderr: best-effort git probes (dirty-worktree removal, missing
     // refs) must not spam the host terminal; the message is folded into the
@@ -116,7 +173,7 @@ export class WorktreeLifecycle {
         encoding: 'utf-8',
         timeout: 30000,
         stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim()
+      }).replace(/\s+$/, '')
     } catch (e: any) {
       const stderr = String(e?.stderr || '').trim()
       throw new Error(stderr ? `git ${args.join(' ')} failed: ${stderr.slice(0, 500)}` : (e?.message || String(e)))
@@ -419,6 +476,54 @@ export class WorktreeLifecycle {
     this.pruneWorktrees()
   }
 
+  /** Commit whatever a task's agents left uncommitted in their worktree.
+   *
+   *  Verified failure: an agent finished its work and explicitly declined to
+   *  commit ("the branch is shared, so you may want to check with the other
+   *  agent first"). Nothing downstream cares about that reasoning — merge
+   *  refuses an uncommitted worktree, sync refuses, and the work is stranded.
+   *  So the app commits it. The agent prompt still asks for a commit per logical
+   *  step; this is the net, not the mechanism.
+   *
+   *  Generated files are never committed: they are per-task bookkeeping that
+   *  belongs to the worktree, not to the project, and committing them made two
+   *  tasks conflict on `.task.json` and `COLLAB.md`. */
+  commitTaskWorktree(
+    worktreePath: string,
+    message: string
+  ): { committed: boolean; files: string[]; error?: string } {
+    if (!fs.existsSync(worktreePath)) return { committed: false, files: [], error: 'The task worktree is gone.' }
+    let pending: string[]
+    try {
+      // Not trimmed: the leading status columns are part of the line.
+      pending = this.execGit(['status', '--porcelain'], worktreePath)
+        .split('\n').filter(l => l.trim().length > 0)
+    } catch (e: any) {
+      return { committed: false, files: [], error: e?.message || 'Could not read the task worktree' }
+    }
+    // Only real work blocks or matters; our own files are ignored.
+    const real = pending.filter(line => !isTaskScaffoldStatusLine(line))
+    if (real.length === 0) return { committed: false, files: [] }
+
+    const paths = real.map(parseStatusPath).filter(Boolean)
+    if (paths.length === 0) return { committed: false, files: [] }
+    // `git add -A` then commit, so new files are included but a task's own
+    // generated files are not.
+    this.execGit(['add', '-A', '--', ...paths], worktreePath)
+    try {
+      this.execGit(['commit', '-m', message], worktreePath)
+    } catch (e: any) {
+      // A concurrent hook or an empty index can make the commit a no-op; that
+      // is not a failure worth blocking a merge on.
+      const still = this.execGit(['status', '--porcelain'], worktreePath)
+        .split('\n').filter(l => l.trim().length > 0)
+        .filter(line => !isTaskScaffoldStatusLine(line))
+      if (still.length > 0) return { committed: false, files: [], error: e?.message || 'Commit failed' }
+      return { committed: false, files: [] }
+    }
+    return { committed: true, files: paths }
+  }
+
   private deleteTaskBranchIfMerged(branchName: string, integrationBranch?: string): void {
     if (!integrationBranch) return
     try {
@@ -453,6 +558,38 @@ export class WorktreeLifecycle {
     const prefix = content.length > 0 && !content.endsWith('\n') ? '\n' : ''
     const suffix = '\n'
     fs.writeFileSync(gitignorePath, `${content}${prefix}.agntspce/${suffix}`, 'utf-8')
+  }
+
+  /** Keep AgntSpce's own task files out of the user's `git status`.
+   *
+   *  Older versions wrote COLLAB.md / .task.json / AGENTS-TASK.md into the
+   *  project root when a group had no worktree. Those files then showed as
+   *  untracked changes and blocked "Apply to main" — the user's own bookkeeping
+   *  was refusing their own work.
+   *
+   *  They are added to `.git/info/exclude`, which is local-only and cannot
+   *  accidentally exclude a project file the user cares about the way a
+   *  committed `.gitignore` entry could. The files are left on disk: deleting
+   *  something in someone's project is not ours to do. Idempotent. */
+  ensureTaskFilesExcluded(): void {
+    const excludePath = path.join(this.repoPath, '.git', 'info', 'exclude')
+    const marker = '# AgntSpce task files'
+    let content = ''
+    try {
+      content = fs.readFileSync(excludePath, 'utf-8')
+    } catch {
+      content = ''
+    }
+    if (content.includes(marker)) return
+    const block = [
+      content.endsWith('\n') || content.length === 0 ? content : `${content}\n`,
+      `${marker} — written by AgntSpce, not part of your project\n`,
+      ...[...TASK_SCAFFOLD_FILES].map(f => `/${f}\n`),
+    ].join('')
+    try {
+      fs.mkdirSync(path.dirname(excludePath), { recursive: true })
+      fs.writeFileSync(excludePath, block, 'utf-8')
+    } catch {}
   }
 
   // v2 in-repo mode: same branch semantics as task worktrees but checked out
