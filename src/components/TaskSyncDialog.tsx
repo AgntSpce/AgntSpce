@@ -31,7 +31,7 @@ export function TaskSyncDialog({ state, busy, error, onCancel, onResolve, onOpen
     <div className="modal-overlay" onClick={busy ? undefined : onCancel}>
       <div className="modal task-merge-modal" onClick={e => e.stopPropagation()}>
         <div className="task-merge-header">
-          <div>
+          <div className="task-merge-title">
             <h3 className="modal-title">Update conflicts</h3>
             <p className="modal-subtitle">{label} · {state.integrationBranch}</p>
           </div>
@@ -69,7 +69,6 @@ export function TaskSyncDialog({ state, busy, error, onCancel, onResolve, onOpen
         </div>
 
         <div className="task-chat-actions">
-          <button className="modal-btn" onClick={onCancel} disabled={busy}>Cancel</button>
           <button className="modal-btn" onClick={() => onResolve({ preferSide: 'task' })} disabled={busy}>
             {busy ? 'Working…' : "Keep this task's version"}
           </button>

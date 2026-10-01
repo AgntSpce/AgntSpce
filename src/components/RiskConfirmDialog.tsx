@@ -25,7 +25,7 @@ export function RiskConfirmDialog({ open, title, message, detail, confirmLabel, 
     <div className="modal-overlay" onClick={busy ? undefined : onCancel}>
       <div className="modal task-merge-modal" onClick={e => e.stopPropagation()}>
         <div className="task-merge-header">
-          <div>
+          <div className="task-merge-title">
             <h3 className="modal-title">{title}</h3>
           </div>
           <button className="task-chat-close" onClick={onCancel} disabled={busy} title="Close">×</button>

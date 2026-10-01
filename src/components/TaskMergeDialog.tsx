@@ -200,6 +200,20 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
       ? <button className="modal-btn" disabled={busy} onClick={() => onOpenSolver(preview?.conflictFiles || [])}>Open Conflict solver</button>
       : <button className="modal-btn" disabled={busy} onClick={() => runMerge(undefined, true)}>Let the AI resolve it</button>
 
+  // The footer used to end every stage with a Close button, so it always had
+  // something in it. With the × as the only dismiss, several stages have no
+  // action left at all (nothing to merge, a merge already applied, a merge in
+  // flight). Rendering the row anyway would leave a 12px gap of dead space
+  // under the content, so it is skipped when there is nothing to put in it.
+  const hasActions =
+    (stage === 'ready' && (
+      !noChanges
+      || (!!api.syncTaskBranch && (preview?.behindCount ?? 0) > 0)
+    ))
+    || stage === 'review'
+    || (stage === 'failed' && (!!solverBtn || hasConflict))
+    || (stage === 'done' && !!api.applyTaskBranch && !applied)
+
   // The preview is a trial merge computed at open time. If the integration
   // branch moved since then — typically because you merged a peer in the other
   // window moments earlier — the first view can understate the conflict and only
@@ -211,7 +225,7 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
     <div className="modal-overlay" onClick={busy ? undefined : onClose}>
       <div className="modal task-merge-modal" onClick={e => e.stopPropagation()}>
         <div className="task-merge-header">
-          <div>
+          <div className="task-merge-title">
             <h3 className="modal-title">Merge changes</h3>
             <p className="modal-subtitle">
               {taskTitle}
@@ -227,12 +241,7 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
         </div>
 
         {stage === 'previewing' && (
-          <>
-            <p className="task-merge-note">Checking what would land…</p>
-            <div className="task-chat-actions">
-              <button className="modal-btn modal-btn-cancel" onClick={onClose}>Cancel</button>
-            </div>
-          </>
+          <p className="task-merge-note">Checking what would land…</p>
         )}
 
         {stage === 'ready' && preview && (
@@ -361,8 +370,9 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
 
         {error && <p className="error-text">{error}</p>}
 
-        <div className="task-chat-actions">
-          {/* Sync must stay available for a task with no changes of its own.
+        {hasActions && (
+          <div className="task-chat-actions">
+            {/* Sync must stay available for a task with no changes of its own.
               Verified failure: a task created before a peer merged was empty
               and behind, so `noChanges` hid the only control that could pull
               the peer's work in — the agent then reported the file simply did
@@ -383,9 +393,12 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
           {stage === 'review' && (
             <button className="modal-btn modal-btn-ok" disabled={busy} onClick={runConfirm}>Confirm &amp; land</button>
           )}
-          {(stage === 'ready' || stage === 'review' || stage === 'failed') && (
+          {/* "Review later" is not a close: it walks away from the AI-resolved
+              candidate while keeping it pending for the next open. Only the
+              × dismisses outright. */}
+          {stage === 'review' && (
             <button className="modal-btn modal-btn-cancel" disabled={busy} onClick={onClose}>
-              {stage === 'review' ? 'Review later' : 'Close'}
+              Review later
             </button>
           )}
           {/* A bare provider call either worked invisibly or failed with
@@ -418,18 +431,14 @@ export default function TaskMergeDialog({ taskGroupId, taskTitle, api, onClose, 
               </button>
             </>
           )}
-          {stage === 'done' && (
-            <>
-              {api.applyTaskBranch && !applied && (
-                <button className="modal-btn modal-btn-ok" disabled={applying} onClick={runApply}
-                  title={`Fast-forward your checked-out branch onto ${preview?.integrationBranch ?? 'the integration branch'}`}>
-                  {applying ? 'Applying…' : 'Apply to my branch'}
-                </button>
-              )}
-              <button className="modal-btn" onClick={onClose}>Close</button>
-            </>
+          {stage === 'done' && api.applyTaskBranch && !applied && (
+            <button className="modal-btn modal-btn-ok" disabled={applying} onClick={runApply}
+              title={`Fast-forward your checked-out branch onto ${preview?.integrationBranch ?? 'the integration branch'}`}>
+              {applying ? 'Applying…' : 'Apply to my branch'}
+            </button>
           )}
         </div>
+        )}
       </div>
     </div>
   )

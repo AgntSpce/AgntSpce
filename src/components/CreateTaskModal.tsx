@@ -174,8 +174,15 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, a
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal create-task-modal task-wizard" onClick={e => e.stopPropagation()}>
-        <h3 className="modal-title">New Task</h3>
-        <p className="modal-subtitle">Repo: {repoName || repoPath || '—'}</p>
+        <div className="task-merge-header">
+          <div className="task-merge-title">
+            <h3 className="modal-title">New Task</h3>
+            <p className="modal-subtitle">Repo: {repoName || repoPath || '—'}</p>
+          </div>
+          {/* The × is the only close: the footer's Cancel/Close are gone, so
+              this is what backs out of the wizard. */}
+          <button className="task-chat-close" onClick={onClose} disabled={busy} title="Close">×</button>
+        </div>
 
         <div className="task-wizard-steps">
           {STEP_LABELS.map((s, i) => (
@@ -286,7 +293,6 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, a
         <div className="modal-actions">
           {step !== 'progress' ? (
             <>
-              <button className="modal-btn modal-btn-cancel" onClick={onClose}>Cancel</button>
               {step !== 'goal' && (
                 <button
                   className="modal-btn"
@@ -309,12 +315,9 @@ export default function CreateTaskModal({ open, onClose, onCreate, onLaunched, a
               </button>
             </>
           ) : (
-            <>
-              <button className="modal-btn modal-btn-cancel" onClick={onClose}>Close</button>
-              <button className="modal-btn modal-btn-ok" onClick={finish} disabled={busy || !doneId}>
-                {busy ? 'Working…' : 'Open agents section'}
-              </button>
-            </>
+            <button className="modal-btn modal-btn-ok" onClick={finish} disabled={busy || !doneId}>
+              {busy ? 'Working…' : 'Open agents section'}
+            </button>
           )}
         </div>
       </div>

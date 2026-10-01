@@ -4823,6 +4823,21 @@
 }
 
 /* ── Task merge dialog ── */
+/* Header row shared by the merge, sync, risk-confirm and git-consent dialogs:
+   title on the left, trailing actions then close on the right. This rule did
+   not exist before, so those headers were plain block divs and the close button
+   stacked under the title instead of sitting in the top-right corner. */
+.task-merge-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.task-merge-title {
+  flex: 1;
+  min-width: 0;
+}
+
 .task-merge-modal {
   max-width: 620px;
   width: 92vw;

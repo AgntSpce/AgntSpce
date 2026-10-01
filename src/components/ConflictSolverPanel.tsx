@@ -132,7 +132,6 @@ export function ConflictSolverPanel(props: Props) {
             <button className="modal-btn" onClick={onKeepMerged} disabled={busy || !hasConflict}>
               Keep the merged version
             </button>
-            <button className="modal-btn modal-btn-cancel" onClick={onClose} disabled={busy}>Close</button>
           </div>
         </div>
 

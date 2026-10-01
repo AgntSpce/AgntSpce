@@ -30,7 +30,7 @@ export default function GitConsentDialog({ workspaceName, onInitialize, onAccept
     <div className="modal-overlay" onClick={busy ? undefined : onClose}>
       <div className="modal git-consent-modal" onClick={e => e.stopPropagation()}>
         <div className="task-merge-header">
-          <div>
+          <div className="task-merge-title">
             <h3 className="modal-title">
               {step === 'ask' ? 'Git initialization not found' : 'Continue without isolation?'}
             </h3>
