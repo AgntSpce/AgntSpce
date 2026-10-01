@@ -847,7 +847,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onRenameTask,
   onSetTaskPinned,
   onMergeTask,
-  onMergeAllTasks,
   onApplyIntegration,
   applyingIntegration,
   onUpdateTask,
@@ -1083,10 +1082,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   const canMergeTask = (t: TaskGroupInfo) =>
     !!t.branchName && !!t.baseSha && t.status !== 'done'
     && (t.status === 'active' || !!t.mergeCandidateRef)
-  const mergeableTasks = useMemo(
-    () => (taskGroups || []).filter(canMergeTask),
-    [taskGroups]
-  )
 
   // "Update from branch" needs a worktree and a branch to merge into it. It is
   // offered regardless of how far behind the task is: the user wants to pull in
@@ -1188,9 +1183,9 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
             <div className="sidebar-header tasks-header">
               <h2>Tasks</h2>
               {/* Merging parks work on the integration branch, so main does not
-                  move until they ask for it. Verified dead end: "Merge all" had
-                  no follow-up, leaving merged files invisible in the folder with
-                  no way to bring them over. */}
+                  move until they ask for it. This is the only way to bring
+                  merged files into the folder — the per-task "Merge all" that
+                  used to sit beside it was removed as a dead end. */}
               {onApplyIntegration && (
                 <button
                   className="tasks-merge-all"
@@ -1200,15 +1195,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                 >
                   <i className="codicon codicon-git-merge" />
                   {applyingIntegration ? 'Applying…' : 'Apply to main'}
-                </button>
-              )}
-              {onMergeAllTasks && mergeableTasks.length > 0 && (
-                <button
-                  className="tasks-merge-all"
-                  onClick={onMergeAllTasks}
-                  title={`Merge ${mergeableTasks.length} task${mergeableTasks.length === 1 ? '' : 's'} into the integration branch, oldest first`}
-                >
-                  <i className="codicon codicon-git-merge" /> Merge all
                 </button>
               )}
             </div>
