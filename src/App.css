@@ -4770,18 +4770,25 @@
 }
 
 /* Merge action on a task row: quiet until the row is hovered. */
+/* Icon-only. The visible labels made every task row about 200px wider, which
+   pushed the task title out of view in a narrow sidebar; the label is the
+   tooltip now. Fixed square dimensions keep the two icons aligned with each
+   other and stop the row reflowing as text is removed. */
 .task-row-merge {
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
   flex-shrink: 0;
   align-self: center;
-  padding: 3px 8px;
+  width: 24px;
+  height: 22px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--bg-elevated);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 13px;
+  line-height: 0;
   cursor: pointer;
   opacity: 0;
   transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;

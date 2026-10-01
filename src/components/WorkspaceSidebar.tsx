@@ -1289,22 +1289,27 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           </span>
                         )}
                       </div>
+                      {/* Icon only, label on hover. The text made each row
+                          roughly 200px wider and pushed the task title out of
+                          view on a narrow sidebar. */}
                       {onMergeTask && onUpdateTask && canUpdateTask(t) && (
                         <button
                           className="task-row-merge"
+                          aria-label="Update"
                           onClick={(e) => { e.stopPropagation(); onUpdateTask(t.id) }}
-                          title={`Pull the integration branch into ${t.title}'s worktree, so it sees what other tasks have merged. Pending work is committed first.`}
+                          title={`Update \u2014 pull the integration branch into ${t.title}'s worktree so it sees what other tasks merged. Pending work is committed first.`}
                         >
-                          <i className="codicon codicon-sync" /> Update
+                          <i className="codicon codicon-sync" />
                         </button>
                       )}
                       {onMergeTask && canMergeTask(t) && (
                         <button
                           className="task-row-merge"
+                          aria-label="Merge changes"
                           onClick={(e) => { e.stopPropagation(); onMergeTask(t.id) }}
-                          title={`Merge ${t.title}'s changes into the integration branch. Any agents still working in this task are stopped first.`}
+                          title={`Merge changes \u2014 merge ${t.title}'s work into the integration branch. Your agents stay open; you will be asked to confirm if any are still running.`}
                         >
-                          <i className="codicon codicon-git-merge" /> Merge changes
+                          <i className="codicon codicon-git-merge" />
                         </button>
                       )}
                     </div>
