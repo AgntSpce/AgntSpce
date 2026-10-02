@@ -342,7 +342,6 @@ function App() {
     return 40
   })
   const dragging = useRef<'left' | 'right' | 'terminal' | null>(null)
-  const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Active document-level drag listeners — removed on unmount if a drag is
   // still in flight (e.g. workspace switch tears the panel down mid-drag).
   const dragCleanupRef = useRef<(() => void) | null>(null)
@@ -1776,7 +1775,9 @@ function App() {
       const startLeft = leftWidth
       const startChat = chatWidth
 
-      const leftMin = 140
+      // Locked at the opened size: the divider may stretch the panel wider
+      // (left to right) but never narrower (right to left).
+      const leftMin = Math.max(140, startLeft)
       const leftMax = Math.round((appBodyRef.current?.getBoundingClientRect().width || window.innerWidth) * 0.30)
 
       function onMove(ev: MouseEvent) {
@@ -1794,24 +1795,10 @@ function App() {
           } else {
             newW = Math.min(newW, leftMax)
           }
-
-          const collapseThreshold = Math.round(totalW * 0.05)
-
-          if (newW < collapseThreshold) {
-            newW = Math.max(newW, collapseThreshold)
-            if (!collapseTimerRef.current) {
-              collapseTimerRef.current = setTimeout(() => {
-                collapseTimerRef.current = null
-                setLeftWidth(0)
-                setWorkspaceSidebarOpen(false)
-              }, 250)
-            }
-          } else {
-            if (collapseTimerRef.current) {
-              clearTimeout(collapseTimerRef.current)
-              collapseTimerRef.current = null
-            }
-          }
+          // The chat constraint above can pull below the floor on narrow
+          // windows — clamp again so the panel never narrows past its
+          // opened size.
+          newW = Math.max(newW, Math.min(leftMin, leftMax))
 
           setLeftWidth(newW)
           leftWidthRef.current = newW
@@ -1827,10 +1814,6 @@ function App() {
         setLeftDrag(false)
         setRightDrag(false)
         dragging.current = null
-        if (collapseTimerRef.current) {
-          clearTimeout(collapseTimerRef.current)
-          collapseTimerRef.current = null
-        }
         document.removeEventListener('mousemove', onMove)
         document.removeEventListener('mouseup', onUp)
         document.body.style.cursor = ''
