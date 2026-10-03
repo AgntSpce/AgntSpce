@@ -426,6 +426,36 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     }
   })
 
+  // A fast-forward apply can be impossible when the user's branch and the
+  // integration branch have both moved. These are the two ways out, each an
+  // explicit user action rather than something apply does on its own — merge
+  // keeps both sets of commits, rebase replays the user's on top.
+  socket.on('merge-integration-branch', async ({ branchName }: { branchName?: string } = {}, callback?: Function) => {
+    try {
+      const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      const repo = sm.getRepoPath()
+      const merger = new TaskMerger(repo, new WorktreeLifecycle(repo), sm)
+      const result = merger.mergeIntegrationIntoBranch(branchName)
+      if (callback) callback(result)
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
+  socket.on('rebase-onto-integration', async ({ branchName }: { branchName?: string } = {}, callback?: Function) => {
+    try {
+      const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
+      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
+      const repo = sm.getRepoPath()
+      const merger = new TaskMerger(repo, new WorktreeLifecycle(repo), sm)
+      const result = merger.rebaseBranchOntoIntegration(branchName)
+      if (callback) callback(result)
+    } catch (error: any) {
+      if (callback) callback({ ok: false, error: error.message })
+    }
+  })
+
   socket.on('get-conflict-context', async ({ taskGroupId, files }: { taskGroupId: string; files: string[] }, callback?: Function) => {
     try {
       const sm = smForTask(ctx, taskGroupId)

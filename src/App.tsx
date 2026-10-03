@@ -13,6 +13,7 @@ import { TaskSyncDialog, type SyncConflictState } from './components/TaskSyncDia
 import { RiskConfirmDialog } from './components/RiskConfirmDialog'
 import { ConflictSolverPanel } from './components/ConflictSolverPanel'
 import GitConsentDialog from './components/GitConsentDialog'
+import ApplyDivergedDialog from './components/ApplyDivergedDialog'
 import Settings from './components/Settings'
 import StatusBar from './components/StatusBar'
 import TitleBar from './components/TitleBar'
@@ -170,6 +171,7 @@ function App() {
     renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
     mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks, checkGitRepo, initGitRepo, syncTaskBranch, applyTaskBranch, discardLocalEdits,
+    mergeIntegrationBranch, rebaseOntoIntegration,
     getConflictContext,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
@@ -538,6 +540,49 @@ function App() {
 // Fast-forward the checked-out branch onto the integration branch. This is the
   // only step that makes merged work visible in the workspace folder.
   const [applyingIntegration, setApplyingIntegration] = useState(false)
+  // Set when apply cannot fast-forward because both branches moved. Holds the
+  // two commands as real buttons instead of an alert naming a branch the user
+  // has to look up: both write to their checkout, and picking one is a decision
+  // only they can make.
+  const [diverged, setDiverged] = useState<{
+    integrationBranch: string
+    ahead: number
+    behind: number
+    files: string[]
+    error?: string
+  } | null>(null)
+
+  const finishApply = useCallback((files: number) => {
+    // The files are physically in the folder now. The explorer only reloads on
+    // a workspace switch or a manual refresh, so without this the user applied
+    // successfully and saw no files at all.
+    setFileTreeRefreshTick(t => t + 1)
+    setDiverged(null)
+    alert(`Applied to main — ${files} file(s) are now in your folder.`)
+  }, [])
+
+  // Shared by the dialog's two buttons. Either one rewrites the checkout, so it
+  // runs behind the dialog's own busy state rather than the apply button's, and
+  // a failure leaves the dialog up with the reason rather than an alert.
+  const runDivergedFix = useCallback(async (kind: 'merge' | 'rebase') => {
+    if (!diverged) return
+    setApplyingIntegration(true)
+    try {
+      const res = kind === 'merge'
+        ? await mergeIntegrationBranch('main')
+        : await rebaseOntoIntegration('main')
+      if (res && res.ok === false) {
+        setDiverged(d => (d ? { ...d, error: res.error || 'That did not work.' } : d))
+        return
+      }
+      finishApply(res?.files?.length ?? 0)
+    } catch (e: any) {
+      setDiverged(d => (d ? { ...d, error: e?.message || 'That did not work.' } : d))
+    } finally {
+      setApplyingIntegration(false)
+    }
+  }, [diverged, mergeIntegrationBranch, rebaseOntoIntegration, finishApply])
+
   const applyIntegrationNow = useCallback(async (): Promise<boolean> => {
     setApplyingIntegration(true)
     try {
@@ -565,6 +610,17 @@ function App() {
             alert(`Applied to main — ${retry?.files?.length ?? 0} file(s) are now in your folder. Your edits to ${blocking.join(', ')} were discarded.`)
             return true
           }
+        } else if (res.needsMerge) {
+          // Both branches moved. An alert naming a command left the user to look
+          // up a branch name and run git themselves; this offers both fixes as
+          // buttons, with the counts and files that make the choice legible.
+          setDiverged({
+            integrationBranch: res.integrationBranch || 'the integration branch',
+            ahead: Number(res.ahead) || 0,
+            behind: Number(res.behind) || 0,
+            files: (res.files as string[]) || [],
+            error: res.error,
+          })
         } else {
           alert(res.error || 'Could not apply the integration branch to main')
         }
@@ -573,11 +629,7 @@ function App() {
       if (res?.upToDate) {
         alert('main is already up to date with the integration branch.')
       } else {
-        // The files are physically in the folder now. The explorer only reloads
-        // on a workspace switch or a manual refresh, so without this the user
-        // applied successfully and saw no files at all.
-        setFileTreeRefreshTick(t => t + 1)
-        alert(`Applied to main — ${res?.files?.length ?? 0} file(s) are now in your folder.`)
+        finishApply(res?.files?.length ?? 0)
       }
       return true
     } catch (e: any) {
@@ -586,7 +638,7 @@ function App() {
     } finally {
       setApplyingIntegration(false)
     }
-  }, [applyTaskBranch, discardLocalEdits])
+  }, [applyTaskBranch, discardLocalEdits, finishApply])
 
   // Pull the integration branch into one task's worktree, so a task can pick up
   // what other tasks merged before it starts its next piece of work. Commits
@@ -2653,6 +2705,20 @@ function App() {
           onClose={() => setGitConsentOpen(false)}
           busy={gitConsentBusy}
           error={gitConsentError}
+        />
+      )}
+      {diverged && (
+        <ApplyDivergedDialog
+          branch="main"
+          integrationBranch={diverged.integrationBranch}
+          ahead={diverged.ahead}
+          behind={diverged.behind}
+          files={diverged.files}
+          error={diverged.error}
+          busy={applyingIntegration}
+          onMerge={() => runDivergedFix('merge')}
+          onRebase={() => runDivergedFix('rebase')}
+          onClose={() => setDiverged(null)}
         />
       )}
       <InputModal

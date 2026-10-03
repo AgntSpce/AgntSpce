@@ -89,6 +89,8 @@ interface UseSocketReturn {
   initGitRepo: (workspaceId?: string, repoPath?: string) => Promise<any>
   syncTaskBranch: (taskGroupId: string, opts?: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }) => Promise<any>
   applyTaskBranch: (branchName?: string) => Promise<any>
+  mergeIntegrationBranch: (branchName?: string) => Promise<any>
+  rebaseOntoIntegration: (branchName?: string) => Promise<any>
   discardLocalEdits: (files: string[]) => Promise<any>
   getConflictContext: (taskGroupId: string, files: string[]) => Promise<any>
   groupSessions: (sessionIds: string[], title?: string) => Promise<any>
@@ -818,6 +820,17 @@ socket.emit('get-cumulative-stats', {})
     return emitAck('apply-task-branch', { branchName }, 300000)
   }, [emitAck])
 
+  // The two ways out of a fast-forward that is impossible because both branches
+  // moved. Separate calls, each behind its own button, because only the rebase
+  // rewrites commits and the user has to be the one to ask for that.
+  const mergeIntegrationBranch = useCallback((branchName?: string): Promise<any> => {
+    return emitAck('merge-integration-branch', { branchName }, 300000)
+  }, [emitAck])
+
+  const rebaseOntoIntegration = useCallback((branchName?: string): Promise<any> => {
+    return emitAck('rebase-onto-integration', { branchName }, 300000)
+  }, [emitAck])
+
   const groupSessions = useCallback((sessionIds: string[], title?: string): Promise<any> => {
     return emitAck('group-sessions', { sessionIds, title }, 120000)
   }, [emitAck])
@@ -1202,6 +1215,8 @@ socket.emit('get-cumulative-stats', {})
     initGitRepo,
     syncTaskBranch,
     applyTaskBranch,
+    mergeIntegrationBranch,
+    rebaseOntoIntegration,
     discardLocalEdits,
     getConflictContext,
     groupSessions,

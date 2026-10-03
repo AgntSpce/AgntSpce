@@ -561,6 +561,121 @@ export class TaskMerger {
     }
   }
 
+  /** Shared preflight for everything that lands the integration branch on the
+   *  user's own branch: apply, merge, rebase. All three need the same answer to
+   *  "which branch, and is it safe to touch" — and all three must refuse the
+   *  same branches, or the safe path and the ones buttoned around it would
+   *  disagree about what AgntSpce is allowed to rewrite. */
+  private resolveApplyTarget(targetBranch?: string): { ok: true; current: string; target: string } | { ok: false; error: string } {
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    let current = ''
+    try { current = this.execGit(['symbolic-ref', '--short', 'HEAD']) } catch {
+      return { ok: false, error: 'HEAD is detached, so there is no branch to apply onto. Check out a branch first.' }
+    }
+    const target = (targetBranch ?? current).trim()
+    if (!target) return { ok: false, error: 'Could not determine which branch to apply onto.' }
+    if (target === integrationBranch) return { ok: true, current, target }
+    // The user may be sitting on a task branch (in-repo mode checks one out).
+    // Moving that would rewrite their task, which is not what "apply" means.
+    if (target.startsWith('task/')) {
+      return { ok: false, error: `You are on the task branch ${target}. Check out your own branch first, then apply.` }
+    }
+    if (target !== current) {
+      return { ok: false, error: `You are on ${current}, not ${target}. Check out ${target} first, then apply — AgntSpce will not switch branches for you.` }
+    }
+    try { this.execGit(['rev-parse', integrationBranch]) } catch {
+      return { ok: false, error: `No ${integrationBranch} branch exists yet — merge a task first.` }
+    }
+    return { ok: true, current, target }
+  }
+
+  /** Bring the integration branch into the user's branch with a real merge.
+   *
+   *  This is the action behind the "Merge into main" button that appears when a
+   *  fast-forward is impossible. It deliberately does what `apply` refuses to:
+   *  creates a merge commit in the user's checkout. That is why it is a
+   *  separate, explicitly-invoked operation rather than something `apply` does
+   *  on its own — and why it only ever runs on the branch the user is standing
+   *  on, never a task branch and never the integration branch itself.
+   *
+   *  A conflict aborts the merge and restores the tree exactly as it was. A
+   *  half-finished merge sitting in someone's checkout is far worse than a
+   *  refusal, so this never leaves MERGE_HEAD behind. */
+  mergeIntegrationIntoBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; conflictFiles?: string[]; upToDate?: boolean } {
+    const resolved = this.resolveApplyTarget(targetBranch)
+    if (!resolved.ok) return { ok: false, error: resolved.error }
+    const { target } = resolved
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+
+    const ahead = this.probeGit(['rev-list', '--count', `${integrationBranch}..${target}`]) ?? '0'
+    const behind = this.probeGit(['rev-list', '--count', `${target}..${integrationBranch}`]) ?? '0'
+    const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
+
+    // Same dirty-file reasoning as apply: only the files the merge actually
+    // writes can block it, so an unrelated scratch edit is never a wall.
+    const status = this.execGit(['status', '--porcelain'])
+      .split('\n').filter(l => l.trim().length > 0)
+      .filter(line => !isTaskScaffoldStatusLine(line))
+    const blocking = status.map(parseStatusPath).filter(Boolean).filter(f => files.includes(f))
+    if (blocking.length > 0) {
+      return {
+        ok: false,
+        conflictFiles: blocking,
+        error: `${blocking.length} file(s) the merge would write are edited locally: ${blocking.join(', ')}. Commit or discard those first, then merge.`,
+      }
+    }
+
+    try {
+      this.execGit(['merge', integrationBranch, '--no-edit'])
+    } catch (e: any) {
+      // Put the checkout back exactly as it was. Without this the user is left
+      // mid-merge in their own working tree, which `git merge --abort` is the
+      // only way out of and which nothing in the UI would mention.
+      let conflicts: string[] = []
+      try { this.execGit(['merge', '--abort']) } catch {}
+      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean) } catch {}
+      if (conflicts.length) {
+        return {
+          ok: false,
+          conflictFiles: conflicts,
+          error: `Merge hit conflicts in ${conflicts.length} file(s): ${conflicts.join(', ')}. Nothing was changed — resolve them on ${target} and merge again.`,
+        }
+      }
+      return { ok: false, error: `Could not merge ${integrationBranch} into ${target}: ${(e as Error).message}` }
+    }
+    return { ok: true, branch: target, files, upToDate: ahead === '0' }
+  }
+
+  /** Rebase the user's branch onto the integration branch.
+   *
+   *  The linear-history alternative to `mergeIntegrationIntoBranch`, and the
+   *  only one of the two that rewrites commits, so it is a separate call the UI
+   *  has to ask for explicitly. Aborts and restores the tree on conflict, same
+   *  as the merge. */
+  rebaseBranchOntoIntegration(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; conflictFiles?: string[] } {
+    const resolved = this.resolveApplyTarget(targetBranch)
+    if (!resolved.ok) return { ok: false, error: resolved.error }
+    const { target } = resolved
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
+    try {
+      this.execGit(['rebase', integrationBranch])
+    } catch (e: any) {
+      let conflicts: string[] = []
+      try { this.execGit(['rebase', '--abort']) } catch {}
+      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean) } catch {}
+      if (conflicts.length) {
+        return {
+          ok: false,
+          conflictFiles: conflicts,
+          error: `Rebase hit conflicts in ${conflicts.length} file(s): ${conflicts.join(', ')}. Nothing was changed — your commits are intact on ${target}.`,
+        }
+      }
+      return { ok: false, error: `Could not rebase ${target} onto ${integrationBranch}: ${(e as Error).message}` }
+    }
+    return { ok: true, branch: target, files }
+  }
+
   /** Fast-forward the user's own checked-out branch onto the integration branch.
    *
    *  Merges land on `<workspace>_agntspce` on purpose: the user keeps control of
@@ -573,7 +688,7 @@ export class TaskMerger {
    *  integration branch does not contain, this refuses and says so rather than
    *  creating a merge commit in someone's checkout, and it never touches a
    *  dirty tree. */
-  applyIntegrationToBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; upToDate?: boolean; uncommittedFiles?: string[]; conflictFiles?: string[]; safeDirtyFiles?: string[]; preservedDirtyFiles?: string[] } {
+  applyIntegrationToBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; upToDate?: boolean; uncommittedFiles?: string[]; conflictFiles?: string[]; safeDirtyFiles?: string[]; preservedDirtyFiles?: string[]; needsMerge?: boolean; integrationBranch?: string; ahead?: number; behind?: number } {
     const integrationBranch = this.stateManager.getIntegrationBranch()
     let current = ''
     try { current = this.execGit(['symbolic-ref', '--short', 'HEAD']) } catch {
@@ -616,6 +731,15 @@ export class TaskMerger {
       const behind = this.probeGit(['rev-list', '--count', `${target}..${integrationBranch}`]) ?? '?'
       return {
         ok: false,
+        // Tells the UI this is the "both branches moved" case specifically, so
+        // it can offer the merge/rebase buttons instead of a generic alert. The
+        // counts and files come with it so the dialog can show what is actually
+        // waiting rather than making the user go look.
+        needsMerge: true,
+        integrationBranch,
+        ahead: Number(ahead),
+        behind: Number(behind),
+        files: this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean),
         error: `${target} and ${integrationBranch} have both moved on, so ${integrationBranch} cannot be fast-forwarded onto it.`
           + `\n\n  git merge ${integrationBranch}      # bring the merged tasks in (keeps your ${ahead} commit(s))`
           + `\n  git rebase ${integrationBranch}     # or replay your commits on top instead`
