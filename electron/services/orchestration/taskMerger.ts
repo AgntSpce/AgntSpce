@@ -506,6 +506,61 @@ export class TaskMerger {
     return { files: res.committed ? res.files : [] }
   }
 
+  /** Fold the source branch into the integration branch, best-effort.
+   *
+   *  The integration branch is a one-time snapshot of the source branch, taken
+   *  when it is first created (`stateManager.initIntegrationBranch`). Nothing
+   *  ever moved it forward again, so every commit the user made on their own
+   *  branch widened the gap — until "apply to main" refused with a
+   *  fast-forward error naming a branch they had never heard of.
+   *
+   *  This runs on the merge path, not the apply path. Apply deliberately
+   *  refuses to touch the user's checkout, but keeping AgntSpce's own
+   *  integration branch current is bookkeeping the user never asked for and
+   *  should never pay for.
+   *
+   *  Never fails a merge over this. If the sync conflicts, it is skipped and
+   *  the merge proceeds exactly as before — the apply-time error remains as a
+   *  backstop, but a housekeeping step must not be able to make a merge
+   *  undeliverable. */
+  syncSourceIntoIntegration(): { synced: boolean; reason?: string } {
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+    let sourceBranch = ''
+    try { sourceBranch = this.stateManager.getSourceBranch() } catch { return { synced: false } }
+    if (!sourceBranch || sourceBranch === integrationBranch) return { synced: false }
+    const sourceRef = this.probeGit(['rev-parse', '--verify', '--quiet', sourceBranch])
+    const integrationRef = this.probeGit(['rev-parse', '--verify', '--quiet', integrationBranch])
+    if (!sourceRef || !integrationRef) return { synced: false }
+    // The integration branch already contains the source branch — nothing to do.
+    if (this.probeGit(['merge-base', '--is-ancestor', sourceRef, integrationRef]) !== null) return { synced: false }
+    // Source is strictly ahead: a plain ref move, no merge commit, no worktree.
+    if (this.probeGit(['merge-base', '--is-ancestor', integrationRef, sourceRef]) !== null) {
+      try {
+        // The old-value argument makes this a compare-and-swap: if the branch
+        // moved since it was read, this fails instead of clobbering the move.
+        this.execGit(['update-ref', `refs/heads/${integrationBranch}`, sourceRef, integrationRef])
+        return { synced: true }
+      } catch (e: any) {
+        return { synced: false, reason: (e as Error).message }
+      }
+    }
+    // Genuinely diverged, so bringing them together needs a real merge. It runs
+    // in a throwaway worktree, never in the user's checkout.
+    let scratchPath = ''
+    try {
+      scratchPath = this.worktreeLifecycle.createScratchWorktree(integrationRef).worktreePath
+      this.execGit(['merge', sourceBranch, '--no-edit'], scratchPath)
+      const head = this.execGit(['rev-parse', 'HEAD'], scratchPath)
+      this.execGit(['update-ref', `refs/heads/${integrationBranch}`, head, integrationRef])
+      return { synced: true }
+    } catch (e: any) {
+      if (scratchPath) { try { this.execGit(['merge', '--abort'], scratchPath) } catch {} }
+      return { synced: false, reason: (e as Error).message }
+    } finally {
+      if (scratchPath) { try { this.worktreeLifecycle.removeScratchWorktree(scratchPath) } catch {} }
+    }
+  }
+
   /** Fast-forward the user's own checked-out branch onto the integration branch.
    *
    *  Merges land on `<workspace>_agntspce` on purpose: the user keeps control of
@@ -553,9 +608,20 @@ export class TaskMerger {
     // integration branch. Anything else has diverged and needs a real merge.
     const isAncestor = this.probeGit(['merge-base', '--is-ancestor', target, integrationBranch]) !== null
     if (!isAncestor) {
+      // Naming the command matters: "merge it yourself" reads as a chore with
+      // no instructions, and the integration branch is an internal name the
+      // user has no reason to know. Spell out the exact command, both
+      // directions, so the fix is copy-pasteable from the error itself.
+      const ahead = this.probeGit(['rev-list', '--count', `${integrationBranch}..${target}`]) ?? '?'
+      const behind = this.probeGit(['rev-list', '--count', `${target}..${integrationBranch}`]) ?? '?'
       return {
         ok: false,
-        error: `${target} has commits that ${integrationBranch} does not, so it cannot be fast-forwarded. Merge ${integrationBranch} into ${target} yourself (or rebase) — AgntSpce will not rewrite your branch.`,
+        error: `${target} and ${integrationBranch} have both moved on, so ${integrationBranch} cannot be fast-forwarded onto it.`
+          + `\n\n  git merge ${integrationBranch}      # bring the merged tasks in (keeps your ${ahead} commit(s))`
+          + `\n  git rebase ${integrationBranch}     # or replay your commits on top instead`
+          + `\n\n${behind} merged commit(s) are waiting on ${integrationBranch}.`
+          + `\nAgntSpce will not rewrite your branch — run one of the above from ${target}.`,
+        conflictFiles: [],
       }
     }
     const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
@@ -835,6 +901,12 @@ export class TaskMerger {
         this.stateManager.updateTaskGroup(taskGroupId, { status: 'active' })
         return { ...this.failResult(taskGroupId, branchName, dirty), needsConfirm: false }
       }
+
+      // Keep the integration branch current with the user's branch before
+      // landing anything on it. Best-effort: a skipped sync just leaves the
+      // fast-forward error waiting at apply time, which is a far better
+      // failure than refusing to merge.
+      this.syncSourceIntoIntegration()
 
       const integrationRef = this.execGit(['rev-parse', integrationBranch])
       scratch = this.worktreeLifecycle.createScratchWorktree(integrationRef)
