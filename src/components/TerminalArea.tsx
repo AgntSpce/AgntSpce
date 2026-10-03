@@ -212,6 +212,10 @@ const ShellTerminal = memo(function ShellTerminal({ session, onInput, onResize, 
     if (terminalRef.current && !hidden && termInstance.current && fitAddonRef.current) {
       try { fitAddonRef.current.fit() } catch {}
     }
+    // Hidden shells (inactive tabs are display:none, never unmounted) drop to
+    // the scheduler's background drain class — same Orca pattern as dimmed
+    // agent panes. No data loss, only pacing; restores on tab switch.
+    shellSchedulerRef.current?.setForeground(!hidden)
   }, [hidden])
 
   // Apply font size/family changes live (settings) without rebuilding.

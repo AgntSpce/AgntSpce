@@ -29,9 +29,13 @@ export interface PromptCompressEvent {
 const MAX_PER_SESSION_EVENTS = 200
 const MAX_TOTAL_EVENTS = 1200
 const MAX_PERSISTED_EVENTS = 600
-// Full prompt bodies are stored verbatim — the Dashboard "Prompts" tab must
-// show the complete before/after text. Per-session/global/persisted caps above
-// keep total size bounded; no per-prompt character truncation is applied.
+// Per-prompt body cap (Orca 512KB-session / Superset 500KB-scrollback pattern):
+// 200 events/session x uncapped pastes previously let a few multi-MB pastes
+// dominate main-process heap + prompt-history.json. 64KB head+tail keeps the
+// Dashboard before/after view complete for normal prompts and marks larger
+// ones with an omission note instead of growing without bound.
+const MAX_STORED_PROMPT_CHARS = 64 * 1024
+const STORED_PROMPT_HEAD_CHARS = 48 * 1024
 // Large pastes (multi-KB design-system prompts) arrive via terminal input,
 // so the keystroke buffer is generous.
 const MAX_INPUT_BUFFER_CHARS = 512 * 1024
@@ -75,10 +79,14 @@ function extractPromptText(text: string): string | null {
 }
 
 function capStoredText(text: string): string {
-  // Store the full prompt — no truncation. Previously capped at ~8KB per
-  // side, which cut off large prompts in the Dashboard before/after view.
-  // Kept as an identity helper so existing call sites stay unchanged.
-  return text
+  // Bound per-prompt retention: keep head + tail with an omission marker so
+  // huge pastes can't dominate heap/persisted JSON. Normal prompts (<64KB)
+  // are stored verbatim — Dashboard view unchanged for those.
+  if (text.length <= MAX_STORED_PROMPT_CHARS) return text
+  const head = text.slice(0, STORED_PROMPT_HEAD_CHARS)
+  const tailBudget = MAX_STORED_PROMPT_CHARS - head.length
+  const tail = tailBudget > 0 ? text.slice(-tailBudget) : ''
+  return `${head}\n…[${text.length - head.length - tail.length} chars omitted]…\n${tail}`
 }
 
 export class PromptHistoryService {

@@ -60,6 +60,12 @@ const toPlainLine = (raw: string) => raw
 // "lines"; without caps those flow into command history (200/session,
 // persisted up to 5000 total) and are loaded back at startup.
 const MAX_ACCUM_LINE_CHARS = 8 * 1024
+// Partial-line buffer cap (Superset 64KB-FIFO pattern): agent TUIs emit
+// full-screen redraw frames as very long "lines" with no newline, so the
+// buffered trailing partial would otherwise grow without bound for the whole
+// session. The cap keeps only the tail — enough to reassemble split lines —
+// and display/error detection only needs recent bytes (markers are short).
+const MAX_LINE_BUFFER_CHARS = 32 * 1024
 // Retained body size per event. 256KB × 2 (raw + filtered) × up to 200 events
 // per session previously let the in-memory + persisted command history grow to
 // ~100–250MB for a single long agent run. 32KB is more than enough for the
@@ -267,8 +273,11 @@ export class OutputFilterService {
     const prevPartial = this.lineBuffer.get(sessionId) || ''
     const full = prevPartial + data
     const parts = full.split(/\r?\n/)
-    // Last element may be incomplete — save for next chunk
-    this.lineBuffer.set(sessionId, parts[parts.length - 1])
+    // Last element may be incomplete — save for next chunk, bounded so a
+    // newline-less TUI frame can't accumulate for the session lifetime.
+    let trailing = parts[parts.length - 1]
+    if (trailing.length > MAX_LINE_BUFFER_CHARS) trailing = trailing.slice(-MAX_LINE_BUFFER_CHARS)
+    this.lineBuffer.set(sessionId, trailing)
 
     // Split keeping separators so we can rebuild the display byte-for-byte
     // (only emitting the portion of `full` that belongs to this chunk).

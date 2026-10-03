@@ -84,6 +84,14 @@ interface ParkedTerminal {
 }
 const parkedTerminals = new Map<string, ParkedTerminal>()
 const PARKED_TERMINAL_LIMIT = 6
+// Unmounted parked views older than this release their xterm/WebGL/DOM while
+// the PTY keeps running (Orca cold-parks hidden terminals after ~30s for the
+// same reason: parked tabs otherwise hold full xterm buffers and the renderer
+// scales with total agents instead of visible panes). Remounts rebuild from
+// writeData/backlog — scrollback beyond that tail resets, but the session
+// itself is unaffected. Short TTL matters with multi-task setups: only the
+// open task's agents mount (App filters by openGroupId), the rest park.
+const PARKED_TERMINAL_TTL_MS = 60 * 1000
 
 function disposeParkedEntry(id: string, entry: ParkedTerminal): void {
   entry.alive = false
@@ -98,6 +106,17 @@ function disposeParkedEntry(id: string, entry: ParkedTerminal): void {
 }
 
 function evictParkedTerminals(): void {
+  // TTL eviction (Orca 15min hot-retain pattern): an unmounted parked xterm
+  // holds its full scrollback buffer + scheduler queue + DOM host in the
+  // renderer. The PTY session itself is independent (sessionManager owns it),
+  // so disposing here only drops the *view* — remount rebuilds via the
+  // existing writeData/backlog replay path. Runs on every park, no timers.
+  const now = Date.now()
+  for (const [id, entry] of [...parkedTerminals.entries()]) {
+    if (!entry.mounted && now - entry.lastUsed > PARKED_TERMINAL_TTL_MS) {
+      disposeParkedEntry(id, entry)
+    }
+  }
   if (parkedTerminals.size <= PARKED_TERMINAL_LIMIT) return
   const candidates = [...parkedTerminals.entries()]
     .filter(([, e]) => !e.mounted)
@@ -284,6 +303,7 @@ export default memo(function TerminalPane(props: Props) {
       cached.term.focus()
       return () => {
         cached.mounted = false
+        cached.lastUsed = Date.now()
         try { cached.el.remove() } catch { }
         cached.releaseWebgl()
         evictParkedTerminals()
@@ -522,6 +542,7 @@ export default memo(function TerminalPane(props: Props) {
         // Park: detach ONLY our host div (React's container stays intact),
         // release GPU context, keep everything else alive.
         entry.mounted = false
+        entry.lastUsed = Date.now()
         try { host.remove() } catch { }
         releaseWebgl()
         evictParkedTerminals()
