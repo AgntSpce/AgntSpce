@@ -412,44 +412,16 @@ export function registerTaskHandlers(ctx: ServerContext, socket: Socket): void {
     }
   })
 
-  // Fast-forward the user's checked-out branch onto the integration branch, so
-  // merged task work actually shows up in the folder they are looking at.
-  socket.on('apply-task-branch', async ({ branchName }: { branchName?: string } = {}, callback?: Function) => {
+  // Land the merged task work on the user's checked-out branch, so it actually
+  // shows up in the folder they are looking at. Squash, so task wip commits and
+  // internal `agntspce merge:` commits stay on the integration branch instead of
+  // filling the user's production history.
+  socket.on('apply-task-branch', async ({ branchName, message }: { branchName?: string; message?: string } = {}, callback?: Function) => {
     try {
       const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
       if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
       const merger = new TaskMerger(sm.getRepoPath(), new WorktreeLifecycle(sm.getRepoPath()), sm)
-      const result = merger.applyIntegrationToBranch(branchName)
-      if (callback) callback(result)
-    } catch (error: any) {
-      if (callback) callback({ ok: false, error: error.message })
-    }
-  })
-
-  // A fast-forward apply can be impossible when the user's branch and the
-  // integration branch have both moved. These are the two ways out, each an
-  // explicit user action rather than something apply does on its own — merge
-  // keeps both sets of commits, rebase replays the user's on top.
-  socket.on('merge-integration-branch', async ({ branchName }: { branchName?: string } = {}, callback?: Function) => {
-    try {
-      const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
-      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
-      const repo = sm.getRepoPath()
-      const merger = new TaskMerger(repo, new WorktreeLifecycle(repo), sm)
-      const result = merger.mergeIntegrationIntoBranch(branchName)
-      if (callback) callback(result)
-    } catch (error: any) {
-      if (callback) callback({ ok: false, error: error.message })
-    }
-  })
-
-  socket.on('rebase-onto-integration', async ({ branchName }: { branchName?: string } = {}, callback?: Function) => {
-    try {
-      const sm = resolveSM(ctx) ?? ctx.agentOrchestrator.getStateManager()
-      if (!sm) throw new Error(`Task orchestration is unavailable (no workspace root)${lastResolveError ? ` — ${lastResolveError}` : ''}`)
-      const repo = sm.getRepoPath()
-      const merger = new TaskMerger(repo, new WorktreeLifecycle(repo), sm)
-      const result = merger.rebaseBranchOntoIntegration(branchName)
+      const result = merger.squashIntegrationOntoBranch(branchName, message)
       if (callback) callback(result)
     } catch (error: any) {
       if (callback) callback({ ok: false, error: error.message })

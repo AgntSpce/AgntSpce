@@ -589,93 +589,6 @@ export class TaskMerger {
     return { ok: true, current, target }
   }
 
-  /** Bring the integration branch into the user's branch with a real merge.
-   *
-   *  This is the action behind the "Merge into main" button that appears when a
-   *  fast-forward is impossible. It deliberately does what `apply` refuses to:
-   *  creates a merge commit in the user's checkout. That is why it is a
-   *  separate, explicitly-invoked operation rather than something `apply` does
-   *  on its own — and why it only ever runs on the branch the user is standing
-   *  on, never a task branch and never the integration branch itself.
-   *
-   *  A conflict aborts the merge and restores the tree exactly as it was. A
-   *  half-finished merge sitting in someone's checkout is far worse than a
-   *  refusal, so this never leaves MERGE_HEAD behind. */
-  mergeIntegrationIntoBranch(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; conflictFiles?: string[]; upToDate?: boolean } {
-    const resolved = this.resolveApplyTarget(targetBranch)
-    if (!resolved.ok) return { ok: false, error: resolved.error }
-    const { target } = resolved
-    const integrationBranch = this.stateManager.getIntegrationBranch()
-
-    const ahead = this.probeGit(['rev-list', '--count', `${integrationBranch}..${target}`]) ?? '0'
-    const behind = this.probeGit(['rev-list', '--count', `${target}..${integrationBranch}`]) ?? '0'
-    const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
-
-    // Same dirty-file reasoning as apply: only the files the merge actually
-    // writes can block it, so an unrelated scratch edit is never a wall.
-    const status = this.execGit(['status', '--porcelain'])
-      .split('\n').filter(l => l.trim().length > 0)
-      .filter(line => !isTaskScaffoldStatusLine(line))
-    const blocking = status.map(parseStatusPath).filter(Boolean).filter(f => files.includes(f))
-    if (blocking.length > 0) {
-      return {
-        ok: false,
-        conflictFiles: blocking,
-        error: `${blocking.length} file(s) the merge would write are edited locally: ${blocking.join(', ')}. Commit or discard those first, then merge.`,
-      }
-    }
-
-    try {
-      this.execGit(['merge', integrationBranch, '--no-edit'])
-    } catch (e: any) {
-      // Put the checkout back exactly as it was. Without this the user is left
-      // mid-merge in their own working tree, which `git merge --abort` is the
-      // only way out of and which nothing in the UI would mention.
-      let conflicts: string[] = []
-      try { this.execGit(['merge', '--abort']) } catch {}
-      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean) } catch {}
-      if (conflicts.length) {
-        return {
-          ok: false,
-          conflictFiles: conflicts,
-          error: `Merge hit conflicts in ${conflicts.length} file(s): ${conflicts.join(', ')}. Nothing was changed — resolve them on ${target} and merge again.`,
-        }
-      }
-      return { ok: false, error: `Could not merge ${integrationBranch} into ${target}: ${(e as Error).message}` }
-    }
-    return { ok: true, branch: target, files, upToDate: ahead === '0' }
-  }
-
-  /** Rebase the user's branch onto the integration branch.
-   *
-   *  The linear-history alternative to `mergeIntegrationIntoBranch`, and the
-   *  only one of the two that rewrites commits, so it is a separate call the UI
-   *  has to ask for explicitly. Aborts and restores the tree on conflict, same
-   *  as the merge. */
-  rebaseBranchOntoIntegration(targetBranch?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; conflictFiles?: string[] } {
-    const resolved = this.resolveApplyTarget(targetBranch)
-    if (!resolved.ok) return { ok: false, error: resolved.error }
-    const { target } = resolved
-    const integrationBranch = this.stateManager.getIntegrationBranch()
-    const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
-    try {
-      this.execGit(['rebase', integrationBranch])
-    } catch (e: any) {
-      let conflicts: string[] = []
-      try { this.execGit(['rebase', '--abort']) } catch {}
-      try { conflicts = this.execGit(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean) } catch {}
-      if (conflicts.length) {
-        return {
-          ok: false,
-          conflictFiles: conflicts,
-          error: `Rebase hit conflicts in ${conflicts.length} file(s): ${conflicts.join(', ')}. Nothing was changed — your commits are intact on ${target}.`,
-        }
-      }
-      return { ok: false, error: `Could not rebase ${target} onto ${integrationBranch}: ${(e as Error).message}` }
-    }
-    return { ok: true, branch: target, files }
-  }
-
   /** Fast-forward the user's own checked-out branch onto the integration branch.
    *
    *  Merges land on `<workspace>_agntspce` on purpose: the user keeps control of
@@ -775,6 +688,116 @@ export class TaskMerger {
       return { ok: false, error: `Could not fast-forward ${target} onto ${integrationBranch}: ${(e as Error).message}` }
     }
     return { ok: true, branch: target, files, preservedDirtyFiles: harmless }
+  }
+
+  /** Land the integration branch on the user's branch as ONE commit.
+   *
+   *  This is what apply uses now. Merging task work used to move the branch
+   *  pointer, which put every task's wip commits and every internal
+   *  `agntspce merge:` commit into the user's production history. Squash keeps
+   *  all of that on the integration branch, where it stays fully inspectable,
+   *  and gives the user's branch a single commit per apply that they can name.
+   *
+   *  It also removes the need for a fast-forward at all: squash works when the
+   *  two branches have diverged, which is the case that used to dead-end apply
+   *  with "cannot be fast-forwarded". */
+  squashIntegrationOntoBranch(targetBranch?: string, message?: string): { ok: boolean; error?: string; branch?: string; files?: string[]; upToDate?: boolean; uncommittedFiles?: string[]; conflictFiles?: string[]; safeDirtyFiles?: string[]; preservedDirtyFiles?: string[]; needsResolution?: boolean } {
+    const resolved = this.resolveApplyTarget(targetBranch)
+    if (!resolved.ok) return { ok: false, error: resolved.error }
+    const { target } = resolved
+    const integrationBranch = this.stateManager.getIntegrationBranch()
+
+    const status = this.execGit(['status', '--porcelain'])
+      .split('\n').filter(l => l.trim().length > 0)
+      .filter(line => !isTaskScaffoldStatusLine(line))
+    const targetSha = this.execGit(['rev-parse', target])
+    let integrationSha = ''
+    try { integrationSha = this.execGit(['rev-parse', integrationBranch]) } catch {
+      return { ok: false, error: `No ${integrationBranch} branch exists yet — merge a task first.` }
+    }
+    if (targetSha === integrationSha) return { ok: true, branch: target, files: [], upToDate: true }
+    const files = this.execGit(['diff', '--name-only', target, integrationBranch]).split('\n').filter(Boolean)
+
+    // Same rule as the fast-forward path: only files this apply actually writes
+    // can block it, so an unrelated scratch edit is never in the way.
+    const dirtyFiles = status.map(parseStatusPath).filter(Boolean)
+    const blocking = dirtyFiles.filter(f => files.includes(f))
+    const harmless = dirtyFiles.filter(f => !files.includes(f))
+    if (blocking.length > 0) {
+      return {
+        ok: false,
+        error: `${integrationBranch} also changes ${blocking.length} file(s) you have edited locally: ${blocking.join(', ')}. Those cannot be applied over your unsaved version — commit them, or discard just those files and apply again.`
+          + (harmless.length ? `\n\nYour other uncommitted change(s) (${harmless.join(', ')}) are untouched by this and are not a problem.` : ''),
+        uncommittedFiles: status,
+        conflictFiles: blocking,
+        safeDirtyFiles: harmless,
+      }
+    }
+
+    // Everything needed to undo a failed squash, captured BEFORE touching the
+    // tree. `merge --squash` writes no MERGE_HEAD, so there is no `merge
+    // --abort` to fall back on and the state has to be reconstructed from data
+    // gathered up front.
+    const addedByIntegration = this.execGit(['diff', '--name-only', '--diff-filter=A', targetSha, integrationBranch])
+      .split('\n').filter(Boolean)
+
+    let conflicted: string[] = []
+    try {
+      this.execGit(['merge', '--squash', integrationBranch])
+      conflicted = this.execGit(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean)
+    } catch {
+      // The squash failed. Read the conflicted paths the same way either way —
+      // git reports them in the index, not on the failing command's stderr.
+      if (!conflicted.length) {
+        try { conflicted = this.execGit(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean) } catch {}
+      }
+    }
+    if (conflicted.length > 0) {
+      this.undoFailedSquash(targetSha, conflicted, addedByIntegration)
+      return {
+        ok: false,
+        // Distinguishes a real merge conflict from locally-edited files the
+        // apply would overwrite. Both carry conflictFiles, but only the second
+        // is safe for the UI to offer discarding — here nothing was changed.
+        needsResolution: true,
+        conflictFiles: conflicted,
+        error: `Apply hit conflicts in ${conflicted.length} file(s): ${conflicted.join(', ')}. Nothing was changed — your branch and your uncommitted edits are exactly as they were.`,
+      }
+    }
+
+    try {
+      const taskCount = Number(this.probeGit(['rev-list', '--count', `${target}..${integrationBranch}`]) || '0')
+      this.execGit(['commit', '-m', message?.trim() || `chore: apply ${taskCount} merged task commit(s) from ${integrationBranch}`])
+    } catch (e: any) {
+      this.undoFailedSquash(targetSha, [], addedByIntegration)
+      return { ok: false, error: `Staged the merged work but could not commit it: ${(e as Error).message}. Your branch was left unchanged.` }
+    }
+    return { ok: true, branch: target, files, preservedDirtyFiles: harmless }
+  }
+
+  /** Put the tree back exactly as it was after a `merge --squash` that could
+   *  not be committed.
+   *
+   *  Deliberately does NOT use `git reset --hard`: the guard above already
+   *  established that some of the user's files are dirty and untouched by this
+   *  apply, and a hard reset would destroy those edits to fix a problem
+   *  involving none of them.
+   *
+   *  Order matters. The reset has to come first, because a conflicted path is
+   *  unmerged and `git checkout <sha> -- <path>` refuses to restore it while it
+   *  still has conflict stages. Files the integration branch ADDS never existed
+   *  at `targetSha`, so there is nothing to check out — they just have to be
+   *  unstaged and removed, or the user is left with a tree full of files from a
+   *  merge that never happened. */
+  private undoFailedSquash(targetSha: string, conflicted: string[], addedByIntegration: string[]): void {
+    try { this.execGit(['reset', targetSha]) } catch {}
+    for (const f of conflicted) {
+      try { this.execGit(['checkout', targetSha, '--', f]) } catch {}
+    }
+    for (const f of addedByIntegration) {
+      try { this.execGit(['rm', '-r', '-q', '--cached', '--ignore-unmatch', f]) } catch {}
+      try { fs.rmSync(path.join(this.repoPath, f), { recursive: true, force: true }) } catch {}
+    }
   }
 
   /** Discard the user's local edits for specific files, so they can unblock an

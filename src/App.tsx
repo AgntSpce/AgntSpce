@@ -13,7 +13,6 @@ import { TaskSyncDialog, type SyncConflictState } from './components/TaskSyncDia
 import { RiskConfirmDialog } from './components/RiskConfirmDialog'
 import { ConflictSolverPanel } from './components/ConflictSolverPanel'
 import GitConsentDialog from './components/GitConsentDialog'
-import ApplyDivergedDialog from './components/ApplyDivergedDialog'
 import Settings from './components/Settings'
 import StatusBar from './components/StatusBar'
 import TitleBar from './components/TitleBar'
@@ -171,7 +170,6 @@ function App() {
     renameTaskGroup, setTaskPinned, deleteTaskGroup,
     getTaskDetail, launchTask, closeTask, taskFollowup,
     mergeTask, confirmTaskMerge, previewTaskMerge, mergeAllTasks, checkGitRepo, initGitRepo, syncTaskBranch, applyTaskBranch, discardLocalEdits,
-    mergeIntegrationBranch, rebaseOntoIntegration,
     getConflictContext,
     getWorkspaceTree, readFile, getFileInfo, writeFile, createFile, createFolder, renameFile, deleteFile,
     trashList, trashRestore, trashDelete, trashEmpty,
@@ -537,51 +535,17 @@ function App() {
     [taskGroups, mergeTaskId]
   )
 
-// Fast-forward the checked-out branch onto the integration branch. This is the
+// Apply the merged work to the checked-out branch as one commit. This is the
   // only step that makes merged work visible in the workspace folder.
   const [applyingIntegration, setApplyingIntegration] = useState(false)
-  // Set when apply cannot fast-forward because both branches moved. Holds the
-  // two commands as real buttons instead of an alert naming a branch the user
-  // has to look up: both write to their checkout, and picking one is a decision
-  // only they can make.
-  const [diverged, setDiverged] = useState<{
-    integrationBranch: string
-    ahead: number
-    behind: number
-    files: string[]
-    error?: string
-  } | null>(null)
 
   const finishApply = useCallback((files: number) => {
     // The files are physically in the folder now. The explorer only reloads on
     // a workspace switch or a manual refresh, so without this the user applied
     // successfully and saw no files at all.
     setFileTreeRefreshTick(t => t + 1)
-    setDiverged(null)
     alert(`Applied to main — ${files} file(s) are now in your folder.`)
   }, [])
-
-  // Shared by the dialog's two buttons. Either one rewrites the checkout, so it
-  // runs behind the dialog's own busy state rather than the apply button's, and
-  // a failure leaves the dialog up with the reason rather than an alert.
-  const runDivergedFix = useCallback(async (kind: 'merge' | 'rebase') => {
-    if (!diverged) return
-    setApplyingIntegration(true)
-    try {
-      const res = kind === 'merge'
-        ? await mergeIntegrationBranch('main')
-        : await rebaseOntoIntegration('main')
-      if (res && res.ok === false) {
-        setDiverged(d => (d ? { ...d, error: res.error || 'That did not work.' } : d))
-        return
-      }
-      finishApply(res?.files?.length ?? 0)
-    } catch (e: any) {
-      setDiverged(d => (d ? { ...d, error: e?.message || 'That did not work.' } : d))
-    } finally {
-      setApplyingIntegration(false)
-    }
-  }, [diverged, mergeIntegrationBranch, rebaseOntoIntegration, finishApply])
 
   const applyIntegrationNow = useCallback(async (): Promise<boolean> => {
     setApplyingIntegration(true)
@@ -591,6 +555,18 @@ function App() {
       // on — it will not quietly check out or move anything else.
       const res = await applyTaskBranch('main')
       if (res && res.ok === false) {
+        // Two different failures both name files, and conflating them would be
+        // destructive. `needsResolution` means the apply hit a real merge
+        // conflict and NOTHING was changed — offering to discard edits there
+        // would throw away the user's work to fix a conflict it did not cause.
+        // Only `safeDirtyFiles` (locally edited files the apply would write
+        // over) is safe to offer discarding, and only that case discards.
+        if (res.needsResolution) {
+          alert(
+            `${res.error}\n\nNothing was changed — your branch and uncommitted edits are intact.`
+          )
+          return false
+        }
         // Name the exact files standing in the way. A blanket "commit or stash
         // everything" was true of every unrelated edit too, which is why this
         // read as a dead end; only the genuinely overlapping files matter, and
@@ -610,17 +586,6 @@ function App() {
             alert(`Applied to main — ${retry?.files?.length ?? 0} file(s) are now in your folder. Your edits to ${blocking.join(', ')} were discarded.`)
             return true
           }
-        } else if (res.needsMerge) {
-          // Both branches moved. An alert naming a command left the user to look
-          // up a branch name and run git themselves; this offers both fixes as
-          // buttons, with the counts and files that make the choice legible.
-          setDiverged({
-            integrationBranch: res.integrationBranch || 'the integration branch',
-            ahead: Number(res.ahead) || 0,
-            behind: Number(res.behind) || 0,
-            files: (res.files as string[]) || [],
-            error: res.error,
-          })
         } else {
           alert(res.error || 'Could not apply the integration branch to main')
         }
@@ -2705,20 +2670,6 @@ function App() {
           onClose={() => setGitConsentOpen(false)}
           busy={gitConsentBusy}
           error={gitConsentError}
-        />
-      )}
-      {diverged && (
-        <ApplyDivergedDialog
-          branch="main"
-          integrationBranch={diverged.integrationBranch}
-          ahead={diverged.ahead}
-          behind={diverged.behind}
-          files={diverged.files}
-          error={diverged.error}
-          busy={applyingIntegration}
-          onMerge={() => runDivergedFix('merge')}
-          onRebase={() => runDivergedFix('rebase')}
-          onClose={() => setDiverged(null)}
         />
       )}
       <InputModal
