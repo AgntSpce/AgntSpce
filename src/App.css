@@ -1847,7 +1847,14 @@
 }
 
 /* ── Main Content ───────────────────────── */
+/* Always positioned. TerminalArea's shellOnly branch anchors the Dashboard /
+   Settings overlay with `position: absolute; inset: 0`, and in the
+   file-explorer view that branch renders while .file-viewer is absent (it is
+   gated on activeView, which is set for those pages). Without a containing
+   block here the overlay resolves against the viewport and slides under the
+   48px activity bar. */
 .main-content {
+  position: relative;
   flex: 1;
   min-width: 0;
   overflow: hidden;
