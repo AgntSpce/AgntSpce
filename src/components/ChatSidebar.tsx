@@ -68,6 +68,11 @@ function formatTime(ts: number): string {
     d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
+// Stable plugin identity so ReactMarkdown doesn't see a new array on every
+// MessageItem render (avoids redundant markdown re-parse/GC churn). No
+// behavior change — same single remarkGfm plugin.
+const CHAT_REMARK_PLUGINS = [remarkGfm]
+
 // Memoized so that unrelated re-renders (e.g. the parent App re-rendering on
 // every status/command event, or a sibling message streaming in) do NOT force
 // all ~2000 messages to be re-parsed by ReactMarkdown. Without this, an open
@@ -90,7 +95,7 @@ const MessageItem = memo(function MessageItem({ msg }: { msg: ChatMessage }) {
         <div className="chat-msg-text">
           {msg.role === 'assistant' ? (
             <div className="chat-md">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={CHAT_REMARK_PLUGINS}>{msg.content}</ReactMarkdown>
               {msg.streaming && msg.content && <span className="chat-cursor">|</span>}
               {!msg.content && msg.streaming && <span className="chat-cursor">|</span>}
             </div>

@@ -151,6 +151,14 @@ export default memo(function TerminalPane(props: Props) {
   const fitAddonRef = useRef<FitAddon | null>(null)
   const schedulerRef = useRef<TerminalWriteScheduler | null>(null)
   const paneRef = useRef<HTMLDivElement>(null)
+  // Scroll-intent tracking (Orca pinned-bottom pattern): when the user scrolls
+  // up through history, the scheduler drops to its background drain class so
+  // live flood output no longer competes with the scroll repaint on the main
+  // thread. No data is dropped beyond the scheduler's existing hard cap —
+  // this only changes drain pacing, and restores fast drain at the bottom.
+  const scrolledBackRef = useRef(false)
+  const dimmedRef = useRef(dimmed)
+  useEffect(() => { dimmedRef.current = dimmed }, [dimmed])
   const [showStartup, setShowStartup] = useState(false)
   const onTerminalOutputRef = useRef(onTerminalOutput)
   useEffect(() => { onTerminalOutputRef.current = onTerminalOutput })
@@ -565,11 +573,60 @@ export default memo(function TerminalPane(props: Props) {
     return () => el.removeEventListener(PANE_PTY_RESIZE_HOLD_FLUSH_EVENT, handler as EventListener)
   }, [session.id, onResize])
 
-  // Keep the scheduler's priority class in sync with focus state (dimmed =
-  // background pane → slow drain; focused → parse-clocked fast drain).
+  // Keep the scheduler's priority class in sync with focus + scroll state
+  // (dimmed = background pane → slow drain; scrolled-back → slow drain so
+  // scroll repaints aren't starved; focused + at-bottom → fast drain).
   useEffect(() => {
-    schedulerRef.current?.setForeground(!dimmed)
+    schedulerRef.current?.setForeground(!dimmed && !scrolledBackRef.current)
   }, [dimmed])
+
+  // Scroll-intent aware drain: while the user reads history, reuse the
+  // scheduler's existing background pacing (no new dropping logic, order
+  // preserved). Listener is passive and detached on unmount; if the viewport
+  // isn't found (e.g. restorable placeholder) this is a no-op — prior
+  // behavior unchanged. Works for both fresh and parked-reuse mounts since it
+  // queries the live DOM under terminalRef.
+  useEffect(() => {
+    let viewport: HTMLElement | null = null
+    let raf = 0
+    let disposed = false
+    let attempts = 0
+    const MAX_ATTACH_ATTEMPTS = 30
+    const SCROLLED_BACK_PX = 30
+    const syncFromViewport = () => {
+      if (!viewport) return
+      try {
+        const back = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight > SCROLLED_BACK_PX
+        if (back !== scrolledBackRef.current) {
+          scrolledBackRef.current = back
+          schedulerRef.current?.setForeground(!dimmedRef.current && !back)
+        }
+      } catch { }
+    }
+    const onScroll = () => syncFromViewport()
+    const attach = () => {
+      if (disposed) return
+      viewport = (terminalRef.current?.querySelector('.xterm-viewport') as HTMLElement | null) ?? null
+      if (!viewport) {
+        // xterm viewport mounts async with open(); retry a few frames, then
+        // give up silently (no behavior change). Bounded so restorable
+        // placeholders (no viewport ever) can't spin rAF forever.
+        if (attempts++ < MAX_ATTACH_ATTEMPTS) raf = requestAnimationFrame(attach)
+        return
+      }
+      viewport.addEventListener('scroll', onScroll, { passive: true })
+      syncFromViewport()
+    }
+    raf = requestAnimationFrame(attach)
+    return () => {
+      disposed = true
+      cancelAnimationFrame(raf)
+      try { viewport?.removeEventListener('scroll', onScroll) } catch { }
+      // Remount starts assumed at-bottom; parked scroll position is re-read
+      // on the next mount's sync, so reset here to avoid a stale flag.
+      scrolledBackRef.current = false
+    }
+  }, [session.id, session.restorable])
 
   useEffect(() => {
     const el = paneRef.current
