@@ -201,20 +201,40 @@ export class GitHelper {
   async getCommitFiles(worktreePath: string, commitHash: string): Promise<{ filePath: string, status: string, additions: number, deletions: number }[] | null> {
     const state = this.getPathState(worktreePath)
     if (!state.ok) return null
+    // Two passes over the same commit. `--numstat` carries the +/- counts the
+    // rows show but has no status letter, and deriving one from the counts
+    // mislabels every modified file that only added lines as Added — which is
+    // most files in a normal commit. `--name-status` carries the real letter.
+    // `--root` is what makes the FIRST commit in a repo list anything at all:
+    // without it diff-tree compares against a parent that does not exist and
+    // returns nothing, so the graph's oldest commit expanded to an empty list.
+    const base = ['diff-tree', '--no-commit-id', '-r', '--root']
     try {
-      const { stdout } = await this.execGit(
-        ['diff-tree', '--no-commit-id', '-r', '--numstat', commitHash],
-        { cwd: state.normalized, timeout: 10000 },
-      )
-      if (!stdout.trim()) return []
-      return stdout.trim().split('\n').filter(Boolean).map(line => {
+      const [numstat, nameStatus] = await Promise.all([
+        this.execGit([...base, '--numstat', commitHash], { cwd: state.normalized, timeout: 10000 }),
+        this.execGit([...base, '--name-status', commitHash], { cwd: state.normalized, timeout: 10000 }),
+      ])
+      if (!nameStatus.stdout.trim()) return []
+      const counts = new Map<string, { additions: number, deletions: number }>()
+      for (const line of numstat.stdout.trim().split('\n').filter(Boolean)) {
         const parts = line.split('\t')
+        const filePath = parts.slice(2).join('\t')
+        if (!filePath) continue
         const adds = parseInt(parts[0])
         const dels = parseInt(parts[1])
-        const filePath = parts[2] || ''
-        const status = adds === 0 && dels === 0 ? 'M' : adds > 0 && dels === 0 ? 'A' : adds === 0 && dels > 0 ? 'D' : 'M'
-        return { filePath, status, additions: isNaN(adds) ? 0 : adds, deletions: isNaN(dels) ? 0 : dels }
-      })
+        counts.set(filePath, { additions: isNaN(adds) ? 0 : adds, deletions: isNaN(dels) ? 0 : dels })
+      }
+      return nameStatus.stdout.trim().split('\n').filter(Boolean).map(line => {
+        const parts = line.split('\t')
+        const filePath = parts.slice(1).join('\t')
+        const n = counts.get(filePath)
+        return {
+          filePath,
+          status: (parts[0] || 'M').charAt(0),
+          additions: n?.additions ?? 0,
+          deletions: n?.deletions ?? 0,
+        }
+      }).filter(f => f.filePath)
     } catch { return null }
   }
 
@@ -288,8 +308,23 @@ export class GitHelper {
       const args = base ? ['diff', base] : ['diff']
       if (head) args.push(head)
       args.push('--', filePath)
-      const { stdout } = await this.execGit(args, { cwd: state.normalized, timeout: 15000 })
-      return stdout
+      try {
+        const { stdout } = await this.execGit(args, { cwd: state.normalized, timeout: 15000 })
+        return stdout
+      } catch {
+        // The first commit in a repo has no parent, so `<hash>^` is not a valid
+        // revision and the diff above fails outright — the graph's oldest commit
+        // opened a viewer saying "No diff content available". `git show` renders
+        // the same per-commit diff for that case, and is identical to
+        // `git diff <hash>^ <hash>` for every other commit.
+        if (head && base === `${head}^`) {
+          try {
+            const { stdout } = await this.execGit(['show', head, '--', filePath], { cwd: state.normalized, timeout: 15000 })
+            return stdout
+          } catch { return null }
+        }
+        return null
+      }
     } catch { return null }
   }
 

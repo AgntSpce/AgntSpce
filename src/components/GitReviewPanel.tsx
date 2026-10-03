@@ -93,6 +93,15 @@ export default function GitReviewPanel({
   const [branches, setBranches] = useState<BranchEntry[]>([])
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null)
   const [commitFiles, setCommitFiles] = useState<CommitFileEntry[] | null>(null)
+  // Distinguishes "still loading" from "the read failed": both leave
+  // commitFiles null, and collapsing them into one state means a commit that
+  // cannot be read renders as an empty dropdown with no explanation.
+  const [commitFilesLoading, setCommitFilesLoading] = useState(false)
+  // handleSelectCommit awaits a socket round-trip. Two commits clicked in quick
+  // succession resolve out of order, and the slower response would land last —
+  // showing commit A's files underneath commit B. This mirrors the selection so
+  // a stale response can tell it lost the race and drop itself.
+  const selectedCommitRef = useRef<string | null>(null)
   const [graphHeight, setGraphHeight] = useState(200)
   const graphRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
@@ -132,15 +141,34 @@ export default function GitReviewPanel({
   }
 
   async function handleSelectCommit(hash: string) {
-    if (selectedCommit === hash) {
+    if (selectedCommitRef.current === hash) {
+      selectedCommitRef.current = null
       setSelectedCommit(null)
       setCommitFiles(null)
+      setCommitFilesLoading(false)
       return
     }
+    selectedCommitRef.current = hash
     setSelectedCommit(hash)
+    // Clear the previous commit's rows first, so the expanding dropdown never
+    // shows one commit's files under another's heading while this one loads.
+    setCommitFiles(null)
+    setCommitFilesLoading(true)
     const files = await getGitCommitFiles(worktreePath, hash)
+    if (selectedCommitRef.current !== hash) return
     setCommitFiles(files)
+    setCommitFilesLoading(false)
   }
+
+  // Switching workspace replaces the log underneath the open dropdown. Without
+  // this the expanded commit keeps its rows, and reopening the same repo shows
+  // the previous repo's files.
+  useEffect(() => {
+    selectedCommitRef.current = null
+    setSelectedCommit(null)
+    setCommitFiles(null)
+    setCommitFilesLoading(false)
+  }, [worktreePath])
 
   function onGraphMouseDown(e: React.MouseEvent) {
     e.preventDefault()
@@ -347,9 +375,15 @@ export default function GitReviewPanel({
                       </div>
                     </div>
                   </div>
-                  {selectedCommit === commit.hash && commitFiles && (
+                  {selectedCommit === commit.hash && (
                     <div className="git-commit-files">
-                      {commitFiles.map(cf => (
+                      {commitFilesLoading ? (
+                        <div className="git-files-empty">Loading files…</div>
+                      ) : !commitFiles ? (
+                        <div className="git-files-empty">Could not read this commit's files</div>
+                      ) : commitFiles.length === 0 ? (
+                        <div className="git-files-empty">No files in this commit</div>
+                      ) : commitFiles.map(cf => (
                         <div
                           key={cf.filePath}
                           className="git-file-item"
