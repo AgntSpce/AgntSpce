@@ -132,7 +132,11 @@ export class GitHelper {
 
     try {
       const { stdout } = await this.execGit(['status', '--porcelain'], { cwd: state.normalized, timeout: 5000 })
-      const lines = stdout.trim().split('\n').filter(l => l.length > 0)
+      // Do NOT trim the whole output: a porcelain line starts with its two
+      // status columns, so trimming turns " M file" (unstaged modification)
+      // into "M file" and the first file parses with a chopped path and a
+      // flipped staged flag. Only drop the trailing newline/empty lines.
+      const lines = stdout.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.length > 0)
       return {
         clean: lines.length === 0,
         modified: lines.filter(l => l.startsWith(' M')).length,
@@ -265,7 +269,9 @@ export class GitHelper {
       addNumstat(unstagedResult.stdout)
       addNumstat(stagedResult.stdout)
 
-      const statusLines = statusResult.stdout.trim().split('\n').filter(Boolean)
+      // Same no-full-trim rule as getStatus: the leading status columns are
+      // significant, so only strip a trailing CR and drop empty lines.
+      const statusLines = statusResult.stdout.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.length > 0)
       const files: { filePath: string, status: string, additions: number, deletions: number }[] = []
       for (const line of statusLines) {
         const stagedStatus = line[0]
@@ -341,15 +347,27 @@ export class GitHelper {
 
     try {
       const [branchOut, statusOut, stagedOut, unstagedOut] = await Promise.all([
-        this.execGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: state.normalized, timeout: 5000 }),
+        // Tolerate unborn HEAD (fresh `git init` with no commits): rev-parse
+        // fails there, and failing the whole status leaves the review panel
+        // empty even though untracked files exist. Fall back to symbolic-ref.
+        this.execGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: state.normalized, timeout: 5000 }).catch(() => null),
         this.execGit(['status', '--porcelain'], { cwd: state.normalized, timeout: 5000 }),
         this.execGit(['diff', '--cached', '--numstat'], { cwd: state.normalized, timeout: 10000 }).catch(() => ({ stdout: '' })),
         this.execGit(['diff', '--numstat'], { cwd: state.normalized, timeout: 10000 }).catch(() => ({ stdout: '' })),
       ])
 
-      const branch = branchOut.stdout.trim() === 'HEAD'
-        ? `detached@${(await this.execGit(['rev-parse', '--short', 'HEAD'], { cwd: state.normalized })).stdout.trim()}`
-        : branchOut.stdout.trim()
+      let branch: string
+      const rawBranch = branchOut?.stdout.trim() || ''
+      if (!rawBranch) {
+        try {
+          const { stdout } = await this.execGit(['symbolic-ref', '--short', 'HEAD'], { cwd: state.normalized, timeout: 5000 })
+          branch = stdout.trim() || 'unknown'
+        } catch { branch = 'unknown' }
+      } else if (rawBranch === 'HEAD') {
+        branch = `detached@${(await this.execGit(['rev-parse', '--short', 'HEAD'], { cwd: state.normalized })).stdout.trim()}`
+      } else {
+        branch = rawBranch
+      }
 
       let ahead = 0, behind = 0
       try {
@@ -376,7 +394,9 @@ export class GitHelper {
       addNumstat(stagedOut.stdout)
       addNumstat(unstagedOut.stdout)
 
-      const statusLines = statusOut.stdout.trim().split('\n').filter(Boolean)
+      // Same no-full-trim rule as getStatus: the leading status columns are
+      // significant, so only strip a trailing CR and drop empty lines.
+      const statusLines = statusOut.stdout.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.length > 0)
       const files: FileStatus[] = []
       for (const line of statusLines) {
         const stagedStatus = line[0]
