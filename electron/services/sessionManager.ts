@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -641,7 +642,7 @@ export class SessionManager extends EventEmitter {
     session.deliveredBufferLength = session.buffer.totalBytes
   }
 
-  async createSession(sessionId: string, config: SessionConfig) {
+  async createSession(sessionId: string, config: SessionConfig, opts?: { acquireSignal?: AbortSignal }) {
     if (!pty) throw new Error('node-pty unavailable')
     const env: any = { ...process.env, TERM: 'xterm-color' }
 
@@ -805,7 +806,9 @@ export class SessionManager extends EventEmitter {
     let slotRelease: (() => void) | null = null
     if (isAgent && this.orchestrator) {
       try {
-        slotRelease = await this.orchestrator.acquireSlot()
+        // Resume passes an abort signal (fail-fast instead of hanging behind
+        // queued block reservations); fresh starts wait as before.
+        slotRelease = await this.orchestrator.acquireSlot(1, opts?.acquireSignal)
       } catch (err: any) {
         console.error('[sessionManager] slot acquire failed, skipping session:', sessionId, err?.message || err)
         return
@@ -1061,6 +1064,143 @@ export class SessionManager extends EventEmitter {
     })
   }
 
+  // Snapshot the live descendant tree of a root pid (direct pids, not just
+  // the process group). Daemonized children (setsid/double-fork, e.g. some
+  // MCP servers) leave the group but keep their pids — group signals alone
+  // can never reach them. Snapshot FIRST, before reparenting hides the
+  // relationships. Best-effort: on any failure returns just [rootPid].
+  private async snapshotProcessTree(rootPid: number): Promise<{ pid: number; comm: string }[]> {
+    try {
+      const execFileAsync = promisify(execFile)
+      const { stdout } = await execFileAsync('ps', ['-eo', 'pid=,ppid=,comm='], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
+      const children = new Map<number, number[]>()
+      const comm = new Map<number, string>()
+      for (const line of String(stdout || '').split('\n')) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+        if (!m) continue
+        const pid = Number(m[1])
+        const ppid = Number(m[2])
+        comm.set(pid, String(m[3]).slice(0, 64))
+        if (!children.has(ppid)) children.set(ppid, [])
+        children.get(ppid)!.push(pid)
+      }
+      const out: { pid: number; comm: string }[] = []
+      const seen = new Set<number>([rootPid])
+      const queue = [rootPid]
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        out.push({ pid: current, comm: comm.get(current) || '?' })
+        for (const child of children.get(current) || []) {
+          if (!seen.has(child)) {
+            seen.add(child)
+            queue.push(child)
+          }
+        }
+      }
+      return out
+    } catch {
+      return [{ pid: rootPid, comm: '?' }]
+    }
+  }
+
+  // Find every live process carrying this session's marker in its environment.
+  // AGNTSPCE_SESSION_ID is exported into every PTY's env (see createSession)
+  // and inherited by ALL descendants — including double-forked daemons that
+  // reparent to init at birth and are therefore invisible to BOTH process-group
+  // signals and parent-link tree walks. `ps -E` prints environments, so one
+  // scan catches the whole lineage no matter how it detached. Best-effort:
+  // on any failure returns []. Our own process is always excluded.
+  private async pidsWithSessionMarker(sessionId: string): Promise<{ pid: number; comm: string }[]> {
+    if (!sessionId) return []
+    try {
+      const execFileAsync = promisify(execFile)
+      const { stdout } = await execFileAsync('ps', ['-E', '-o', 'pid=,ppid=,comm='], { timeout: 8000, maxBuffer: 8 * 1024 * 1024 })
+      const escaped = sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const marker = new RegExp(`(?:^|\\s)AGNTSPCE_SESSION_ID=${escaped}(?:\\s|$)`)
+      const out: { pid: number; comm: string }[] = []
+      for (const line of String(stdout || '').split('\n')) {
+        const m = /^\s*(\d+)\s+\d+\s+(.+?)\s*$/.exec(line)
+        if (!m) continue
+        const pid = Number(m[1])
+        if (!pid || pid === process.pid) continue
+        if (marker.test(line)) out.push({ pid, comm: String(m[2]).split(/\s/)[0].slice(0, 64) })
+      }
+      return out
+    } catch {
+      return []
+    }
+  }
+
+  // Process-group kill escalation. pty.kill() (SIGHUP) is sent by the caller
+  // first; this finishes the job for the whole tree. CRITICAL: escalation is
+  // UNCONDITIONAL on group signals — the shell (group leader) usually dies
+  // instantly from SIGHUP while the agent CLI + MCP grandchildren orphan
+  // invisibly (reparented, still holding hundreds of MB). Gating on leader
+  // liveness, as before, returned early in exactly the orphan case and left
+  // claude trees alive while opencode (which exits on SIGHUP) died cleanly.
+  // Three complementary mechanisms (each alone misses cases):
+  // - group signals: fast, cover everything still in the pty child's group.
+  // - direct-PID sweep over a tree snapshot: reaches daemonized escapers that
+  //   left the group (setsid/double-fork). PIDs are signaled directly, so
+  //   group semantics don't matter; the snapshot is taken immediately while
+  //   parent links are still accurate.
+  // - session-marker sweep (AGNTSPCE_SESSION_ID in environ): reaches children
+  //   that double-forked at BIRTH and were never anyone's descendant — neither
+  //   group signals nor tree walks can see them; the inherited env marker can.
+  // All failures swallowed: ESRCH (everyone already dead) counts as success.
+  private killProcessTree(pid: number, sessionId?: string): void {
+    const alive = (target: number): boolean => {
+      try { process.kill(target, 0); return true } catch { return false }
+    }
+    const signalGroup = (sig: NodeJS.Signals): void => {
+      // Windows cannot signal process groups — taskkill /T kills the tree.
+      if (process.platform === 'win32') {
+        execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 10000 } as any, () => {})
+        return
+      }
+      try { process.kill(-pid, sig) } catch {
+        try { process.kill(pid, sig) } catch {}
+      }
+    }
+    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+    // Immediate: group SIGTERM while the pid is certainly ours (just captured
+    // from the live pty) — catches grandchildren before reparenting.
+    signalGroup('SIGTERM')
+    void (async () => {
+      // Snapshot early: parent links go stale once processes start dying.
+      // Union tree members with env-marker matches (double-forked at birth).
+      const tree = process.platform === 'win32' ? [{ pid, comm: '?' }] : await this.snapshotProcessTree(pid)
+      const marked = process.platform === 'win32' || !sessionId ? [] : await this.pidsWithSessionMarker(sessionId)
+      const byPid = new Map<string, string>()
+      for (const m of [...tree, ...marked]) {
+        if (!byPid.has(String(m.pid))) byPid.set(String(m.pid), m.comm)
+      }
+      // Never signal ourselves or pid 1, no matter what a stale snapshot says.
+      byPid.delete(String(process.pid))
+      byPid.delete('1')
+      const members = [...byPid.keys()].map(Number)
+      await delay(2000)
+      // Direct SIGTERM to every known member: reaches setsid escapers the
+      // group signal missed. Then group SIGKILL for anything still grouped.
+      for (const member of members) {
+        try { process.kill(member, 'SIGTERM') } catch {}
+      }
+      signalGroup('SIGKILL')
+      await delay(2000)
+      // Direct SIGKILL sweep over survivors, then report what (if anything)
+      // withstood everything — evidence for whether deeper measures are needed.
+      for (const member of members) {
+        if (!alive(member)) continue
+        try { process.kill(member, 'SIGKILL') } catch {}
+      }
+      await delay(2000)
+      const survivors = members.filter(m => alive(m))
+      if (survivors.length > 0) {
+        console.warn(`[kill] WARNING: ${survivors.length} process(es) survived SIGKILL: ${survivors.map(s => `${s}(${byPid.get(String(s)) || '?'})`).join(', ')} — root pid=${pid}`)
+      }
+    })()
+  }
+
   closeSession(sessionId: string): boolean {
     const session = this.sessions.get(sessionId)
     if (!session) return false
@@ -1085,9 +1225,20 @@ export class SessionManager extends EventEmitter {
       clearInterval(session.processMonitor!)
       const pty = session.pty
       session.pty = null
+      // Capture the child pid BEFORE killing: needed for escalation below.
+      let childPid: number | undefined
+      try { childPid = (pty as unknown as { pid?: unknown })?.pid as number | undefined } catch { childPid = undefined }
       if (pty) {
         try { pty.kill() } catch { }
       }
+      // Kill escalation (Orca forceKill / Superset 2s→SIGKILL pattern):
+      // pty.kill() sends SIGHUP to the shell, which agent CLIs and their MCP
+      // children can survive — leaving orphans that hold hundreds of MB each
+      // with no session tracking them. Escalate at the process-GROUP level
+      // plus a direct-PID sweep over the tree snapshot and the session's env
+      // marker (catches daemonized escapers). All best-effort; ESRCH
+      // (already dead) counts as success.
+      if (typeof childPid === 'number' && childPid > 0) this.killProcessTree(childPid, sessionId)
     } catch { }
     this.outputFilter.finalizeCommand(sessionId)
     this.outputFilter.cleanup(sessionId)
@@ -1106,7 +1257,7 @@ export class SessionManager extends EventEmitter {
     return true
   }
 
-  async createRawSession(type: string, workspacePath?: string, existingSessionId?: string, taskGroupId?: string | null, subtaskId?: string | null): Promise<{ sessionId: string } | null> {
+  async createRawSession(type: string, workspacePath?: string, existingSessionId?: string, taskGroupId?: string | null, subtaskId?: string | null, opts?: { acquireSignal?: AbortSignal }): Promise<{ sessionId: string } | null> {
     const sessionId = existingSessionId || `raw-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     const cwd = workspacePath || this.workspace?.repository?.path || process.env.HOME || os.homedir() || '/tmp'
     const args = type === 'shell'
@@ -1124,10 +1275,14 @@ export class SessionManager extends EventEmitter {
         repositoryType: '',
         taskGroupId: taskGroupId || null,
         subtaskId: subtaskId || null,
-      })
+      }, opts)
       const session = this.sessions.get(sessionId)
-      if (!session) {
-        console.error('createRawSession: session not registered (slot denied):', type, sessionId)
+      // A live PTY is required: for resumes the map may still hold the stale
+      // restorable record (no PTY) when creation was skipped (slot denied) —
+      // proceeding would silently write the launch command nowhere and strand
+      // the session unrestorable. Fail loudly instead.
+      if (!session || !session.pty) {
+        console.error('createRawSession: session not registered or has no PTY (slot denied):', type, sessionId)
         return null
       }
       if (session && (AGENT_TYPES as readonly string[]).includes(type)) {
@@ -1422,12 +1577,30 @@ export class SessionManager extends EventEmitter {
     const taskGroupId = session.config.taskGroupId || null
     const subtaskId = session.config.subtaskId || null
 
-    const result = await this.createRawSession(savedType, savedCwd, sessionId, taskGroupId, subtaskId)
-    if (!result) return false
+    // Fail fast instead of hanging: slot acquisition waits indefinitely, and
+    // a resume queued behind block reservations would hang the handler with
+    // no error. Abort after the timeout — the record stays restorable, so a
+    // retry (after freeing a slot) works. Fresh starts keep waiting as before.
+    const RESUME_SLOT_TIMEOUT_MS = 15_000
+    const slotAbort = new AbortController()
+    const slotTimer = setTimeout(() => slotAbort.abort(), RESUME_SLOT_TIMEOUT_MS)
+    let result: { sessionId: string } | null = null
+    try {
+      result = await this.createRawSession(savedType, savedCwd, sessionId, taskGroupId, subtaskId, { acquireSignal: slotAbort.signal })
+    } catch (e: any) {
+      console.error(`resumeSession: session creation failed: ${sessionId} agent=${resumeConfig?.agentId} mode=${resumeConfig?.mode}`, e?.message || e)
+    } finally {
+      clearTimeout(slotTimer)
+    }
+    if (!result) {
+      if (slotAbort.signal.aborted) {
+        console.error(`resumeSession: timed out waiting for a concurrency slot (> ${RESUME_SLOT_TIMEOUT_MS}ms): ${sessionId} — close another agent and retry`)
+      }
+      return false
+    }
 
     const resumed = this.sessions.get(sessionId)
     if (!resumed) return false
-    resumed.restorable = false
     const restoredSubtaskId = this.restoreTaskSessionLink({
       id: sessionId,
       type: savedType,
@@ -1441,9 +1614,31 @@ export class SessionManager extends EventEmitter {
       try {
         this.startAgentWithConfig(sessionId, resumeConfig)
       } catch (e: any) {
-        console.error('resumeSession: agent start failed:', sessionId, e?.message || e)
+        console.error(`resumeSession: agent start failed: ${sessionId} agent=${resumeConfig.agentId} mode=${resumeConfig.mode} hasResumeId=${!!(resumeConfig.resumeId || resumeConfig.nativeSessionId)}`, e?.message || e)
+        // Roll back to a retryable restorable record instead of stranding the
+        // session (previous code cleared restorable BEFORE starting, so any
+        // throw left a dead pane with no PTY and no Resume button). Kill the
+        // fresh shell from the failed attempt, restore the saved agent config
+        // (the replacement record doesn't carry it), and stay restorable.
+        this.clearResumeFailureProbe(sessionId)
+        try {
+          const cur = this.sessions.get(sessionId)
+          const freshPty = cur?.pty
+          if (cur) {
+            cur.pty = null
+            cur.restorable = true
+            cur.status = 'idle'
+            cur.statusChangedAt = Date.now()
+            if (savedAgentConfig) cur.agentStartConfig = savedAgentConfig
+          }
+          if (freshPty) {
+            try { freshPty.kill() } catch {}
+          }
+        } catch {}
+        return false
       }
     }
+    resumed.restorable = false
     await this.restoreSessionBuffer(sessionId)
     return true
   }

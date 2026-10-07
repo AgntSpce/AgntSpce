@@ -123,6 +123,8 @@ interface Props {
   applyingIntegration?: boolean
   /** Pull the integration branch into one task's worktree. */
   onUpdateTask?: (taskGroupId: string) => void
+  /** Resume every saved (restorable) agent of one task. */
+  onResumeTask?: (taskGroupId: string) => void
 
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
@@ -850,6 +852,7 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   onApplyIntegration,
   applyingIntegration,
   onUpdateTask,
+  onResumeTask,
   onDeleteTask,
   onOpenTaskDetails,
 }: {
@@ -924,6 +927,8 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
   applyingIntegration?: boolean
   /** Pull the integration branch into one task's worktree. */
   onUpdateTask?: (taskGroupId: string) => void
+  /** Resume every saved (restorable) agent of one task. */
+  onResumeTask?: (taskGroupId: string) => void
 
   /** Delete a task group (closes members, retires worktree). */
   onDeleteTask?: (taskGroupId: string) => void
@@ -1209,7 +1214,14 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                    // a dead agent shouldn't keep showing from its DB record.
                    return !!session && session.status !== 'exited' && (!session.taskGroupId || session.taskGroupId === t.id)
                  }
-                 const liveMembers = (t.members || []).filter(isLiveMember)
+                  const liveMembers = (t.members || []).filter(isLiveMember)
+                  // Saved (restorable) agents of this task — e.g. after an app
+                  // restart. The Resume-all button appears exactly when there is
+                  // something to resume; live sessions are excluded (resume is
+                  // a no-op for them) so the count matches the backend set.
+                  const restorableCount = Object.values(sessions).filter(s =>
+                    s.restorable && s.taskGroupId === t.id && AGENT_TYPE_SET.has(s.type)
+                  ).length
                  // Rows show only agents with a LIVE session. Closing a task
                  // agent resets its subtask to `pending` with a null sessionId
                  // (so it can be relaunched) — keeping such members would make a
@@ -1278,6 +1290,20 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                       {/* Icon only, label on hover. The text made each row
                           roughly 200px wider and pushed the task title out of
                           view on a narrow sidebar. */}
+                      {/* Resume-all sits left of Update and only while this task
+                          has saved agents (e.g. after an app restart). Same
+                          icon-only sizing as its neighbors; the play glyph
+                          matches the per-pane Resume Session button. */}
+                      {onResumeTask && restorableCount > 0 && (
+                        <button
+                          className="task-row-merge"
+                          aria-label="Resume all"
+                          onClick={(e) => { e.stopPropagation(); onResumeTask(t.id) }}
+                          title={`Resume all \u2014 restart ${restorableCount} saved agent${restorableCount === 1 ? '' : 's'} in ${t.title} with full context.`}
+                        >
+                          <i className="codicon codicon-play" />
+                        </button>
+                      )}
                       {onMergeTask && onUpdateTask && canUpdateTask(t) && (
                         <button
                           className="task-row-merge"
@@ -1451,7 +1477,7 @@ export default memo(function WorkspaceSidebar({
   activeSessionId, onSelectSession,
   onCreateTask, onFetchMembers, onTerminalOutput, onSessionResumed, onAgentStatus, getTokenUsage, promptHistory,
   onRenameTask, onSetTaskPinned, onMergeTask, onMergeAllTasks, onDeleteTask, onOpenTaskDetails,
-  onApplyIntegration, applyingIntegration, onUpdateTask,
+  onApplyIntegration, applyingIntegration, onUpdateTask, onResumeTask,
 }: Props) {
   // File Explorer panel keeps the legacy file-tree UI. The Workspace panel
   // is now the Orca-style workspace + agents list (no file explorer).
@@ -1492,6 +1518,7 @@ export default memo(function WorkspaceSidebar({
         onApplyIntegration={onApplyIntegration}
         applyingIntegration={applyingIntegration}
         onUpdateTask={onUpdateTask}
+        onResumeTask={onResumeTask}
         onDeleteTask={onDeleteTask}
         onOpenTaskDetails={onOpenTaskDetails}
       />

@@ -159,7 +159,7 @@ function App() {
   const {
     sessions, workspaces, activeWorkspace: _globalActiveWorkspace,
     onTerminalOutput, onSessionResumed, onAgentStatus, sendTerminalInput, sendTerminalResize,
-    restartSession, resumeSession, switchWorkspace, createWorkspace,
+    restartSession, resumeSession, resumeTaskSessions, switchWorkspace, createWorkspace,
     deleteWorkspace, listDeletedWorkspaces, restoreWorkspace, permanentDeleteWorkspace,
     closeTab, startAgent, fetchAgentConfigs, fetchInstalledAgents, createRawSession, createAgentSession,
     createWorkspaceFromGit,
@@ -665,8 +665,15 @@ function App() {
     return applyIntegrationNow()
   }, [applyIntegrationNow, taskGroups, confirmWithAgents, listTaskGroups, activeWorkspace?.id])
 
-  const handleUpdateTask = useCallback(async (taskGroupId: string) => {
-    const run = async (opts?: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }) => {
+  // Resume-all: restart every saved (restorable) agent of one task with full
+  // provider-side context. Used after an app restart, when task agents come
+  // back as restorable records. The backend resumes sequentially (never a
+  // spawn burst) and no-ops on sessions that are already live.
+  const handleResumeTask = useCallback((taskGroupId: string) => {
+    resumeTaskSessions(taskGroupId)
+  }, [resumeTaskSessions])
+
+  const handleUpdateTask = useCallback(async (taskGroupId: string) => {    const run = async (opts?: { preferSide?: 'task' | 'integration'; autoResolve?: boolean }) => {
       const res = await syncTaskBranch(taskGroupId, opts)
       if (res && res.ok === false) {
         // A conflict used to come back as a wall of text and nothing else, so
@@ -2387,6 +2394,7 @@ function App() {
               onApplyIntegration={handleApplyIntegration}
               applyingIntegration={applyingIntegration}
               onUpdateTask={handleUpdateTask}
+              onResumeTask={handleResumeTask}
               onDeleteTask={handleDeleteTask}
               onOpenTaskDetails={setSelectedTaskId}
             />

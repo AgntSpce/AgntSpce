@@ -1,6 +1,7 @@
 import type { Socket } from 'socket.io'
 import type { ServerContext } from '../context'
 import { linkSessionToGroup } from '../../services/orchestration/groupSync'
+import { AGENT_TYPES } from '../../services/types'
 
 export function registerSessionHandlers(ctx: ServerContext, socket: Socket): void {
   socket.on('terminal-input', ({ sessionId, data, input }) => {
@@ -103,6 +104,44 @@ export function registerSessionHandlers(ctx: ServerContext, socket: Socket): voi
       }
     } catch (error: any) {
       socket.emit('error', { message: 'Failed to resume session', error: error.message })
+    }
+  })
+
+  socket.on('resume-task-sessions', async ({ taskGroupId }) => {
+    try {
+      const gid = String(taskGroupId || '')
+      if (!gid) {
+        socket.emit('error', { message: 'Failed to resume task sessions - missing task id' })
+        return
+      }
+      // Restorable agent sessions of this task only, capped like the renderer's
+      // agent list. Sequential (never parallel): PTY spawns are heavy and each
+      // resume needs a concurrency slot — a burst would stampede slots and
+      // socket backpressure (same reason Superset caps concurrent spawns at 3).
+      const states = ctx.sessionManager.getSessionStates()
+      const agentSet = new Set<string>(AGENT_TYPES as readonly string[])
+      const ids = Object.values(states)
+        .filter((s: any) => s?.restorable && s?.taskGroupId === gid && agentSet.has(String(s?.type || '')))
+        .map((s: any) => String(s.id))
+        .slice(0, 12)
+      const resumed: string[] = []
+      for (const id of ids) {
+        try {
+          if (await ctx.sessionManager.resumeSession(id)) {
+            resumed.push(id)
+            ctx.io.emit('session-resumed', { sessionId: id, sessions: ctx.sessionManager.getSessionStates() })
+            // Small stagger so shells boot before the next spawn starts.
+            await new Promise(resolve => setTimeout(resolve, 300))
+          }
+        } catch {}
+      }
+      ctx.io.emit('sessions', ctx.sessionManager.getSessionStates())
+      await ctx.autoSaveSessions()
+      if (resumed.length === 0 && ids.length > 0) {
+        socket.emit('error', { message: 'Failed to resume task sessions - see main-process log' })
+      }
+    } catch (error: any) {
+      socket.emit('error', { message: 'Failed to resume task sessions', error: error.message })
     }
   })
 

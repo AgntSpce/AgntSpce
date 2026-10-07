@@ -66,6 +66,7 @@ interface UseSocketReturn {
   sendTerminalResize: (sessionId: string, cols: number, rows: number) => void
   restartSession: (sessionId: string) => void
   resumeSession: (sessionId: string) => void
+  resumeTaskSessions: (taskGroupId: string) => void
   switchWorkspace: (workspaceId: string) => void
   createWorkspace: (data: any) => Promise<any>
   deleteWorkspace: (workspaceId: string) => void
@@ -642,6 +643,10 @@ socket.emit('get-cumulative-stats', {})
     socketRef.current?.emit('resume-session', { sessionId })
   }, [])
 
+  const resumeTaskSessions = useCallback((taskGroupId: string) => {
+    socketRef.current?.emit('resume-task-sessions', { taskGroupId })
+  }, [])
+
   const switchWorkspace = useCallback((workspaceId: string) => {
     socketRef.current?.emit('switch-workspace', { workspaceId })
   }, [])
@@ -1179,6 +1184,7 @@ socket.emit('get-cumulative-stats', {})
     sendTerminalResize,
     restartSession,
     resumeSession,
+    resumeTaskSessions,
     switchWorkspace,
     createWorkspace,
     deleteWorkspace,
