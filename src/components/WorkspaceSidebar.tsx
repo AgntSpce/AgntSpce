@@ -274,42 +274,12 @@ function useAgentHookStatus(
   return statusRef
 }
 
-// The row's second line is a STATE WORD, never agent text.
-//
-// This deliberately does not render the agent's reply. Every attempt to pull
-// that text out of a terminal — scraped or structured — eventually shows
-// something that is not the agent's answer: TUI chrome, a half-drawn frame, or
-// (the original bug) text from earlier in the conversation once the user
-// scrolled back. A state word cannot go wrong that way, and it is what the row
-// is actually for: "is this agent busy, and did it finish?"
-//
-// Sources are consulted in order of trustworthiness. Hooks (structured, from
-// the agent itself) win; agents we can't instrument fall back to the
-// stream-derived working/completed flags, which drive the spinner and the check
-// mark and are known to work.
-function agentStatusWord(opts: {
-  hookState: AgentStatusEntry['state'] | undefined
-  isWorking: boolean
-  hasCompletedRun: boolean
-  needsAttention: boolean
-}): string {
-  const { hookState, isWorking, hasCompletedRun, needsAttention } = opts
-  if (hookState === 'working') return 'Thinking…'
-  if (hookState === 'permission') return 'Waiting for input…'
-  if (hookState === 'done') return 'Done'
-  // 'idle' from a hook just means "nothing has happened yet" — let the
-  // stream-derived flags speak rather than blanking the row.
-  if (hookState === 'idle') {
-    if (needsAttention) return 'Waiting for input…'
-    if (isWorking) return 'Thinking…'
-    if (hasCompletedRun) return 'Done'
-    return ''
-  }
-  if (needsAttention) return 'Waiting for input…'
-  if (isWorking) return 'Thinking…'
-  if (hasCompletedRun) return 'Done'
-  return ''
-}
+// The row's second line shows the agent's model + thinking/effort settings
+// (see TaskAgentRow). It deliberately never renders agent reply text: every
+// attempt to pull that text out of a terminal — scraped or structured —
+// eventually shows something that is not the agent's answer: TUI chrome, a
+// half-drawn frame, or (the original bug) text from earlier in the
+// conversation once the user scrolled back.
 
 // ── Agent live-output buffer (workspace panel) ──────────────────────────
 // One panel-level subscription to the existing `onTerminalOutput` fan-out keeps
@@ -1402,13 +1372,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                           ? hookState === 'permission'
                           : !!(m.sessionId && permissionFlags[m.sessionId])
                         const isWorking = hookState ? hookState === 'working' : streamWorking
-                        // A state word, not agent text — see agentStatusWord.
-                        const previewLine = agentStatusWord({
-                          hookState,
-                          isWorking,
-                          hasCompletedRun,
-                          needsAttention,
-                        })
                         return (
                           <TaskAgentRow
                             key={rowKey}
@@ -1418,7 +1381,6 @@ const WorkspaceAgentsPanel = memo(function WorkspaceAgentsPanel({
                             hasCompletedRun={hasCompletedRun}
                             needsAttention={needsAttention}
                             active={!!(activeSessionId && m.sessionId === activeSessionId)}
-                            previewLine={previewLine}
                             lastPrompt={m.sessionId ? lastPromptBySession[m.sessionId] || '' : ''}
                             lastLineTs={hookEntry?.updatedAt || buf?.ts || 0}
                             isInOpenTask={openTaskId === t.id}

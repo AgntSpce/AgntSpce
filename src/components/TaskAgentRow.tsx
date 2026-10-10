@@ -10,6 +10,8 @@ export interface TaskMember {
   status: string // 'pending' | 'running' | 'done' | 'failed'
   title: string
   model: string | null
+  reasoning: string | null
+  verbosity: string | null
   assignmentPrompt: string
   subtaskId: string
   lastEventAt: number | null
@@ -67,9 +69,6 @@ interface TaskAgentRowProps {
    *  (never from typing echo) — drives the "working" spinner. */
   isWorking: boolean
   active: boolean
-  /** One-line latest thinking/output (already ANSI-cleaned + chrome-filtered).
-   *  This is the "answer" line shown under the prompt. */
-  previewLine: string
   /** The last message the user submitted to this agent (slash-commands
    *  excluded) — the "question" line. Empty when nothing has been asked yet. */
   lastPrompt: string
@@ -103,7 +102,6 @@ function TaskAgentRow({
   sessionStatus,
   isWorking,
   active,
-  previewLine,
   lastPrompt,
   lastLineTs,
   hasCompletedRun,
@@ -163,7 +161,14 @@ function TaskAgentRow({
 
   const isPending = !member.sessionId
   const displayName = member.title || member.agentId
-  const preview = previewLine || (isPending ? 'pending…' : 'No output yet')
+  // Row identity line: model + thinking/effort settings — no status words.
+  // Missing pieces are skipped; agents without any stored config read 'Default'.
+  const configBits: string[] = []
+  const modelName = member.model && member.model !== 'default' ? member.model : null
+  if (modelName) configBits.push(modelName)
+  if (member.reasoning) configBits.push(`Reasoning: ${member.reasoning}`)
+  if (member.verbosity) configBits.push(`Verbosity: ${member.verbosity}`)
+  const configLine = configBits.length > 0 ? configBits.join(' · ') : 'Default setup'
   const ts = lastLineTs || member.lastEventAt || 0
   const modelLabel = member.model || 'default'
 
@@ -181,7 +186,7 @@ function TaskAgentRow({
           if (member.sessionId) onSelectSession?.(member.sessionId)
           onToggleDetails()
         }}
-        title={member.sessionId ? `${member.agentId} · ${member.status} — click to focus + details` : `${member.agentId} · ${member.status}`}
+        title={member.sessionId ? `${displayName} · ${modelLabel} — click to focus + details` : displayName}
       >
         <span className="orca-agent-dot">{glyph}</span>
         <AgentLogo agentId={member.agentId} size={16} />
@@ -192,9 +197,8 @@ function TaskAgentRow({
               name when nothing has been asked yet. */}
           <span className={`orca-agent-primary${active ? '-focused' : ''}`} title={lastPrompt || displayName}>
             {lastPrompt || displayName}
-            <span className="orca-agent-model"> · {modelLabel}</span>
           </span>
-          <span className="orca-agent-secondary">{preview}</span>
+          <span className="orca-agent-secondary" title={configLine}>{isPending ? 'pending…' : configLine}</span>
         </div>
         <div className="orca-agent-meta">
           <span className="orca-agent-time">{timeAgo(ts)}</span>
@@ -209,8 +213,12 @@ function TaskAgentRow({
             <span className="orca-agent-details-model">{modelLabel}</span>
           </div>
           <div className="orca-agent-detail-row">
-            <span>Status</span>
-            <span className="val">{member.status}{sessionStatus ? ` · ${sessionStatus}` : ''}</span>
+            <span>Reasoning</span>
+            <span className="val">{member.reasoning || '—'}</span>
+          </div>
+          <div className="orca-agent-detail-row">
+            <span>Verbosity</span>
+            <span className="val">{member.verbosity || '—'}</span>
           </div>
           <div className="orca-agent-detail-row">
             <span>Input</span>

@@ -1173,6 +1173,8 @@ function App() {
         status: s.status as string,
         title: s.title as string,
         model: (s.model as string | null) ?? null,
+        reasoning: (s.reasoning as string | null) ?? null,
+        verbosity: (s.verbosity as string | null) ?? null,
         assignmentPrompt: (s.assignmentPrompt as string) || '',
         subtaskId: (s.id as string) || '',
         lastEventAt: (s.lastEventAt as number | null) ?? null,
