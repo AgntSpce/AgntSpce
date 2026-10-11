@@ -268,6 +268,7 @@ export class SessionManager extends EventEmitter {
   private resumeFailureProbes = new Map<string, { output: string; timer: ReturnType<typeof setTimeout> | null }>()
   private claudeShellFallbacks = new Map<string, { marker: string; fallbackScheduled: boolean }>()
   private sessionStateSaveQueue: Promise<void> = Promise.resolve()
+  private orphanReaperInterval: NodeJS.Timeout | null = null
 
   constructor(io: any, agentManager?: any, dataDir?: string) {
     super()
@@ -318,6 +319,9 @@ export class SessionManager extends EventEmitter {
           this.setSessionCompressionMode(sessionId, mode)
         })
       })
+    // Reap stragglers the close-time kill missed (daemonized grandchildren).
+    // Unref'd 5-minute sweep; live sessions are never matched (see method).
+    this.startOrphanReaper()
   }
 
   setAgentManager(am: any) { this.agentManager = am }
@@ -1148,6 +1152,63 @@ export class SessionManager extends EventEmitter {
   //   that double-forked at BIRTH and were never anyone's descendant — neither
   //   group signals nor tree walks can see them; the inherited env marker can.
   // All failures swallowed: ESRCH (everyone already dead) counts as success.
+  // Periodic orphan reaper (Superset reaper.ts pattern: 5min sweep). The
+  // close-time kill is best-effort by nature (a SIGKILL can land mid-fork,
+  // leaving a half-reparented child) — this pass catches whatever the
+  // close-time escalation missed. ONLY processes whose session marker belongs
+  // to a session closed in THIS run (and long enough ago that escalation
+  // finished) are touched; live sessions are never matched, and orphans from
+  // previous app runs are deliberately left alone (their ids are unknown here,
+  // and a concurrent second app instance could own them — reaping those
+  // would kill another window's live agents).
+  private startOrphanReaper(): void {
+    if (this.orphanReaperInterval || process.platform === 'win32') return
+    this.orphanReaperInterval = setInterval(() => {
+      void this.reapOrphanProcesses().catch(() => {})
+    }, 5 * 60 * 1000)
+    this.orphanReaperInterval.unref?.()
+  }
+
+  private async reapOrphanProcesses(): Promise<void> {
+    try {
+      const live = new Set(this.sessions.keys())
+      const cutoff = Date.now() - 120_000
+      const dead = new Set(
+        this.sessionHistory
+          .filter(h => h.closedAt && h.closedAt < cutoff && !live.has(h.id))
+          .map(h => h.id)
+      )
+      if (dead.size === 0) return
+      const execFileAsync = promisify(execFile)
+      const { stdout } = await execFileAsync('ps', ['-E', '-o', 'pid=,ppid=,comm='], { timeout: 8000, maxBuffer: 8 * 1024 * 1024 })
+      const targets: { pid: number; comm: string; sid: string }[] = []
+      for (const line of String(stdout || '').split('\n')) {
+        const m = /^\s*(\d+)\s+\d+\s+(.+?)\s*$/.exec(line)
+        if (!m) continue
+        const pid = Number(m[1])
+        if (!pid || pid === process.pid || pid === 1) continue
+        const marker = /AGNTSPCE_SESSION_ID=([A-Za-z0-9_-]+)/.exec(line)
+        if (!marker) continue
+        if (!dead.has(marker[1])) continue
+        targets.push({ pid, comm: String(m[2]).split(/\s/)[0].slice(0, 64), sid: marker[1] })
+      }
+      if (targets.length === 0) return
+      for (const t of targets) {
+        try { process.kill(t.pid, 'SIGTERM') } catch {}
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      let killed = 0
+      for (const t of targets) {
+        try { process.kill(t.pid, 0) } catch { continue }
+        try { process.kill(t.pid, 'SIGKILL') } catch {}
+        killed++
+      }
+      if (killed > 0) {
+        console.log(`[reaper] reaped ${killed} orphan process(es) from closed sessions: ${targets.map(t => `${t.pid}(${t.comm})`).join(', ')}`)
+      }
+    } catch {}
+  }
+
   private killProcessTree(pid: number, sessionId?: string): void {
     const alive = (target: number): boolean => {
       try { process.kill(target, 0); return true } catch { return false }
